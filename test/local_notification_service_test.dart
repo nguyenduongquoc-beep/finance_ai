@@ -73,6 +73,7 @@ void main() {
         isActive: true,
         createdAt: DateTime(2026, 9, 1),
         reminderDaysBefore: 3,
+        postingMode: RecurringTransactionSchedule.postingModeAuto,
       );
 
       final items = LocalNotificationService.calculateScheduledNotifications(

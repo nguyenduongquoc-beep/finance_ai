@@ -202,6 +202,7 @@ class LocalNotificationService {
     final String isTypeLabel = schedule.type == 'income' ? 'Thu nhập' : 'Chi tiêu';
     final String walletText = walletName ?? 'Ví';
     final String formattedAmount = AppFormatters.number(schedule.amount);
+    final bool isManual = schedule.postingMode == RecurringTransactionSchedule.postingModeManual;
 
     for (final date in occurrences) {
       final occurrenceKey = RecurringTransactionService.getOccurrenceKey(date);
@@ -225,9 +226,10 @@ class LocalNotificationService {
             notificationId: advanceId,
             scheduleId: schedule.scheduleId,
             scheduledTime: advanceDate,
-            title: 'Sắp đến hạn: $displayName',
-            body:
-                '$isTypeLabel: ${formattedAmount}đ • Ví: $walletText • Còn ${schedule.reminderDaysBefore} ngày',
+            title: isManual ? 'Sắp đến hạn cần xác nhận: $displayName' : 'Sắp đến hạn: $displayName',
+            body: isManual
+                ? '$isTypeLabel: $formattedAmountđ • Ví: $walletText • Còn ${schedule.reminderDaysBefore} ngày (Cần xác nhận)'
+                : '$isTypeLabel: $formattedAmountđ • Ví: $walletText • Còn ${schedule.reminderDaysBefore} ngày',
             payload: payload,
             isOnDueDate: false,
           ));
@@ -251,8 +253,10 @@ class LocalNotificationService {
           notificationId: dueId,
           scheduleId: schedule.scheduleId,
           scheduledTime: dueDateNotificationTime,
-          title: 'Hôm nay đến hạn: $displayName',
-          body: '$isTypeLabel: ${formattedAmount}đ • Ví: $walletText',
+          title: isManual ? 'Hôm nay cần xác nhận: $displayName' : 'Hôm nay đến hạn: $displayName',
+          body: isManual
+              ? '$isTypeLabel: $formattedAmountđ • Ví: $walletText • Chờ bạn xác nhận'
+              : '$isTypeLabel: $formattedAmountđ • Ví: $walletText',
           payload: payload,
           isOnDueDate: true,
         ));

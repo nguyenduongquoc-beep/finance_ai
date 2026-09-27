@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import '../../models/recurring_transaction_model.dart';
+import '../../models/recurring_transaction_occurrence_model.dart';
 import '../../models/wallet_model.dart';
 import '../../models/category_model.dart';
 import '../../services/firestore_service.dart';
@@ -35,6 +36,9 @@ class _RecurringTransactionScreenState
 
   bool _isProcessingDue = false;
   int _selectedUpcomingDays = 30; // 7, 14, 30 ngày
+  /// Tracks scheduleIds currently processing an action (confirm/skip/defer)
+  /// to prevent double-tap while an async operation is in flight.
+  final Set<String> _actionInProgressIds = {};
 
   @override
   void initState() {
@@ -45,7 +49,7 @@ class _RecurringTransactionScreenState
     });
   }
 
-  /// Xử lý các kỳ đến hạn bằng Firestore transaction atomic & idempotent
+  /// Xử lý các kỳ đến hạn bằng Firestore transaction atomic & idempotent (chỉ tự động post các lịch autoPost)
   Future<void> _processDueTransactions({bool showFeedback = true}) async {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
     if (uid.isEmpty) return;
@@ -173,28 +177,40 @@ class _RecurringTransactionScreenState
 
               final schedules = scheduleSnap.data ?? [];
 
-              return StreamBuilder<List<Wallet>>(
-                stream: _firestoreService.streamWallets(uid),
-                builder: (context, walletSnap) {
-                  final wallets = walletSnap.data ?? [];
+              return StreamBuilder<List<RecurringTransactionOccurrence>>(
+                stream: _firestoreService.streamRecurringOccurrences(uid),
+                builder: (context, occurrenceSnap) {
+                  final occurrences = occurrenceSnap.data ?? [];
 
-                  return StreamBuilder<List<Category>>(
-                    stream: _firestoreService.streamCategories(uid),
-                    builder: (context, categorySnap) {
-                      final categories = categorySnap.data ?? [];
+                  return StreamBuilder<List<Wallet>>(
+                    stream: _firestoreService.streamWallets(uid),
+                    builder: (context, walletSnap) {
+                      final wallets = walletSnap.data ?? [];
 
-                      return ListView(
-                        padding: const EdgeInsets.all(16),
-                        children: [
-                          // Section 1: Lịch hóa đơn sắp tới
-                          _buildUpcomingSection(schedules, wallets, categories),
-                          const SizedBox(height: 20),
+                      return StreamBuilder<List<Category>>(
+                        stream: _firestoreService.streamCategories(uid),
+                        builder: (context, categorySnap) {
+                          final categories = categorySnap.data ?? [];
 
-                          // Section 2: Danh sách lịch định kỳ
-                          _buildScheduleListSection(
-                              schedules, wallets, categories),
-                          const SizedBox(height: 80), // Padding cho FAB
-                        ],
+                          return ListView(
+                            padding: const EdgeInsets.all(16),
+                            children: [
+                              // Section 0: Cần xác nhận hôm nay (Ưu tiên)
+                              _buildNeedsConfirmationSection(
+                                  schedules, occurrences, wallets, categories),
+
+                              // Section 1: Lịch hóa đơn sắp tới
+                              _buildUpcomingSection(
+                                  schedules, wallets, categories),
+                              const SizedBox(height: 20),
+
+                              // Section 2: Danh sách lịch định kỳ
+                              _buildScheduleListSection(
+                                  schedules, wallets, categories),
+                              const SizedBox(height: 80), // Padding cho FAB
+                            ],
+                          );
+                        },
                       );
                     },
                   );
@@ -214,7 +230,465 @@ class _RecurringTransactionScreenState
   }
 
   // ============================================================
-  // 1. UPTOMING BILLS SECTION
+  // 0. NEEDS CONFIRMATION SECTION (KHU VỰC ƯU TIÊN)
+  // ============================================================
+  Widget _buildNeedsConfirmationSection(
+    List<RecurringTransactionSchedule> schedules,
+    List<RecurringTransactionOccurrence> occurrences,
+    List<Wallet> wallets,
+    List<Category> categories,
+  ) {
+    final now = DateTime.now();
+
+    final manualSchedules = schedules.where((s) {
+      if (!s.isActive) return false;
+      if (s.postingMode != RecurringTransactionSchedule.postingModeManual) {
+        return false;
+      }
+      if (s.nextDueDate.isAfter(now)) return false;
+
+      final key = RecurringTransactionService.getOccurrenceKey(s.nextDueDate);
+      final isProcessed = occurrences.any(
+        (o) => o.scheduleId == s.scheduleId && o.occurrenceKey == key,
+      );
+      return !isProcessed;
+    }).toList();
+
+    if (manualSchedules.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 20),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.card,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppColors.primary.withOpacity(0.3), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primary.withOpacity(0.08),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withOpacity(0.15),
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(Icons.assignment_late_rounded,
+                    color: AppColors.primary, size: 20),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Cần xác nhận hôm nay',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.textPrimary,
+                  ),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  '${manualSchedules.length} khoản',
+                  style: const TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.primary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          const Divider(height: 1),
+          const SizedBox(height: 12),
+          ...manualSchedules.map((schedule) {
+            final isIncome = schedule.type == 'income';
+            final color = isIncome ? AppColors.income : AppColors.expense;
+            final wallet = wallets.firstWhere(
+              (w) => w.walletId == schedule.walletId,
+              orElse: () => Wallet(
+                walletId: '',
+                userId: '',
+                walletName: 'Ví',
+                balance: 0,
+                type: 'cash',
+                createdAt: DateTime.now(),
+              ),
+            );
+
+            final displayName = schedule.note != null && schedule.note!.isNotEmpty
+                ? schedule.note!
+                : (isIncome ? 'Thu nhập định kỳ' : 'Hóa đơn định kỳ');
+
+            return Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.05),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: color.withOpacity(0.2)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: color.withOpacity(0.12),
+                          shape: BoxShape.circle,
+                        ),
+                        child: Icon(
+                          isIncome
+                              ? Icons.arrow_downward_rounded
+                              : Icons.arrow_upward_rounded,
+                          color: color,
+                          size: 18,
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              displayName,
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                            Text(
+                              'Ví: ${wallet.walletName} • Đã đến hạn (${DateFormat('dd/MM/yyyy').format(schedule.nextDueDate)})',
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: AppColors.textSecondary,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Text(
+                        '${isIncome ? '+' : '-'}${AppFormatters.number(schedule.amount)}đ',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                          color: color,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  const Divider(height: 1),
+                  const SizedBox(height: 10),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      FilledButton.icon(
+                        key: ValueKey('btn_confirm_${schedule.scheduleId}'),
+                        onPressed: _actionInProgressIds.contains(schedule.scheduleId)
+                            ? null
+                            : () => _showConfirmOccurrenceDialog(
+                                schedule, schedule.nextDueDate, wallet.walletName),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: color,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 8),
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        icon: _actionInProgressIds.contains(schedule.scheduleId)
+                            ? const SizedBox(
+                                width: 14, height: 14,
+                                child: CircularProgressIndicator(
+                                    strokeWidth: 2, color: Colors.white))
+                            : const Icon(Icons.check_circle_outline, size: 16),
+                        label: Text(
+                          isIncome ? 'Xác nhận đã nhận' : 'Xác nhận thanh toán',
+                          style: const TextStyle(fontSize: 12),
+                        ),
+                      ),
+                      OutlinedButton.icon(
+                        key: ValueKey('btn_skip_${schedule.scheduleId}'),
+                        onPressed: _actionInProgressIds.contains(schedule.scheduleId)
+                            ? null
+                            : () => _showSkipOccurrenceDialog(
+                                schedule, schedule.nextDueDate),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 8),
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        icon: const Icon(Icons.skip_next_rounded, size: 16),
+                        label: const Text('Bỏ qua kỳ này',
+                            style: TextStyle(fontSize: 12)),
+                      ),
+                      TextButton.icon(
+                        key: ValueKey('btn_defer_${schedule.scheduleId}'),
+                        onPressed: _actionInProgressIds.contains(schedule.scheduleId)
+                            ? null
+                            : () => _handleDeferOccurrence(
+                                schedule, schedule.nextDueDate),
+                        style: TextButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 8),
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        icon: const Icon(Icons.edit_calendar_rounded, size: 16),
+                        label: const Text('Dời ngày',
+                            style: TextStyle(fontSize: 12)),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  void _showConfirmOccurrenceDialog(
+    RecurringTransactionSchedule schedule,
+    DateTime occurrenceDate,
+    String walletName,
+  ) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final isIncome = schedule.type == 'income';
+    final displayName = schedule.note != null && schedule.note!.isNotEmpty
+        ? schedule.note!
+        : (isIncome ? 'Thu nhập định kỳ' : 'Hóa đơn định kỳ');
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(
+              isIncome ? Icons.account_balance_wallet : Icons.receipt_long,
+              color: isIncome ? AppColors.income : AppColors.expense,
+            ),
+            const SizedBox(width: 8),
+            Text(isIncome ? 'Xác nhận thu nhập' : 'Xác nhận thanh toán'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Bạn có chắc muốn hạch toán khoản tiền thật này vào tài khoản?'),
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppColors.background,
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Tên khoản: $displayName',
+                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                  const SizedBox(height: 4),
+                  Text('Số tiền: ${AppFormatters.number(schedule.amount)} VNĐ',
+                      style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: isIncome ? AppColors.income : AppColors.expense,
+                          fontSize: 14)),
+                  const SizedBox(height: 4),
+                  Text('Ví hạch toán: $walletName', style: const TextStyle(fontSize: 12)),
+                  const SizedBox(height: 4),
+                  Text('Ngày hạch toán: ${DateFormat('dd/MM/yyyy').format(occurrenceDate)}',
+                      style: const TextStyle(fontSize: 12)),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.of(context).pop();
+              setState(() => _actionInProgressIds.add(schedule.scheduleId));
+              try {
+                await _firestoreService.confirmRecurringOccurrence(
+                  userId: uid,
+                  schedule: schedule,
+                  occurrenceDate: occurrenceDate,
+                );
+                if (mounted) {
+                  AppSnackbar.show(
+                      context, 'Đã hạch toán giao dịch tiền thật thành công!');
+                }
+              } catch (e) {
+                if (mounted) {
+                  AppSnackbar.show(context, 'Lỗi xác nhận giao dịch: $e',
+                      isError: true);
+                }
+              } finally {
+                if (mounted) {
+                  setState(() => _actionInProgressIds.remove(schedule.scheduleId));
+                }
+              }
+            },
+            style: FilledButton.styleFrom(
+                backgroundColor: isIncome ? AppColors.income : AppColors.expense),
+            child: const Text('Xác nhận'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showSkipOccurrenceDialog(
+    RecurringTransactionSchedule schedule,
+    DateTime occurrenceDate,
+  ) {
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Bỏ qua kỳ này?'),
+        content: const Text(
+          'Lịch định kỳ sẽ được chuyển sang kỳ kế tiếp. App sẽ không tạo giao dịch và không thay đổi số dư ví.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.of(context).pop();
+              setState(() => _actionInProgressIds.add(schedule.scheduleId));
+              try {
+                await _firestoreService.skipRecurringOccurrence(
+                  userId: uid,
+                  schedule: schedule,
+                  occurrenceDate: occurrenceDate,
+                );
+                if (mounted) {
+                  AppSnackbar.show(context, 'Đã bỏ qua kỳ giao dịch này.');
+                }
+              } catch (e) {
+                if (mounted) {
+                  AppSnackbar.show(context, 'Lỗi bỏ qua kỳ: $e', isError: true);
+                }
+              } finally {
+                if (mounted) {
+                  setState(() => _actionInProgressIds.remove(schedule.scheduleId));
+                }
+              }
+            },
+            style: FilledButton.styleFrom(backgroundColor: AppColors.expense),
+            child: const Text('Bỏ qua'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _handleDeferOccurrence(
+    RecurringTransactionSchedule schedule,
+    DateTime occurrenceDate,
+  ) async {
+    final now = DateTime.now();
+    final initial = occurrenceDate.isBefore(now) ? now : occurrenceDate;
+
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime(now.year, now.month, now.day),
+      lastDate: DateTime(2035),
+      helpText: 'CHỌN NGÀY DỜI ĐẾN HẠN MỚI',
+    );
+
+    if (picked == null || !mounted) return;
+
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Xác nhận dời ngày'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+                'Dời ngày đến hạn từ ${DateFormat('dd/MM/yyyy').format(occurrenceDate)} sang ${DateFormat('dd/MM/yyyy').format(picked)}.'),
+            const SizedBox(height: 10),
+            const Text(
+              'Lưu ý: Các kỳ sau sẽ được tính tiếp từ ngày đã dời.',
+              style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.primary),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () async {
+              Navigator.of(context).pop();
+              setState(() => _actionInProgressIds.add(schedule.scheduleId));
+              try {
+                await _firestoreService.deferRecurringOccurrence(
+                  userId: uid,
+                  schedule: schedule,
+                  occurrenceDate: occurrenceDate,
+                  newDueDate: picked,
+                );
+                if (mounted) {
+                  AppSnackbar.show(context,
+                      'Đã dời ngày đến hạn sang ${DateFormat('dd/MM/yyyy').format(picked)}.');
+                }
+              } catch (e) {
+                if (mounted) {
+                  AppSnackbar.show(context, 'Lỗi dời ngày: $e', isError: true);
+                }
+              } finally {
+                if (mounted) {
+                  setState(() => _actionInProgressIds.remove(schedule.scheduleId));
+                }
+              }
+            },
+            style: FilledButton.styleFrom(backgroundColor: AppColors.primary),
+            child: const Text('Đồng ý dời'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ============================================================
+  // 1. UPCOMING BILLS SECTION
   // ============================================================
   Widget _buildUpcomingSection(
     List<RecurringTransactionSchedule> schedules,
@@ -258,7 +732,6 @@ class _RecurringTransactionScreenState
                   ),
                 ],
               ),
-              // Day filter chips
               Row(
                 children: [7, 14, 30].map((days) {
                   final isSelected = _selectedUpcomingDays == days;
@@ -452,6 +925,9 @@ class _RecurringTransactionScreenState
               ),
             );
 
+            final isManual = schedule.postingMode ==
+                RecurringTransactionSchedule.postingModeManual;
+
             return Card(
               color: AppColors.card,
               margin: const EdgeInsets.only(bottom: 10),
@@ -509,6 +985,16 @@ class _RecurringTransactionScreenState
                       'Ví: ${wallet.walletName} • Tần suất: ${schedule.frequency == 'weekly' ? 'Hàng tuần' : 'Hàng tháng'}',
                       style: TextStyle(
                           fontSize: 12, color: AppColors.textSecondary),
+                    ),
+                    Text(
+                      'Ghi nhận: ${isManual ? 'Cần xác nhận' : 'Tự động'}',
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: isManual
+                            ? Colors.orange.shade800
+                            : AppColors.primary,
+                      ),
                     ),
                     Text(
                       'Hạn tiếp theo: ${DateFormat('dd/MM/yyyy').format(schedule.nextDueDate)}',
@@ -675,6 +1161,7 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
   late String _frequency;
   late DateTime _startDate;
   late int _reminderDaysBefore;
+  late String _postingMode;
 
   bool _isSaving = false;
 
@@ -692,6 +1179,8 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
     _frequency = s?.frequency ?? 'monthly';
     _startDate = s?.startDate ?? DateTime.now();
     _reminderDaysBefore = s?.reminderDaysBefore ?? 1;
+    _postingMode =
+        s?.postingMode ?? RecurringTransactionSchedule.postingModeManual;
   }
 
   @override
@@ -723,7 +1212,6 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
     setState(() => _isSaving = true);
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
 
-    // Lấy tên ví để hiển thị trong notification
     String walletName = 'Ví';
     try {
       final walletDoc = await FirebaseFirestore.instance
@@ -737,7 +1225,7 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
 
     try {
       if (widget.schedule == null) {
-        // Tạo mới schedule
+        // Tạo mới schedule (mặc định manualConfirmation nếu không chọn khác)
         final newSchedule = RecurringTransactionSchedule(
           scheduleId: '',
           userId: uid,
@@ -752,12 +1240,12 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
           isActive: true,
           createdAt: DateTime.now(),
           reminderDaysBefore: _reminderDaysBefore,
+          postingMode: _postingMode,
         );
 
         final docId =
             await _firestoreService.createRecurringTransaction(newSchedule);
 
-        // Lên lịch notification với scheduleId thực tế từ Firestore
         if (_reminderDaysBefore > 0) {
           final savedSchedule = RecurringTransactionSchedule(
             scheduleId: docId,
@@ -773,6 +1261,7 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
             isActive: true,
             createdAt: DateTime.now(),
             reminderDaysBefore: _reminderDaysBefore,
+            postingMode: _postingMode,
           );
           await _notificationService.scheduleRemindersForSchedule(
             schedule: savedSchedule,
@@ -783,7 +1272,7 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
         if (!mounted) return;
         AppSnackbar.show(context, 'Đã tạo lịch định kỳ thành công!');
       } else {
-        // Cập nhật schedule cũ (chỉ áp dụng các kỳ tương lai)
+        // Cập nhật schedule cũ
         final updateData = {
           'type': _type,
           'walletId': _selectedWalletId,
@@ -794,12 +1283,12 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
           'startDate': _startDate.toIso8601String(),
           'nextDueDate': _startDate.toIso8601String(),
           'reminderDaysBefore': _reminderDaysBefore,
+          'postingMode': _postingMode,
         };
 
         await _firestoreService.updateRecurringTransaction(
             widget.schedule!.scheduleId, updateData);
 
-        // Cập nhật notification
         final updatedSchedule = widget.schedule!.copyWith(
           type: _type,
           walletId: _selectedWalletId,
@@ -811,6 +1300,7 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
           nextDueDate: _startDate,
           isActive: widget.schedule!.isActive,
           reminderDaysBefore: _reminderDaysBefore,
+          postingMode: _postingMode,
         );
         await _notificationService.scheduleRemindersForSchedule(
           schedule: updatedSchedule,
@@ -999,6 +1489,55 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
                 onChanged: (val) {
                   if (val != null) setState(() => _frequency = val);
                 },
+              ),
+              const SizedBox(height: 14),
+
+              // Selection: Cách ghi nhận giao dịch
+              const Text(
+                'Cách ghi nhận giao dịch',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+              ),
+              const SizedBox(height: 6),
+              Container(
+                decoration: BoxDecoration(
+                  border: Border.all(color: Colors.grey.withOpacity(0.4)),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  children: [
+                    RadioListTile<String>(
+                      value: RecurringTransactionSchedule.postingModeManual,
+                      groupValue: _postingMode,
+                      title: const Text('Cần xác nhận khi đến hạn',
+                          style: TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w600)),
+                      subtitle: const Text(
+                          'App nhắc bạn, chỉ ghi nhận sau khi bạn xác nhận.',
+                          style: TextStyle(fontSize: 11)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                      dense: true,
+                      onChanged: (val) {
+                        if (val != null) setState(() => _postingMode = val);
+                      },
+                    ),
+                    const Divider(height: 1),
+                    RadioListTile<String>(
+                      value: RecurringTransactionSchedule.postingModeAuto,
+                      groupValue: _postingMode,
+                      title: const Text('Tự động ghi nhận khi đến hạn',
+                          style: TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w600)),
+                      subtitle: const Text(
+                          'App tự ghi nhận khi đến hạn và được kiểm tra lúc mở ứng dụng.',
+                          style: TextStyle(fontSize: 11)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 8),
+                      dense: true,
+                      onChanged: (val) {
+                        if (val != null) setState(() => _postingMode = val);
+                      },
+                    ),
+                  ],
+                ),
               ),
               const SizedBox(height: 14),
 

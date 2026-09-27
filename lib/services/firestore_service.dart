@@ -9,6 +9,7 @@ import '../models/budget_model.dart';
 import '../models/saving_goal_model.dart';
 import '../models/notification_model.dart';
 import '../models/recurring_transaction_model.dart';
+import '../models/recurring_transaction_occurrence_model.dart';
 import 'recurring_transaction_service.dart';
 import 'storage_service.dart';
 import '../utils/transaction_business_logic.dart';
@@ -796,6 +797,7 @@ class FirestoreService {
 
     final schedules = querySnap.docs
         .map((d) => RecurringTransactionSchedule.fromMap(d.data(), d.id))
+        .where((s) => s.postingMode == RecurringTransactionSchedule.postingModeAuto)
         .toList();
 
     int processedCount = 0;
@@ -826,11 +828,15 @@ class FirestoreService {
         final deterministicTxId =
             RecurringTransactionService.buildTransactionId(
                 schedule.scheduleId, occurrenceDate);
+        final occurrenceDocId = '${schedule.scheduleId}_$occurrenceKey';
 
         final txRef = _db.collection('transactions').doc(deterministicTxId);
         final walletRef = _db.collection('wallets').doc(schedule.walletId);
         final scheduleRef =
             _db.collection('recurringTransactions').doc(schedule.scheduleId);
+        final occurrenceRef = _db
+            .collection('recurringTransactionOccurrences')
+            .doc(occurrenceDocId);
 
         bool transactionAlreadyExists = false;
         bool insufficientBalance = false;
@@ -843,6 +849,12 @@ class FirestoreService {
             '[DebugRecurring] collection: wallets, op: read, scheduleId: ${schedule.scheduleId}');
 
         await _db.runTransaction((txn) async {
+          final occSnap = await txn.get(occurrenceRef);
+          if (occSnap.exists) {
+            transactionAlreadyExists = true;
+            return;
+          }
+
           final txSnap = await txn.get(txRef);
           if (txSnap.exists) {
             transactionAlreadyExists = true;
@@ -914,6 +926,16 @@ class FirestoreService {
             'lastProcessedKey': occurrenceKey,
             'updatedAt': DateTime.now().toIso8601String(),
           });
+
+          txn.set(occurrenceRef, {
+            'userId': userId,
+            'scheduleId': schedule.scheduleId,
+            'occurrenceKey': occurrenceKey,
+            'scheduledDate': occurrenceDate.toIso8601String(),
+            'action': 'confirmed',
+            'actionAt': DateTime.now().toIso8601String(),
+            'transactionId': deterministicTxId,
+          });
         });
 
         if (transactionAlreadyExists) {
@@ -941,5 +963,194 @@ class FirestoreService {
       'skippedCount': skippedCount,
       'failedSchedules': failedSchedules,
     };
+  }
+
+  /// Xác nhận giao dịch định kỳ thủ công (manualConfirmation mode)
+  Future<void> confirmRecurringOccurrence({
+    required String userId,
+    required RecurringTransactionSchedule schedule,
+    required DateTime occurrenceDate,
+  }) async {
+    final recService = RecurringTransactionService();
+    final occurrenceKey =
+        RecurringTransactionService.getOccurrenceKey(occurrenceDate);
+    final deterministicTxId =
+        RecurringTransactionService.buildTransactionId(
+            schedule.scheduleId, occurrenceDate);
+
+    final occurrenceDocId = '${schedule.scheduleId}_$occurrenceKey';
+    final occurrenceRef =
+        _db.collection('recurringTransactionOccurrences').doc(occurrenceDocId);
+    final txRef = _db.collection('transactions').doc(deterministicTxId);
+    final walletRef = _db.collection('wallets').doc(schedule.walletId);
+    final scheduleRef =
+        _db.collection('recurringTransactions').doc(schedule.scheduleId);
+
+    await _db.runTransaction((txn) async {
+      final occSnap = await txn.get(occurrenceRef);
+      if (occSnap.exists) {
+        throw Exception('Kỳ giao dịch này đã được xác nhận hoặc xử lý trước đó.');
+      }
+      final txSnap = await txn.get(txRef);
+      if (txSnap.exists) {
+        throw Exception('Giao dịch của kỳ này đã tồn tại.');
+      }
+
+      final walletSnap = await txn.get(walletRef);
+      if (!walletSnap.exists) {
+        throw Exception('Ví thực hiện không tồn tại.');
+      }
+      final walletData = walletSnap.data() as Map<String, dynamic>;
+      final wallet = Wallet.fromMap(walletData, walletSnap.id);
+
+      if (wallet.userId.isEmpty || wallet.userId != userId) {
+        throw Exception('Ví thực hiện thiếu userId hợp lệ.');
+      }
+      if (!wallet.isActive) {
+        throw Exception('Ví thực hiện đã bị ẩn hoặc không hoạt động.');
+      }
+      if (schedule.type == 'expense' && wallet.balance < schedule.amount) {
+        throw Exception('Ví không đủ số dư để xác nhận giao dịch (${schedule.amount.round()}đ).');
+      }
+
+      final appTx = AppTransaction(
+        transactionId: deterministicTxId,
+        userId: userId,
+        walletId: schedule.walletId,
+        categoryId: schedule.categoryId,
+        amount: schedule.amount,
+        type: schedule.type,
+        note: schedule.note != null && schedule.note!.isNotEmpty
+            ? schedule.note
+            : 'Giao dịch định kỳ',
+        date: occurrenceDate,
+        recurringScheduleId: schedule.scheduleId,
+        recurringOccurrenceKey: occurrenceKey,
+      );
+
+      txn.set(txRef, appTx.toMap());
+
+      final delta =
+          schedule.type == 'income' ? schedule.amount : -schedule.amount;
+      txn.update(walletRef, {
+        'balance': FieldValue.increment(delta),
+      });
+
+      final nextDueDate = recService.nextOccurrenceAfter(
+        occurrenceDate,
+        schedule.frequency,
+        schedule.startDate,
+      );
+
+      txn.update(scheduleRef, {
+        'nextDueDate': nextDueDate.toIso8601String(),
+        'lastProcessedKey': occurrenceKey,
+        'updatedAt': DateTime.now().toIso8601String(),
+      });
+
+      txn.set(occurrenceRef, {
+        'userId': userId,
+        'scheduleId': schedule.scheduleId,
+        'occurrenceKey': occurrenceKey,
+        'scheduledDate': occurrenceDate.toIso8601String(),
+        'action': 'confirmed',
+        'actionAt': DateTime.now().toIso8601String(),
+        'transactionId': deterministicTxId,
+      });
+    });
+  }
+
+  /// Bỏ qua kỳ giao dịch định kỳ thủ công
+  Future<void> skipRecurringOccurrence({
+    required String userId,
+    required RecurringTransactionSchedule schedule,
+    required DateTime occurrenceDate,
+  }) async {
+    final recService = RecurringTransactionService();
+    final occurrenceKey =
+        RecurringTransactionService.getOccurrenceKey(occurrenceDate);
+    final occurrenceDocId = '${schedule.scheduleId}_$occurrenceKey';
+    final occurrenceRef =
+        _db.collection('recurringTransactionOccurrences').doc(occurrenceDocId);
+    final scheduleRef =
+        _db.collection('recurringTransactions').doc(schedule.scheduleId);
+
+    await _db.runTransaction((txn) async {
+      final occSnap = await txn.get(occurrenceRef);
+      if (occSnap.exists) {
+        throw Exception('Kỳ giao dịch này đã được xử lý trước đó.');
+      }
+
+      final nextDueDate = recService.nextOccurrenceAfter(
+        occurrenceDate,
+        schedule.frequency,
+        schedule.startDate,
+      );
+
+      txn.update(scheduleRef, {
+        'nextDueDate': nextDueDate.toIso8601String(),
+        'lastProcessedKey': occurrenceKey,
+        'updatedAt': DateTime.now().toIso8601String(),
+      });
+
+      txn.set(occurrenceRef, {
+        'userId': userId,
+        'scheduleId': schedule.scheduleId,
+        'occurrenceKey': occurrenceKey,
+        'scheduledDate': occurrenceDate.toIso8601String(),
+        'action': 'skipped',
+        'actionAt': DateTime.now().toIso8601String(),
+      });
+    });
+  }
+
+  /// Dời ngày giao dịch định kỳ thủ công
+  Future<void> deferRecurringOccurrence({
+    required String userId,
+    required RecurringTransactionSchedule schedule,
+    required DateTime occurrenceDate,
+    required DateTime newDueDate,
+  }) async {
+    final occurrenceKey =
+        RecurringTransactionService.getOccurrenceKey(occurrenceDate);
+    final occurrenceDocId = '${schedule.scheduleId}_$occurrenceKey';
+    final occurrenceRef =
+        _db.collection('recurringTransactionOccurrences').doc(occurrenceDocId);
+    final scheduleRef =
+        _db.collection('recurringTransactions').doc(schedule.scheduleId);
+
+    await _db.runTransaction((txn) async {
+      final occSnap = await txn.get(occurrenceRef);
+      if (occSnap.exists) {
+        throw Exception('Kỳ giao dịch này đã được xử lý trước đó.');
+      }
+
+      txn.update(scheduleRef, {
+        'nextDueDate': newDueDate.toIso8601String(),
+        'lastProcessedKey': occurrenceKey,
+        'updatedAt': DateTime.now().toIso8601String(),
+      });
+
+      txn.set(occurrenceRef, {
+        'userId': userId,
+        'scheduleId': schedule.scheduleId,
+        'occurrenceKey': occurrenceKey,
+        'scheduledDate': occurrenceDate.toIso8601String(),
+        'action': 'deferred',
+        'actionAt': DateTime.now().toIso8601String(),
+        'deferredTo': newDueDate.toIso8601String(),
+      });
+    });
+  }
+
+  Stream<List<RecurringTransactionOccurrence>> streamRecurringOccurrences(
+      String userId) {
+    return _db
+        .collection('recurringTransactionOccurrences')
+        .where('userId', isEqualTo: userId)
+        .snapshots()
+        .map((snap) => snap.docs
+            .map((d) => RecurringTransactionOccurrence.fromMap(d.data(), d.id))
+            .toList());
   }
 }

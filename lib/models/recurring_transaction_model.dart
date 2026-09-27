@@ -3,6 +3,9 @@
 /// Firestore collection: recurringTransactions/{scheduleId}
 /// ============================================================
 class RecurringTransactionSchedule {
+  static const String postingModeManual = 'manualConfirmation';
+  static const String postingModeAuto = 'autoPost';
+
   final String scheduleId;
   final String userId;
   final String type; // income | expense
@@ -19,6 +22,7 @@ class RecurringTransactionSchedule {
   final DateTime? updatedAt;
   final String? lastProcessedKey; // VD: "2026-09-20"
   final int reminderDaysBefore; // 0 (Không nhắc), 1 (Trước 1 ngày), 3, 7. Mặc định: 1
+  final String postingMode; // manualConfirmation | autoPost
 
   RecurringTransactionSchedule({
     required this.scheduleId,
@@ -36,6 +40,7 @@ class RecurringTransactionSchedule {
     this.updatedAt,
     this.lastProcessedKey,
     this.reminderDaysBefore = 1,
+    this.postingMode = postingModeManual,
   }) {
     validateAmount(amount);
   }
@@ -74,6 +79,7 @@ class RecurringTransactionSchedule {
       reminderDaysBefore: map['reminderDaysBefore'] != null
           ? (map['reminderDaysBefore'] as num).toInt()
           : 1,
+      postingMode: map['postingMode'] ?? postingModeAuto,
     );
   }
 
@@ -93,6 +99,7 @@ class RecurringTransactionSchedule {
       'updatedAt': (updatedAt ?? DateTime.now()).toIso8601String(),
       'lastProcessedKey': lastProcessedKey,
       'reminderDaysBefore': reminderDaysBefore,
+      'postingMode': postingMode,
     };
   }
 
@@ -109,6 +116,7 @@ class RecurringTransactionSchedule {
     DateTime? updatedAt,
     String? lastProcessedKey,
     int? reminderDaysBefore,
+    String? postingMode,
   }) {
     return RecurringTransactionSchedule(
       scheduleId: scheduleId,
@@ -126,6 +134,7 @@ class RecurringTransactionSchedule {
       updatedAt: updatedAt ?? DateTime.now(),
       lastProcessedKey: lastProcessedKey ?? this.lastProcessedKey,
       reminderDaysBefore: reminderDaysBefore ?? this.reminderDaysBefore,
+      postingMode: postingMode ?? this.postingMode,
     );
   }
 }
