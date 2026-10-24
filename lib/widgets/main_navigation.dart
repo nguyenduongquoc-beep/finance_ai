@@ -6,10 +6,7 @@ import '../screens/home/add_transaction_screen.dart';
 import '../screens/ai/ai_chat_screen.dart';
 import '../screens/profile_screen.dart';
 
-/// ============================================================
-/// MAIN NAVIGATION
-/// Bottom Navigation Bar: Home | Transactions | (+) | AI | Profile
-/// ============================================================
+/// Main Navigation 5 tab chuẩn Fintech
 class MainNavigation extends StatefulWidget {
   const MainNavigation({super.key});
 
@@ -23,14 +20,13 @@ class _MainNavigationState extends State<MainNavigation> {
   final List<Widget> _screens = const [
     HomeDashboardScreen(),
     TransactionListScreen(),
-    SizedBox.shrink(), // placeholder - nút giữa mở AddTransactionScreen dạng modal
+    SizedBox.shrink(),
     AiChatScreen(),
     ProfileScreen(),
   ];
 
   void _onTabTapped(int index) {
     if (index == 2) {
-      // Nút "+" ở giữa - mở màn hình thêm giao dịch dạng modal
       Navigator.of(context).push(
         MaterialPageRoute(builder: (_) => const AddTransactionScreen()),
       );
@@ -41,7 +37,10 @@ class _MainNavigationState extends State<MainNavigation> {
 
   Widget _buildNavItem(int index, IconData inactiveIcon, IconData activeIcon, String label) {
     final isSelected = _currentIndex == index;
-    final color = isSelected ? AppColors.primary : AppColors.textSecondary;
+    final color = isSelected
+        ? AppColors.primary
+        : context.appTextSecondary;
+
     return Expanded(
       child: InkWell(
         onTap: () => _onTabTapped(index),
@@ -62,7 +61,7 @@ class _MainNavigationState extends State<MainNavigation> {
               style: TextStyle(
                 color: color,
                 fontSize: 11,
-                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
               ),
             ),
           ],
@@ -71,42 +70,65 @@ class _MainNavigationState extends State<MainNavigation> {
     );
   }
 
+  Widget _buildAddButton() {
+    return Expanded(
+      child: Center(
+        child: InkWell(
+          onTap: () => _onTabTapped(2),
+          borderRadius: BorderRadius.circular(14),
+          child: Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              color: AppColors.primary,
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: const Icon(
+              Icons.add_rounded,
+              color: Colors.white,
+              size: 26,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    final isKeyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
+    final hideBottomNav = isKeyboardOpen && _currentIndex == 3;
+
     return Scaffold(
+      resizeToAvoidBottomInset: false,
       body: IndexedStack(
         index: _currentIndex == 2 ? 0 : _currentIndex,
         children: _screens,
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () => _onTabTapped(2),
-        backgroundColor: AppColors.primary,
-        shape: const CircleBorder(),
-        elevation: 4,
-        child: const Icon(
-          Icons.add,
-          color: Colors.white,
-          size: 28,
-        ),
-      ),
-      floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
-      bottomNavigationBar: BottomAppBar(
-        color: Colors.white,
-        surfaceTintColor: Colors.white,
-        elevation: 8,
-        height: 72,
-        padding: EdgeInsets.zero,
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.spaceAround,
-          children: [
-            _buildNavItem(0, Icons.home_outlined, Icons.home_rounded, 'Trang chủ'),
-            _buildNavItem(1, Icons.receipt_long_outlined, Icons.receipt_long_rounded, 'Giao dịch'),
-            const SizedBox(width: 68), // Khoảng trống cho nút "+" nổi ở giữa
-            _buildNavItem(3, Icons.auto_awesome_outlined, Icons.auto_awesome_rounded, 'Trợ lý AI'),
-            _buildNavItem(4, Icons.person_outline_rounded, Icons.person_rounded, 'Cá nhân'),
-          ],
-        ),
-      ),
+      bottomNavigationBar: hideBottomNav
+          ? null
+          : Container(
+              decoration: BoxDecoration(
+                color: context.appCard,
+                border: Border(top: BorderSide(color: context.appBorder, width: 1)),
+              ),
+              child: SafeArea(
+                top: false,
+                child: SizedBox(
+                  height: 64,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      _buildNavItem(0, Icons.home_outlined, Icons.home_rounded, 'Trang chủ'),
+                      _buildNavItem(1, Icons.receipt_long_outlined, Icons.receipt_long_rounded, 'Giao dịch'),
+                      _buildAddButton(),
+                      _buildNavItem(3, Icons.auto_awesome_outlined, Icons.auto_awesome_rounded, 'Trợ lý AI'),
+                      _buildNavItem(4, Icons.person_outline_rounded, Icons.person_rounded, 'Cá nhân'),
+                    ],
+                  ),
+                ),
+              ),
+            ),
     );
   }
 }

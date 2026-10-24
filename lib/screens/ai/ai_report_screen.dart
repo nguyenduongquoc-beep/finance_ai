@@ -8,7 +8,6 @@ import '../../models/saving_goal_model.dart';
 import '../../models/wallet_model.dart';
 import '../../services/financial_export_service.dart';
 import '../../services/firestore_service.dart';
-import '../../services/theme_controller.dart';
 import '../../utils/constants.dart';
 import '../../utils/formatters.dart';
 import '../../widgets/app_snackbar.dart';
@@ -96,16 +95,25 @@ class _AiReportScreenState extends State<AiReportScreen> {
     try {
       final results = await Future.wait<dynamic>([
         _firestoreService.streamTransactions(uid, from: monthStart).first,
-        _firestoreService.streamTransactions(uid, from: lastMonthStart, to: lastMonthEnd).first,
-        _firestoreService.streamTransactions(uid, from: twoMonthsAgoStart, to: twoMonthsAgoEnd).first,
+        _firestoreService
+            .streamTransactions(uid, from: lastMonthStart, to: lastMonthEnd)
+            .first,
+        _firestoreService
+            .streamTransactions(uid,
+                from: twoMonthsAgoStart, to: twoMonthsAgoEnd)
+            .first,
         _firestoreService.streamCategories(uid).first,
-        _firestoreService.streamBudgets(uid, month: AppFormatters.month(now)).first,
+        _firestoreService
+            .streamBudgets(uid, month: AppFormatters.month(now))
+            .first,
         _firestoreService.streamSavingGoals(uid).first,
       ]);
 
       final List<AppTransaction> currentTx = results[0] as List<AppTransaction>;
-      final List<AppTransaction> lastMonthTx = results[1] as List<AppTransaction>;
-      final List<AppTransaction> twoMonthsAgoTx = results[2] as List<AppTransaction>;
+      final List<AppTransaction> lastMonthTx =
+          results[1] as List<AppTransaction>;
+      final List<AppTransaction> twoMonthsAgoTx =
+          results[2] as List<AppTransaction>;
       final categories = results[3] as List<Category>;
       final budgets = results[4] as List<Budget>;
       final savingGoals = results[5] as List<SavingGoal>;
@@ -145,7 +153,8 @@ class _AiReportScreenState extends State<AiReportScreen> {
 
       final Map<String, double> lastCatTotals = {};
       for (final tx in lastMonthTx.where((t) => t.type == 'expense')) {
-        lastCatTotals[tx.categoryId] = (lastCatTotals[tx.categoryId] ?? 0) + tx.amount;
+        lastCatTotals[tx.categoryId] =
+            (lastCatTotals[tx.categoryId] ?? 0) + tx.amount;
       }
 
       // 4. Nhãn & số tiền biểu đồ 3 tháng
@@ -215,7 +224,9 @@ class _AiReportScreenState extends State<AiReportScreen> {
       }
     }
     if (alertBudget != null) {
-      final cat = categories.where((c) => c.categoryId == alertBudget!.categoryId).firstOrNull;
+      final cat = categories
+          .where((c) => c.categoryId == alertBudget!.categoryId)
+          .firstOrNull;
       final catName = cat?.name ?? 'Danh mục';
       if (alertBudget.isOverBudget(alertSpent)) {
         result.add(_ReportInsight(
@@ -227,7 +238,7 @@ class _AiReportScreenState extends State<AiReportScreen> {
         result.add(_ReportInsight(
           title: 'Cảnh giác $catName',
           description:
-              'Đã chi ${AppFormatters.currency(alertSpent)} / ${AppFormatters.currency(alertBudget.limit)} ngân sách $catName.',
+              'Đã chi ${AppFormatters.compactCurrency(alertSpent)} / ${AppFormatters.compactCurrency(alertBudget.limit)} ngân sách $catName.',
           type: _InsightType.warning,
         ));
       }
@@ -242,7 +253,8 @@ class _AiReportScreenState extends State<AiReportScreen> {
         final pct = ((lastAmt - curAmt) / lastAmt) * 100;
         if (pct >= 10 && pct > maxReducedPct) {
           maxReducedPct = pct;
-          final cat = categories.where((c) => c.categoryId == catId).firstOrNull;
+          final cat =
+              categories.where((c) => c.categoryId == catId).firstOrNull;
           reducedCatName = cat?.name;
         }
       }
@@ -289,7 +301,8 @@ class _AiReportScreenState extends State<AiReportScreen> {
         type: _InsightType.success,
       ));
     } else if (activeGoal != null) {
-      final pct = (activeGoal.savedAmount / activeGoal.targetAmount * 100).round();
+      final pct =
+          (activeGoal.savedAmount / activeGoal.targetAmount * 100).round();
       result.add(_ReportInsight(
         title: 'Tích lũy đều đặn',
         description: 'Đã đạt $pct% mục tiêu tích lũy "${activeGoal.name}".',
@@ -323,48 +336,43 @@ class _AiReportScreenState extends State<AiReportScreen> {
   Widget build(BuildContext context) {
     final now = DateTime.now();
 
-    return ValueListenableBuilder<ThemeMode>(
-      valueListenable: ThemeController.mode,
-      builder: (context, _, __) {
-        return Scaffold(
-          backgroundColor: AppColors.background,
-          appBar: AppBar(
-            elevation: 0,
-            title: const Text(
-              'Báo cáo AI',
-              style: TextStyle(fontWeight: FontWeight.bold),
-            ),
-            actions: [
-              Padding(
-                padding: const EdgeInsets.only(right: 16),
-                child: Center(
-                  child: Material(
-                    color: const Color(0xFF10B981).withValues(alpha: 0.15),
-                    shape: const CircleBorder(),
-                    child: IconButton(
-                      icon: const Icon(
-                        Icons.bar_chart_rounded,
-                        color: AppColors.primary,
-                        size: 22,
-                      ),
-                      tooltip: 'AI Insight',
-                      onPressed: () {
-                        Navigator.push(
-                          context,
-                          MaterialPageRoute(
-                            builder: (_) => const AiInsightScreen(),
-                          ),
-                        );
-                      },
-                    ),
+    return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      appBar: AppBar(
+        elevation: 0,
+        title: const Text(
+          'Báo cáo AI',
+          style: TextStyle(fontWeight: FontWeight.w600),
+        ),
+        actions: [
+          Padding(
+            padding: const EdgeInsets.only(right: 16),
+            child: Center(
+              child: Material(
+                color: AppColors.aiAccent.withValues(alpha: 0.15),
+                shape: const CircleBorder(),
+                child: IconButton(
+                  icon: const Icon(
+                    Icons.auto_awesome,
+                    color: AppColors.aiAccent,
+                    size: 22,
                   ),
+                  tooltip: 'AI Financial Insights',
+                  onPressed: () {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => const AiInsightScreen(),
+                      ),
+                    );
+                  },
                 ),
               ),
-            ],
+            ),
           ),
-          body: _buildBody(now),
-        );
-      },
+        ],
+      ),
+      body: _buildBody(now),
     );
   }
 
@@ -378,7 +386,7 @@ class _AiReportScreenState extends State<AiReportScreen> {
             const SizedBox(height: 16),
             Text(
               'Đang tổng hợp báo cáo AI...',
-              style: TextStyle(color: AppColors.textSecondary),
+              style: TextStyle(color: context.appTextSecondary),
             ),
           ],
         ),
@@ -392,19 +400,21 @@ class _AiReportScreenState extends State<AiReportScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.error_outline, color: AppColors.expense, size: 48),
+              const Icon(Icons.error_outline,
+                  color: AppColors.expense, size: 48),
               const SizedBox(height: 12),
               Text(
                 _errorMessage!,
                 textAlign: TextAlign.center,
-                style: TextStyle(color: AppColors.textSecondary),
+                style: TextStyle(color: context.appTextSecondary),
               ),
               const SizedBox(height: 20),
               FilledButton.icon(
                 onPressed: _loadReportData,
                 icon: const Icon(Icons.refresh),
                 label: const Text('Thử lại'),
-                style: FilledButton.styleFrom(backgroundColor: AppColors.primary),
+                style:
+                    FilledButton.styleFrom(backgroundColor: AppColors.primary),
               ),
             ],
           ),
@@ -441,13 +451,26 @@ class _AiReportScreenState extends State<AiReportScreen> {
   // ============================================================
   // 1. HERO CARD (Dark Navy `#16283A`)
   // ============================================================
+  // ============================================================
+  // 1. HERO CARD (Dark Slate / Deep Navy FinTech Card)
+  // ============================================================
   Widget _buildHeroCard(DateTime now) {
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
-        color: AppColors.reportDark,
-        borderRadius: BorderRadius.circular(20),
+        color: const Color(0xFF161F28),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.08),
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.12),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -456,66 +479,123 @@ class _AiReportScreenState extends State<AiReportScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                'BÁO CÁO THÁNG ${now.month}',
-                style: const TextStyle(
-                  color: AppColors.accentGreen,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 13,
-                  letterSpacing: 0.5,
-                ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(5),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF34D399).withValues(alpha: 0.15),
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(
+                      Icons.insights_rounded,
+                      size: 13,
+                      color: Color(0xFF34D399),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    'BÁO CÁO THÁNG ${now.month}/${now.year}',
+                    style: const TextStyle(
+                      color: Color(0xFF34D399),
+                      fontWeight: FontWeight.w700,
+                      fontSize: 12,
+                      letterSpacing: 0.6,
+                    ),
+                  ),
+                ],
               ),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                 decoration: BoxDecoration(
-                  color: AppColors.accentGreen.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: const Text(
-                  'AI Generated',
-                  style: TextStyle(
-                    color: AppColors.accentGreen,
-                    fontSize: 11,
-                    fontWeight: FontWeight.bold,
+                  color: Colors.white.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: Colors.white.withValues(alpha: 0.12),
                   ),
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.auto_awesome,
+                      color: Color(0xFF67E8F9),
+                      size: 11,
+                    ),
+                    SizedBox(width: 5),
+                    Text(
+                      'AI Generated',
+                      style: TextStyle(
+                        color: Color(0xFFE2E8F0),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
           ),
-          const SizedBox(height: 16),
-          const Text(
-            'Tổng chi tiêu của bạn',
-            style: TextStyle(color: Colors.white60, fontSize: 13),
-          ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 18),
           Text(
-            AppFormatters.currency(_totalExpense),
-            style: const TextStyle(
-              color: Colors.white,
-              fontSize: 26,
-              fontWeight: FontWeight.bold,
+            'Tổng chi tiêu tháng này',
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.7),
+              fontSize: 13,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 6),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              _totalExpense.abs() >= 1e9
+                  ? AppFormatters.compactCurrency(_totalExpense)
+                  : AppFormatters.currency(_totalExpense),
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 28,
+                fontWeight: FontWeight.w700,
+                letterSpacing: -0.5,
+              ),
             ),
           ),
           const SizedBox(height: 16),
-          const Divider(color: Colors.white24, height: 1),
-          const SizedBox(height: 16),
+          Container(
+            height: 1,
+            color: Colors.white.withValues(alpha: 0.1),
+          ),
+          const SizedBox(height: 14),
           Row(
             children: [
               Expanded(
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
-                      'Tiết kiệm',
-                      style: TextStyle(color: Colors.white60, fontSize: 12),
+                    Text(
+                      'Tiết kiệm ròng',
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.6),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
                     const SizedBox(height: 4),
-                    Text(
-                      AppFormatters.currency(_savings),
-                      style: const TextStyle(
-                        color: AppColors.accentGreen,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 15,
+                    FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        AppFormatters.compactCurrency(_savings),
+                        style: TextStyle(
+                          color: _savings >= 0
+                              ? const Color(0xFF34D399)
+                              : const Color(0xFFF87171),
+                          fontWeight: FontWeight.w700,
+                          fontSize: 15,
+                        ),
                       ),
                     ),
                   ],
@@ -525,31 +605,56 @@ class _AiReportScreenState extends State<AiReportScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Text(
+                    Text(
                       'So với tháng trước',
-                      style: TextStyle(color: Colors.white60, fontSize: 12),
+                      style: TextStyle(
+                        color: Colors.white.withValues(alpha: 0.6),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
                     const SizedBox(height: 4),
                     if (_lastMonthExpense == 0)
-                      const Text(
-                        'Chưa có dữ liệu',
-                        style: TextStyle(color: Colors.white60, fontSize: 13),
-                      )
-                    else if (_percentChange != null)
                       Text(
-                        '${_percentChange! > 0 ? 'Tăng' : 'Giảm'} ${_percentChange!.abs().toStringAsFixed(1)}%',
+                        'Chưa có kỳ trước',
                         style: TextStyle(
-                          color: _percentChange! > 0
-                              ? AppColors.warning
-                              : AppColors.accentGreen,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 15,
+                          color: Colors.white.withValues(alpha: 0.6),
+                          fontSize: 13,
                         ),
                       )
+                    else if (_percentChange != null)
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            _percentChange! <= 0
+                                ? Icons.trending_down_rounded
+                                : Icons.trending_up_rounded,
+                            size: 16,
+                            color: _percentChange! <= 0
+                                ? const Color(0xFF34D399)
+                                : const Color(0xFFFBBF24),
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            '${_percentChange! <= 0 ? 'Giảm' : 'Tăng'} ${_percentChange!.abs().toStringAsFixed(1)}%',
+                            style: TextStyle(
+                              color: _percentChange! <= 0
+                                  ? const Color(0xFF34D399)
+                                  : const Color(0xFFFBBF24),
+                              fontWeight: FontWeight.w700,
+                              fontSize: 14,
+                            ),
+                          ),
+                        ],
+                      )
                     else
-                      const Text(
-                        'Chưa có dữ liệu',
-                        style: TextStyle(color: Colors.white60, fontSize: 13),
+                      Text(
+                        'Chưa có kỳ trước',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.6),
+                          fontSize: 13,
+                        ),
                       ),
                   ],
                 ),
@@ -570,34 +675,84 @@ class _AiReportScreenState extends State<AiReportScreen> {
     final total = entries.fold<double>(0, (a, e) => a + e.value);
 
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: AppColors.card,
+        color: context.appCard,
         borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        border: Border.all(color: context.appBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Cơ cấu chi tiêu',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: AppColors.primary.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(
+                      Icons.pie_chart_outline_rounded,
+                      size: 16,
+                      color: AppColors.primary,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    'Cơ cấu chi tiêu',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 15,
+                      color: context.appTextPrimary,
+                    ),
+                  ),
+                ],
+              ),
+              if (entries.isNotEmpty)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: context.appBorder.withValues(alpha: 0.4),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    '${entries.length} nhóm',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: context.appTextSecondary,
+                    ),
+                  ),
+                ),
+            ],
           ),
           const SizedBox(height: 16),
-
           if (entries.isEmpty || total <= 0)
             Container(
-              height: 140,
+              height: 130,
               alignment: Alignment.center,
-              child: Text(
-                'Chưa có chi tiêu trong tháng này',
-                style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.pie_chart_outline_rounded,
+                    size: 36,
+                    color: context.appTextSecondary.withValues(alpha: 0.4),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Chưa có dữ liệu chi tiêu trong tháng này',
+                    style: TextStyle(
+                      color: context.appTextSecondary,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
               ),
             )
           else
@@ -614,29 +769,42 @@ class _AiReportScreenState extends State<AiReportScreen> {
                         PieChart(
                           PieChartData(
                             sectionsSpace: 2,
-                            centerSpaceRadius: 42,
+                            centerSpaceRadius: 40,
                             sections: List.generate(entries.length, (i) {
                               return PieChartSectionData(
                                 value: entries[i].value,
                                 color: _chartColors[i % _chartColors.length],
                                 title: '',
-                                radius: 45,
+                                radius: 38,
                               );
                             }),
                           ),
                         ),
-                        Text(
-                          'Tháng ${now.month}',
-                          style: TextStyle(
-                            fontSize: 12,
-                            color: AppColors.textSecondary,
-                            fontWeight: FontWeight.w500,
-                          ),
+                        Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _formatCompactVnd(total),
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w700,
+                                color: context.appTextPrimary,
+                              ),
+                            ),
+                            Text(
+                              'Tổng chi',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: context.appTextSecondary,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 14),
 
                   // Legend danh sách bên phải
                   Expanded(
@@ -646,7 +814,9 @@ class _AiReportScreenState extends State<AiReportScreen> {
                       children: List.generate(entries.length.clamp(0, 4), (i) {
                         final catId = entries[i].key;
                         final amount = entries[i].value;
-                        final cat = _categories.where((c) => c.categoryId == catId).firstOrNull;
+                        final cat = _categories
+                            .where((c) => c.categoryId == catId)
+                            .firstOrNull;
                         final catName = cat?.name ?? 'Khác';
                         final pct = ((amount / total) * 100).round();
 
@@ -655,11 +825,11 @@ class _AiReportScreenState extends State<AiReportScreen> {
                           child: Row(
                             children: [
                               Container(
-                                width: 10,
-                                height: 10,
+                                width: 8,
+                                height: 8,
                                 decoration: BoxDecoration(
                                   color: _chartColors[i % _chartColors.length],
-                                  borderRadius: BorderRadius.circular(3),
+                                  borderRadius: BorderRadius.circular(2),
                                 ),
                               ),
                               const SizedBox(width: 8),
@@ -668,25 +838,37 @@ class _AiReportScreenState extends State<AiReportScreen> {
                                   catName,
                                   style: TextStyle(
                                     fontSize: 12,
-                                    color: AppColors.textPrimary,
+                                    fontWeight: FontWeight.w500,
+                                    color: context.appTextPrimary,
                                   ),
                                   overflow: TextOverflow.ellipsis,
                                 ),
                               ),
-                              Text(
-                                '$pct%',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                  color: AppColors.textPrimary,
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 5, vertical: 1.5),
+                                decoration: BoxDecoration(
+                                  color: _chartColors[i % _chartColors.length]
+                                      .withValues(alpha: 0.12),
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                child: Text(
+                                  '$pct%',
+                                  style: TextStyle(
+                                    fontSize: 10.5,
+                                    fontWeight: FontWeight.w700,
+                                    color:
+                                        _chartColors[i % _chartColors.length],
+                                  ),
                                 ),
                               ),
                               const SizedBox(width: 6),
                               Text(
-                                'VNĐ ${_formatCompactVnd(amount)}',
+                                _formatCompactVnd(amount),
                                 style: TextStyle(
                                   fontSize: 11,
-                                  color: AppColors.textSecondary,
+                                  fontWeight: FontWeight.w600,
+                                  color: context.appTextSecondary,
                                 ),
                               ),
                             ],
@@ -707,31 +889,76 @@ class _AiReportScreenState extends State<AiReportScreen> {
   // 3. CARD XU HƯỚNG CHI TIÊU 3 THÁNG
   // ============================================================
   Widget _buildTrendCard() {
+    final avgSpend = (_trendAmounts.fold<double>(0, (a, b) => a + b) / 3);
+
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: AppColors.card,
+        color: context.appCard,
         borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        border: Border.all(color: context.appBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text(
-            'Xu hướng chi tiêu 3 tháng',
-            style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(
+                  Icons.bar_chart_rounded,
+                  size: 16,
+                  color: AppColors.primary,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                'Xu hướng chi tiêu 3 tháng',
+                style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 15,
+                  color: context.appTextPrimary,
+                ),
+              ),
+            ],
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 14),
           SpendingTrendBarChart(
             amounts: _trendAmounts,
             monthLabels: _trendMonthLabels,
           ),
+          if (avgSpend > 0) ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: context.appBorder.withValues(alpha: 0.3),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    Icons.auto_graph_rounded,
+                    size: 14,
+                    color: context.appTextSecondary,
+                  ),
+                  const SizedBox(width: 6),
+                  Text(
+                    'Chi tiêu trung bình: ${AppFormatters.compactCurrency(avgSpend)}/tháng',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w500,
+                      color: context.appTextSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -742,40 +969,70 @@ class _AiReportScreenState extends State<AiReportScreen> {
   // ============================================================
   Widget _buildInsightsCard() {
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(18),
       decoration: BoxDecoration(
-        color: AppColors.card,
+        color: context.appCard,
         borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 10,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        border: Border.all(color: context.appBorder),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Row(
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                '💡',
-                style: TextStyle(fontSize: 16),
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: AppColors.primary.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(
+                      Icons.auto_awesome_rounded,
+                      size: 16,
+                      color: AppColors.primary,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    'Đánh giá quan trọng từ AI',
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      fontSize: 15,
+                      color: context.appTextPrimary,
+                    ),
+                  ),
+                ],
               ),
-              SizedBox(width: 6),
-              Text(
-                'Đánh giá quan trọng từ AI',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
-              ),
+              if (_insights.isNotEmpty)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: AppColors.primary.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    '${_insights.length} đề xuất',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.primary,
+                    ),
+                  ),
+                ),
             ],
           ),
           const SizedBox(height: 16),
-
           if (_insights.isEmpty)
-            Text(
-              'Chưa có đánh giá nổi bật nào cho tháng này.',
-              style: TextStyle(color: AppColors.textSecondary, fontSize: 13),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              child: Text(
+                'Chưa có đánh giá nổi bật nào cho tháng này.',
+                style: TextStyle(color: context.appTextSecondary, fontSize: 13),
+              ),
             )
           else
             Column(
@@ -783,30 +1040,52 @@ class _AiReportScreenState extends State<AiReportScreen> {
                 final insight = _insights[i];
                 final isLast = i == _insights.length - 1;
 
+                Color badgeBg;
+                Color badgeBorder;
+                Color iconColor;
                 IconData iconData;
+
                 switch (insight.type) {
                   case _InsightType.positive:
-                    iconData = Icons.sentiment_satisfied_alt_rounded;
+                    badgeBg = AppColors.income.withValues(alpha: 0.05);
+                    badgeBorder = AppColors.income.withValues(alpha: 0.2);
+                    iconColor = AppColors.income;
+                    iconData = Icons.trending_down_rounded;
                     break;
                   case _InsightType.warning:
+                    badgeBg = AppColors.expense.withValues(alpha: 0.05);
+                    badgeBorder = AppColors.expense.withValues(alpha: 0.2);
+                    iconColor = AppColors.expense;
                     iconData = Icons.warning_amber_rounded;
                     break;
                   case _InsightType.success:
-                    iconData = Icons.check_circle_outline_rounded;
+                    badgeBg = AppColors.primary.withValues(alpha: 0.05);
+                    badgeBorder = AppColors.primary.withValues(alpha: 0.2);
+                    iconColor = AppColors.primary;
+                    iconData = Icons.verified_rounded;
                     break;
                 }
 
-                return Padding(
-                  padding: EdgeInsets.only(bottom: isLast ? 0 : 14),
+                return Container(
+                  margin: EdgeInsets.only(bottom: isLast ? 0 : 10),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: badgeBg,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: badgeBorder),
+                  ),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      CircleAvatar(
-                        radius: 14,
-                        backgroundColor: AppColors.accentGreen.withOpacity(0.18),
+                      Container(
+                        padding: const EdgeInsets.all(6),
+                        decoration: BoxDecoration(
+                          color: iconColor.withValues(alpha: 0.15),
+                          shape: BoxShape.circle,
+                        ),
                         child: Icon(
                           iconData,
-                          color: AppColors.primary,
+                          color: iconColor,
                           size: 16,
                         ),
                       ),
@@ -818,18 +1097,18 @@ class _AiReportScreenState extends State<AiReportScreen> {
                             Text(
                               insight.title,
                               style: TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
-                                color: AppColors.textPrimary,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 13.5,
+                                color: context.appTextPrimary,
                               ),
                             ),
-                            const SizedBox(height: 2),
+                            const SizedBox(height: 3),
                             Text(
                               insight.description,
                               style: TextStyle(
                                 fontSize: 12,
-                                color: AppColors.textSecondary,
-                                height: 1.4,
+                                color: context.appTextSecondary,
+                                height: 1.35,
                               ),
                             ),
                           ],
@@ -862,13 +1141,22 @@ class _AiReportScreenState extends State<AiReportScreen> {
 
     try {
       final results = await Future.wait<dynamic>([
-        _firestoreService.streamTransactions(uid, from: monthStart, to: monthEnd).first,
+        _firestoreService
+            .streamTransactions(uid, from: monthStart, to: monthEnd)
+            .first,
         _firestoreService.streamWallets(uid).first,
         _firestoreService.streamCategories(uid).first,
-        _firestoreService.streamBudgets(uid, month: AppFormatters.month(now)).first,
+        _firestoreService
+            .streamBudgets(uid, month: AppFormatters.month(now))
+            .first,
         _firestoreService.streamSavingGoals(uid).first,
-        _firestoreService.streamTransactions(uid, from: lastMonthStart, to: lastMonthEnd).first,
-        _firestoreService.streamTransactions(uid, from: twoMonthsAgoStart, to: twoMonthsAgoEnd).first,
+        _firestoreService
+            .streamTransactions(uid, from: lastMonthStart, to: lastMonthEnd)
+            .first,
+        _firestoreService
+            .streamTransactions(uid,
+                from: twoMonthsAgoStart, to: twoMonthsAgoEnd)
+            .first,
       ]);
 
       final currentTx = results[0] as List<AppTransaction>;
@@ -892,8 +1180,10 @@ class _AiReportScreenState extends State<AiReportScreen> {
         refDate: now,
       );
 
-      final pdfBytes = await _exportService.generateFinancialReportPdf(data: reportData);
-      final filename = 'finance_ai_report_${now.year}-${now.month.toString().padLeft(2, '0')}';
+      final pdfBytes =
+          await _exportService.generateFinancialReportPdf(data: reportData);
+      final filename =
+          'finance_ai_report_${now.year}-${now.month.toString().padLeft(2, '0')}';
       final pdfFile = await _exportService.savePdfToFile(pdfBytes, filename);
 
       if (!mounted) return;
@@ -926,7 +1216,9 @@ class _AiReportScreenState extends State<AiReportScreen> {
 
     try {
       final results = await Future.wait<dynamic>([
-        _firestoreService.streamTransactions(uid, from: monthStart, to: monthEnd).first,
+        _firestoreService
+            .streamTransactions(uid, from: monthStart, to: monthEnd)
+            .first,
         _firestoreService.streamCategories(uid).first,
         _firestoreService.streamWallets(uid).first,
         _firestoreService.streamSavingGoals(uid).first,
@@ -937,7 +1229,8 @@ class _AiReportScreenState extends State<AiReportScreen> {
       final wallets = results[2] as List<Wallet>;
       final savingGoals = results[3] as List<SavingGoal>;
 
-      final filename = 'finance_ai_transactions_${now.year}-${now.month.toString().padLeft(2, '0')}';
+      final filename =
+          'finance_ai_transactions_${now.year}-${now.month.toString().padLeft(2, '0')}';
       final csvFile = await _exportService.exportTransactionsCsv(
         transactions: transactions,
         categories: categories,
@@ -969,6 +1262,9 @@ class _AiReportScreenState extends State<AiReportScreen> {
   // ============================================================
   // 5. HÀNG NÚT ACTION CUỐI TRANG
   // ============================================================
+  // ============================================================
+  // 5. HÀNG NÚT ACTION CUỐI TRANG
+  // ============================================================
   Widget _buildActionButtons() {
     return Column(
       children: [
@@ -977,11 +1273,11 @@ class _AiReportScreenState extends State<AiReportScreen> {
             Expanded(
               child: OutlinedButton.icon(
                 onPressed: _isExportingPdf ? null : _exportPdfReport,
-                icon: const Icon(Icons.ios_share_rounded, size: 18),
-                label: const Text('Chia sẻ báo cáo'),
+                icon: const Icon(Icons.share_outlined, size: 18),
+                label: const Text('Chia sẻ'),
                 style: OutlinedButton.styleFrom(
-                  foregroundColor: AppColors.textPrimary,
-                  side: BorderSide(color: Colors.grey.shade300),
+                  foregroundColor: context.appTextPrimary,
+                  side: BorderSide(color: context.appBorder),
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
@@ -991,33 +1287,35 @@ class _AiReportScreenState extends State<AiReportScreen> {
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: ElevatedButton.icon(
+              child: FilledButton.icon(
                 onPressed: _isExportingPdf ? null : _exportPdfReport,
                 icon: _isExportingPdf
                     ? const SizedBox(
                         width: 18,
                         height: 18,
-                        child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                        child: CircularProgressIndicator(
+                          color: Colors.white,
+                          strokeWidth: 2,
+                        ),
                       )
-                    : const Icon(Icons.download_rounded, size: 18),
-                label: Text(_isExportingPdf ? 'Đang tạo...' : 'Xuất file PDF'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppColors.accentGreen,
+                    : const Icon(Icons.picture_as_pdf_outlined, size: 18),
+                label: Text(_isExportingPdf ? 'Đang tạo...' : 'Xuất PDF'),
+                style: FilledButton.styleFrom(
+                  backgroundColor: AppColors.primary,
                   foregroundColor: Colors.white,
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  elevation: 0,
                 ),
               ),
             ),
           ],
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 10),
         SizedBox(
           width: double.infinity,
-          child: TextButton.icon(
+          child: OutlinedButton.icon(
             onPressed: _isExportingCsv ? null : _exportCsvReport,
             icon: _isExportingCsv
                 ? const SizedBox(
@@ -1025,11 +1323,17 @@ class _AiReportScreenState extends State<AiReportScreen> {
                     height: 16,
                     child: CircularProgressIndicator(strokeWidth: 2),
                   )
-                : const Icon(Icons.table_chart_outlined, size: 18),
-            label: Text(_isExportingCsv ? 'Đang xuất CSV...' : 'Xuất dữ liệu CSV tháng này'),
-            style: TextButton.styleFrom(
-              foregroundColor: AppColors.primary,
+                : const Icon(Icons.table_chart_outlined, size: 17),
+            label: Text(_isExportingCsv
+                ? 'Đang xuất CSV...'
+                : 'Xuất dữ liệu giao dịch (CSV)'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: context.appTextSecondary,
+              side: BorderSide(color: context.appBorder),
               padding: const EdgeInsets.symmetric(vertical: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(12),
+              ),
             ),
           ),
         ),
@@ -1037,4 +1341,3 @@ class _AiReportScreenState extends State<AiReportScreen> {
     );
   }
 }
-

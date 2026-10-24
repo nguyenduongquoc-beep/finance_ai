@@ -649,13 +649,22 @@ class FirestoreService {
   }
 
   Stream<List<SavingGoal>> streamSavingGoals(String userId) {
+    if (userId.isEmpty) {
+      return Stream.value([]);
+    }
     return _db
         .collection('savingGoals')
         .where('userId', isEqualTo: userId)
         .snapshots()
         .map((snap) {
-      final list =
-          snap.docs.map((d) => SavingGoal.fromMap(d.data(), d.id)).toList();
+      final list = <SavingGoal>[];
+      for (final doc in snap.docs) {
+        try {
+          list.add(SavingGoal.fromMap(doc.data(), doc.id));
+        } catch (e) {
+          debugPrint('❌ Lỗi parse SavingGoal doc ${doc.id}: $e');
+        }
+      }
       list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
       return list;
     });
@@ -663,6 +672,10 @@ class FirestoreService {
 
   Future<void> updateSavingGoal(String goalId, Map<String, dynamic> data) {
     return _db.collection('savingGoals').doc(goalId).update(data);
+  }
+
+  Future<void> deleteSavingGoal(String goalId) {
+    return _db.collection('savingGoals').doc(goalId).delete();
   }
 
   // ---------------- NOTIFICATIONS ----------------
@@ -848,95 +861,113 @@ class FirestoreService {
         debugPrint(
             '[DebugRecurring] collection: wallets, op: read, scheduleId: ${schedule.scheduleId}');
 
-        await _db.runTransaction((txn) async {
-          final occSnap = await txn.get(occurrenceRef);
-          if (occSnap.exists) {
-            transactionAlreadyExists = true;
-            return;
-          }
+        Future<void> executeProcessTxn({required bool withOccurrence}) async {
+          await _db.runTransaction((txn) async {
+            if (withOccurrence) {
+              final occSnap = await txn.get(occurrenceRef);
+              if (occSnap.exists) {
+                transactionAlreadyExists = true;
+                return;
+              }
+            }
 
-          final txSnap = await txn.get(txRef);
-          if (txSnap.exists) {
-            transactionAlreadyExists = true;
-            return;
-          }
+            final txSnap = await txn.get(txRef);
+            if (txSnap.exists) {
+              transactionAlreadyExists = true;
+              return;
+            }
 
-          final walletSnap = await txn.get(walletRef);
-          if (!walletSnap.exists) {
-            walletUnavailable = true;
-            return;
-          }
+            final walletSnap = await txn.get(walletRef);
+            if (!walletSnap.exists) {
+              walletUnavailable = true;
+              return;
+            }
 
-          final walletData = walletSnap.data() as Map<String, dynamic>;
-          final wallet = Wallet.fromMap(walletData, walletSnap.id);
+            final walletData = walletSnap.data() as Map<String, dynamic>;
+            final wallet = Wallet.fromMap(walletData, walletSnap.id);
 
-          if (wallet.userId.isEmpty || wallet.userId != userId) {
-            invalidUserData = true;
-            return;
-          }
+            if (wallet.userId.isEmpty || wallet.userId != userId) {
+              invalidUserData = true;
+              return;
+            }
 
-          if (!wallet.isActive) {
-            walletUnavailable = true;
-            return;
-          }
+            if (!wallet.isActive) {
+              walletUnavailable = true;
+              return;
+            }
 
-          if (schedule.type == 'expense' && wallet.balance < schedule.amount) {
-            insufficientBalance = true;
-            return;
-          }
+            if (schedule.type == 'expense' && wallet.balance < schedule.amount) {
+              insufficientBalance = true;
+              return;
+            }
 
-          final appTx = AppTransaction(
-            transactionId: deterministicTxId,
-            userId: userId,
-            walletId: schedule.walletId,
-            categoryId: schedule.categoryId,
-            amount: schedule.amount,
-            type: schedule.type,
-            note: schedule.note != null && schedule.note!.isNotEmpty
-                ? schedule.note
-                : 'Giao dịch định kỳ',
-            date: occurrenceDate,
-            recurringScheduleId: schedule.scheduleId,
-            recurringOccurrenceKey: occurrenceKey,
-          );
+            final appTx = AppTransaction(
+              transactionId: deterministicTxId,
+              userId: userId,
+              walletId: schedule.walletId,
+              categoryId: schedule.categoryId,
+              amount: schedule.amount,
+              type: schedule.type,
+              note: schedule.note != null && schedule.note!.isNotEmpty
+                  ? schedule.note
+                  : 'Giao dịch định kỳ',
+              date: occurrenceDate,
+              recurringScheduleId: schedule.scheduleId,
+              recurringOccurrenceKey: occurrenceKey,
+            );
 
-          debugPrint(
-              '[DebugRecurring] collection: transactions, op: create, scheduleId: ${schedule.scheduleId}');
-          txn.set(txRef, appTx.toMap());
+            debugPrint(
+                '[DebugRecurring] collection: transactions, op: create, scheduleId: ${schedule.scheduleId}');
+            txn.set(txRef, appTx.toMap());
 
-          final delta =
-              schedule.type == 'income' ? schedule.amount : -schedule.amount;
+            final delta =
+                schedule.type == 'income' ? schedule.amount : -schedule.amount;
 
-          debugPrint(
-              '[DebugRecurring] collection: wallets, op: update, scheduleId: ${schedule.scheduleId}');
-          txn.update(walletRef, {
-            'balance': FieldValue.increment(delta),
+            debugPrint(
+                '[DebugRecurring] collection: wallets, op: update, scheduleId: ${schedule.scheduleId}');
+            txn.update(walletRef, {
+              'balance': FieldValue.increment(delta),
+            });
+
+            final nextDueDate = recService.nextOccurrenceAfter(
+              occurrenceDate,
+              schedule.frequency,
+              schedule.startDate,
+            );
+
+            debugPrint(
+                '[DebugRecurring] collection: recurringTransactions, op: update, scheduleId: ${schedule.scheduleId}');
+            txn.update(scheduleRef, {
+              'nextDueDate': nextDueDate.toIso8601String(),
+              'lastProcessedKey': occurrenceKey,
+              'updatedAt': DateTime.now().toIso8601String(),
+            });
+
+            if (withOccurrence) {
+              txn.set(occurrenceRef, {
+                'userId': userId,
+                'scheduleId': schedule.scheduleId,
+                'occurrenceKey': occurrenceKey,
+                'scheduledDate': occurrenceDate.toIso8601String(),
+                'action': 'confirmed',
+                'actionAt': DateTime.now().toIso8601String(),
+                'transactionId': deterministicTxId,
+              });
+            }
           });
+        }
 
-          final nextDueDate = recService.nextOccurrenceAfter(
-            occurrenceDate,
-            schedule.frequency,
-            schedule.startDate,
-          );
-
-          debugPrint(
-              '[DebugRecurring] collection: recurringTransactions, op: update, scheduleId: ${schedule.scheduleId}');
-          txn.update(scheduleRef, {
-            'nextDueDate': nextDueDate.toIso8601String(),
-            'lastProcessedKey': occurrenceKey,
-            'updatedAt': DateTime.now().toIso8601String(),
-          });
-
-          txn.set(occurrenceRef, {
-            'userId': userId,
-            'scheduleId': schedule.scheduleId,
-            'occurrenceKey': occurrenceKey,
-            'scheduledDate': occurrenceDate.toIso8601String(),
-            'action': 'confirmed',
-            'actionAt': DateTime.now().toIso8601String(),
-            'transactionId': deterministicTxId,
-          });
-        });
+        try {
+          await executeProcessTxn(withOccurrence: true);
+        } catch (e) {
+          if (_isPermissionDeniedError(e)) {
+            debugPrint(
+                '[Recurring] Warning: occurrenceRef threw permission-denied. Retrying without occurrence collection: $e');
+            await executeProcessTxn(withOccurrence: false);
+          } else {
+            rethrow;
+          }
+        }
 
         if (transactionAlreadyExists) {
           skippedCount++;
@@ -950,7 +981,7 @@ class FirestoreService {
           stopSchedule = true;
         } else if (insufficientBalance) {
           failedSchedules.add(
-              'Ví không đủ số dư để ghi nhận khoản "${schedule.note ?? 'Giao dịch định kỳ'}" (${schedule.amount.round()}đ).');
+              'Ví không đủ số dư để thanh toán khoản "${schedule.note ?? 'Giao dịch định kỳ'}" (${schedule.amount.round()}đ).');
           stopSchedule = true;
         } else {
           processedCount++;
@@ -986,78 +1017,102 @@ class FirestoreService {
     final scheduleRef =
         _db.collection('recurringTransactions').doc(schedule.scheduleId);
 
-    await _db.runTransaction((txn) async {
-      final occSnap = await txn.get(occurrenceRef);
-      if (occSnap.exists) {
-        throw Exception('Kỳ giao dịch này đã được xác nhận hoặc xử lý trước đó.');
-      }
-      final txSnap = await txn.get(txRef);
-      if (txSnap.exists) {
-        throw Exception('Giao dịch của kỳ này đã tồn tại.');
-      }
+    Future<void> executeConfirmTxn({required bool withOccurrence}) async {
+      await _db.runTransaction((txn) async {
+        if (withOccurrence) {
+          final occSnap = await txn.get(occurrenceRef);
+          if (occSnap.exists) {
+            throw Exception('Kỳ giao dịch này đã được xác nhận hoặc xử lý trước đó.');
+          }
+        }
+        final txSnap = await txn.get(txRef);
+        if (txSnap.exists) {
+          throw Exception('Giao dịch của kỳ này đã tồn tại.');
+        }
 
-      final walletSnap = await txn.get(walletRef);
-      if (!walletSnap.exists) {
-        throw Exception('Ví thực hiện không tồn tại.');
-      }
-      final walletData = walletSnap.data() as Map<String, dynamic>;
-      final wallet = Wallet.fromMap(walletData, walletSnap.id);
+        final scheduleSnap = await txn.get(scheduleRef);
+        if (scheduleSnap.exists) {
+          final sData = scheduleSnap.data();
+          if (sData != null && sData['lastProcessedKey'] == occurrenceKey) {
+            throw Exception('Kỳ giao dịch này đã được xác nhận hoặc xử lý trước đó.');
+          }
+        }
 
-      if (wallet.userId.isEmpty || wallet.userId != userId) {
-        throw Exception('Ví thực hiện thiếu userId hợp lệ.');
-      }
-      if (!wallet.isActive) {
-        throw Exception('Ví thực hiện đã bị ẩn hoặc không hoạt động.');
-      }
-      if (schedule.type == 'expense' && wallet.balance < schedule.amount) {
-        throw Exception('Ví không đủ số dư để xác nhận giao dịch (${schedule.amount.round()}đ).');
-      }
+        final walletSnap = await txn.get(walletRef);
+        if (!walletSnap.exists) {
+          throw Exception('Ví thực hiện không tồn tại.');
+        }
+        final walletData = walletSnap.data() as Map<String, dynamic>;
+        final wallet = Wallet.fromMap(walletData, walletSnap.id);
 
-      final appTx = AppTransaction(
-        transactionId: deterministicTxId,
-        userId: userId,
-        walletId: schedule.walletId,
-        categoryId: schedule.categoryId,
-        amount: schedule.amount,
-        type: schedule.type,
-        note: schedule.note != null && schedule.note!.isNotEmpty
-            ? schedule.note
-            : 'Giao dịch định kỳ',
-        date: occurrenceDate,
-        recurringScheduleId: schedule.scheduleId,
-        recurringOccurrenceKey: occurrenceKey,
-      );
+        if (wallet.userId.isEmpty || wallet.userId != userId) {
+          throw Exception('Ví thực hiện thiếu userId hợp lệ.');
+        }
+        if (!wallet.isActive) {
+          throw Exception('Ví thực hiện đã bị ẩn hoặc không hoạt động.');
+        }
+        if (schedule.type == 'expense' && wallet.balance < schedule.amount) {
+          throw Exception('Ví không đủ số dư để xác nhận giao dịch (${schedule.amount.round()}đ).');
+        }
 
-      txn.set(txRef, appTx.toMap());
+        final appTx = AppTransaction(
+          transactionId: deterministicTxId,
+          userId: userId,
+          walletId: schedule.walletId,
+          categoryId: schedule.categoryId,
+          amount: schedule.amount,
+          type: schedule.type,
+          note: schedule.note != null && schedule.note!.isNotEmpty
+              ? schedule.note
+              : 'Giao dịch định kỳ',
+          date: occurrenceDate,
+          recurringScheduleId: schedule.scheduleId,
+          recurringOccurrenceKey: occurrenceKey,
+        );
 
-      final delta =
-          schedule.type == 'income' ? schedule.amount : -schedule.amount;
-      txn.update(walletRef, {
-        'balance': FieldValue.increment(delta),
+        txn.set(txRef, appTx.toMap());
+
+        final delta =
+            schedule.type == 'income' ? schedule.amount : -schedule.amount;
+        txn.update(walletRef, {
+          'balance': FieldValue.increment(delta),
+        });
+
+        final nextDueDate = recService.nextOccurrenceAfter(
+          occurrenceDate,
+          schedule.frequency,
+          schedule.startDate,
+        );
+
+        txn.update(scheduleRef, {
+          'nextDueDate': nextDueDate.toIso8601String(),
+          'lastProcessedKey': occurrenceKey,
+          'updatedAt': DateTime.now().toIso8601String(),
+        });
+
+        if (withOccurrence) {
+          txn.set(occurrenceRef, {
+            'userId': userId,
+            'scheduleId': schedule.scheduleId,
+            'occurrenceKey': occurrenceKey,
+            'scheduledDate': occurrenceDate.toIso8601String(),
+            'action': 'confirmed',
+            'actionAt': DateTime.now().toIso8601String(),
+            'transactionId': deterministicTxId,
+          });
+        }
       });
+    }
 
-      final nextDueDate = recService.nextOccurrenceAfter(
-        occurrenceDate,
-        schedule.frequency,
-        schedule.startDate,
-      );
-
-      txn.update(scheduleRef, {
-        'nextDueDate': nextDueDate.toIso8601String(),
-        'lastProcessedKey': occurrenceKey,
-        'updatedAt': DateTime.now().toIso8601String(),
-      });
-
-      txn.set(occurrenceRef, {
-        'userId': userId,
-        'scheduleId': schedule.scheduleId,
-        'occurrenceKey': occurrenceKey,
-        'scheduledDate': occurrenceDate.toIso8601String(),
-        'action': 'confirmed',
-        'actionAt': DateTime.now().toIso8601String(),
-        'transactionId': deterministicTxId,
-      });
-    });
+    try {
+      await executeConfirmTxn(withOccurrence: true);
+    } catch (e) {
+      if (_isPermissionDeniedError(e)) {
+        await executeConfirmTxn(withOccurrence: false);
+      } else {
+        rethrow;
+      }
+    }
   }
 
   /// Bỏ qua kỳ giao dịch định kỳ thủ công
@@ -1075,33 +1130,57 @@ class FirestoreService {
     final scheduleRef =
         _db.collection('recurringTransactions').doc(schedule.scheduleId);
 
-    await _db.runTransaction((txn) async {
-      final occSnap = await txn.get(occurrenceRef);
-      if (occSnap.exists) {
-        throw Exception('Kỳ giao dịch này đã được xử lý trước đó.');
+    Future<void> executeSkipTxn({required bool withOccurrence}) async {
+      await _db.runTransaction((txn) async {
+        if (withOccurrence) {
+          final occSnap = await txn.get(occurrenceRef);
+          if (occSnap.exists) {
+            throw Exception('Kỳ giao dịch này đã được xử lý trước đó.');
+          }
+        }
+
+        final scheduleSnap = await txn.get(scheduleRef);
+        if (scheduleSnap.exists) {
+          final sData = scheduleSnap.data();
+          if (sData != null && sData['lastProcessedKey'] == occurrenceKey) {
+            throw Exception('Kỳ giao dịch này đã được xử lý trước đó.');
+          }
+        }
+
+        final nextDueDate = recService.nextOccurrenceAfter(
+          occurrenceDate,
+          schedule.frequency,
+          schedule.startDate,
+        );
+
+        txn.update(scheduleRef, {
+          'nextDueDate': nextDueDate.toIso8601String(),
+          'lastProcessedKey': occurrenceKey,
+          'updatedAt': DateTime.now().toIso8601String(),
+        });
+
+        if (withOccurrence) {
+          txn.set(occurrenceRef, {
+            'userId': userId,
+            'scheduleId': schedule.scheduleId,
+            'occurrenceKey': occurrenceKey,
+            'scheduledDate': occurrenceDate.toIso8601String(),
+            'action': 'skipped',
+            'actionAt': DateTime.now().toIso8601String(),
+          });
+        }
+      });
+    }
+
+    try {
+      await executeSkipTxn(withOccurrence: true);
+    } catch (e) {
+      if (_isPermissionDeniedError(e)) {
+        await executeSkipTxn(withOccurrence: false);
+      } else {
+        rethrow;
       }
-
-      final nextDueDate = recService.nextOccurrenceAfter(
-        occurrenceDate,
-        schedule.frequency,
-        schedule.startDate,
-      );
-
-      txn.update(scheduleRef, {
-        'nextDueDate': nextDueDate.toIso8601String(),
-        'lastProcessedKey': occurrenceKey,
-        'updatedAt': DateTime.now().toIso8601String(),
-      });
-
-      txn.set(occurrenceRef, {
-        'userId': userId,
-        'scheduleId': schedule.scheduleId,
-        'occurrenceKey': occurrenceKey,
-        'scheduledDate': occurrenceDate.toIso8601String(),
-        'action': 'skipped',
-        'actionAt': DateTime.now().toIso8601String(),
-      });
-    });
+    }
   }
 
   /// Dời ngày giao dịch định kỳ thủ công
@@ -1119,28 +1198,52 @@ class FirestoreService {
     final scheduleRef =
         _db.collection('recurringTransactions').doc(schedule.scheduleId);
 
-    await _db.runTransaction((txn) async {
-      final occSnap = await txn.get(occurrenceRef);
-      if (occSnap.exists) {
-        throw Exception('Kỳ giao dịch này đã được xử lý trước đó.');
+    Future<void> executeDeferTxn({required bool withOccurrence}) async {
+      await _db.runTransaction((txn) async {
+        if (withOccurrence) {
+          final occSnap = await txn.get(occurrenceRef);
+          if (occSnap.exists) {
+            throw Exception('Kỳ giao dịch này đã được xử lý trước đó.');
+          }
+        }
+
+        final scheduleSnap = await txn.get(scheduleRef);
+        if (scheduleSnap.exists) {
+          final sData = scheduleSnap.data();
+          if (sData != null && sData['lastProcessedKey'] == occurrenceKey) {
+            throw Exception('Kỳ giao dịch này đã được xử lý trước đó.');
+          }
+        }
+
+        txn.update(scheduleRef, {
+          'nextDueDate': newDueDate.toIso8601String(),
+          'lastProcessedKey': occurrenceKey,
+          'updatedAt': DateTime.now().toIso8601String(),
+        });
+
+        if (withOccurrence) {
+          txn.set(occurrenceRef, {
+            'userId': userId,
+            'scheduleId': schedule.scheduleId,
+            'occurrenceKey': occurrenceKey,
+            'scheduledDate': occurrenceDate.toIso8601String(),
+            'action': 'deferred',
+            'actionAt': DateTime.now().toIso8601String(),
+            'deferredTo': newDueDate.toIso8601String(),
+          });
+        }
+      });
+    }
+
+    try {
+      await executeDeferTxn(withOccurrence: true);
+    } catch (e) {
+      if (_isPermissionDeniedError(e)) {
+        await executeDeferTxn(withOccurrence: false);
+      } else {
+        rethrow;
       }
-
-      txn.update(scheduleRef, {
-        'nextDueDate': newDueDate.toIso8601String(),
-        'lastProcessedKey': occurrenceKey,
-        'updatedAt': DateTime.now().toIso8601String(),
-      });
-
-      txn.set(occurrenceRef, {
-        'userId': userId,
-        'scheduleId': schedule.scheduleId,
-        'occurrenceKey': occurrenceKey,
-        'scheduledDate': occurrenceDate.toIso8601String(),
-        'action': 'deferred',
-        'actionAt': DateTime.now().toIso8601String(),
-        'deferredTo': newDueDate.toIso8601String(),
-      });
-    });
+    }
   }
 
   Stream<List<RecurringTransactionOccurrence>> streamRecurringOccurrences(
@@ -1151,6 +1254,177 @@ class FirestoreService {
         .snapshots()
         .map((snap) => snap.docs
             .map((d) => RecurringTransactionOccurrence.fromMap(d.data(), d.id))
-            .toList());
+            .toList())
+        .handleError((error) {
+      debugPrint('[streamRecurringOccurrences] error: $error');
+      return <RecurringTransactionOccurrence>[];
+    });
+  }
+
+  bool _isPermissionDeniedError(Object e) {
+    if (e is FirebaseException && e.code == 'permission-denied') return true;
+    final msg = e.toString().toLowerCase();
+    return msg.contains('permission-denied') || msg.contains('permission denied');
+  }
+
+  // ---------------- SAFE FINANCIAL QUERIES (FOR AI & ASSISTANT) ----------------
+  /// Lấy toàn bộ transactions của user bằng single-field index (an toàn tuyệt đối không phụ thuộc composite index)
+  Future<List<AppTransaction>> getTransactionsSafely(String userId) async {
+    try {
+      final snap = await _db
+          .collection('transactions')
+          .where('userId', isEqualTo: userId)
+          .get();
+      final list = snap.docs
+          .map((d) => AppTransaction.fromMap(d.data(), d.id))
+          .toList();
+      list.sort((a, b) => b.date.compareTo(a.date));
+      return list;
+    } catch (e) {
+      debugPrint('Error getting transactions safely: $e');
+      return [];
+    }
+  }
+
+  /// Lấy toàn bộ wallets của user an toàn
+  Future<List<Wallet>> getWalletsSafely(String userId) async {
+    try {
+      final snap = await _db
+          .collection('wallets')
+          .where('userId', isEqualTo: userId)
+          .get();
+      return snap.docs.map((d) => Wallet.fromMap(d.data(), d.id)).toList();
+    } catch (e) {
+      debugPrint('Error getting wallets safely: $e');
+      return [];
+    }
+  }
+
+  /// Lấy toàn bộ categories của user an toàn
+  Future<List<Category>> getCategoriesSafely(String userId) async {
+    try {
+      final snap = await _db
+          .collection('categories')
+          .where('userId', isEqualTo: userId)
+          .get();
+      return snap.docs.map((d) => Category.fromMap(d.data(), d.id)).toList();
+    } catch (e) {
+      debugPrint('Error getting categories safely: $e');
+      return [];
+    }
+  }
+
+  /// Lấy toàn bộ budgets của user an toàn
+  Future<List<Budget>> getBudgetsSafely(String userId, {String? month}) async {
+    try {
+      Query<Map<String, dynamic>> query =
+          _db.collection('budgets').where('userId', isEqualTo: userId);
+      if (month != null) {
+        query = query.where('month', isEqualTo: month);
+      }
+      final snap = await query.get();
+      return snap.docs.map((d) => Budget.fromMap(d.data(), d.id)).toList();
+    } catch (e) {
+      debugPrint('Error getting budgets safely: $e');
+      return [];
+    }
+  }
+
+  /// Lấy toàn bộ savingGoals của user an toàn
+  Future<List<SavingGoal>> getSavingGoalsSafely(String userId) async {
+    try {
+      final snap = await _db
+          .collection('savingGoals')
+          .where('userId', isEqualTo: userId)
+          .get();
+      return snap.docs.map((d) => SavingGoal.fromMap(d.data(), d.id)).toList();
+    } catch (e) {
+      debugPrint('Error getting saving goals safely: $e');
+      return [];
+    }
+  }
+
+  // ---------------- CHAT SESSIONS & CONVERSATION HISTORY ----------------
+  /// Lưu hoặc cập nhật một phiên trò chuyện AI
+  Future<void> saveChatSession({
+    required String userId,
+    required String sessionId,
+    required String title,
+    required List<Map<String, dynamic>> messages,
+  }) async {
+    try {
+      final ref = _db
+          .collection('users')
+          .doc(userId)
+          .collection('chat_sessions')
+          .doc(sessionId);
+
+      await ref.set({
+        'sessionId': sessionId,
+        'userId': userId,
+        'title': title,
+        'updatedAt': DateTime.now().toIso8601String(),
+        'createdAt': FieldValue.serverTimestamp(),
+        'messages': messages,
+      }, SetOptions(merge: true));
+    } catch (e) {
+      debugPrint('Error saving chat session: $e');
+    }
+  }
+
+  /// Lấy danh sách các phiên trò chuyện của user
+  Future<List<Map<String, dynamic>>> getUserChatSessions(String userId) async {
+    try {
+      final snap = await _db
+          .collection('users')
+          .doc(userId)
+          .collection('chat_sessions')
+          .orderBy('updatedAt', descending: true)
+          .limit(30)
+          .get();
+
+      return snap.docs.map((d) {
+        final data = d.data();
+        data['sessionId'] = d.id;
+        return data;
+      }).toList();
+    } catch (e) {
+      debugPrint('Error getting user chat sessions: $e');
+      return [];
+    }
+  }
+
+  /// Lấy chi tiết một phiên trò chuyện
+  Future<Map<String, dynamic>?> getChatSession(String userId, String sessionId) async {
+    try {
+      final doc = await _db
+          .collection('users')
+          .doc(userId)
+          .collection('chat_sessions')
+          .doc(sessionId)
+          .get();
+
+      if (!doc.exists) return null;
+      final data = doc.data()!;
+      data['sessionId'] = doc.id;
+      return data;
+    } catch (e) {
+      debugPrint('Error getting chat session: $e');
+      return null;
+    }
+  }
+
+  /// Xóa một phiên trò chuyện
+  Future<void> deleteChatSession(String userId, String sessionId) async {
+    try {
+      await _db
+          .collection('users')
+          .doc(userId)
+          .collection('chat_sessions')
+          .doc(sessionId)
+          .delete();
+    } catch (e) {
+      debugPrint('Error deleting chat session: $e');
+    }
   }
 }

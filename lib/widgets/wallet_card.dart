@@ -2,12 +2,87 @@ import 'package:flutter/material.dart';
 import '../models/wallet_model.dart';
 import '../utils/constants.dart';
 import '../utils/formatters.dart';
+import 'app_card.dart';
 
-/// Widget hiển thị một ví tiền (dùng trong danh sách "Ví của tôi")
+/// Nhóm loại ví dùng chung cho màn hình Ví và thẻ ví.
+/// Loại không xác định sẽ được gom vào [other].
+class WalletTypeStyle {
+  final String key;
+  final String label;
+  final String pluralLabel;
+  final IconData icon;
+
+  /// Màu dùng trên nền sáng/tối thông thường (icon, thanh tỷ trọng).
+  final Color color;
+
+  /// Màu sáng hơn dùng trên nền hero gradient tối.
+  final Color onDarkColor;
+
+  const WalletTypeStyle._(
+    this.key,
+    this.label,
+    this.pluralLabel,
+    this.icon,
+    this.color,
+    this.onDarkColor,
+  );
+
+  static const bank = WalletTypeStyle._(
+    'bank',
+    'Ngân hàng',
+    'Tài khoản ngân hàng',
+    Icons.account_balance_rounded,
+    Color(0xFF2F7FB5),
+    Color(0xFF8FD3EA),
+  );
+  static const eWallet = WalletTypeStyle._(
+    'eWallet',
+    'Ví điện tử',
+    'Ví điện tử',
+    Icons.phone_iphone_rounded,
+    Color(0xFF7A5FC9),
+    Color(0xFFC3B5F2),
+  );
+  static const cash = WalletTypeStyle._(
+    'cash',
+    'Tiền mặt',
+    'Tiền mặt',
+    Icons.payments_rounded,
+    Color(0xFF2E8B57),
+    Color(0xFF86DBA9),
+  );
+  static const other = WalletTypeStyle._(
+    'other',
+    'Khác',
+    'Khác',
+    Icons.account_balance_wallet_rounded,
+    Color(0xFF6D6E69),
+    Color(0xFFD3D3CE),
+  );
+
+  /// Thứ tự hiển thị các nhóm.
+  static const List<WalletTypeStyle> values = [bank, eWallet, cash, other];
+
+  static WalletTypeStyle of(String type) {
+    switch (type) {
+      case 'bank':
+        return bank;
+      case 'eWallet':
+        return eWallet;
+      case 'cash':
+        return cash;
+      default:
+        return other;
+    }
+  }
+}
+
+/// Widget hiển thị thẻ ví tiền chuẩn Fintech
 class WalletCard extends StatelessWidget {
   final Wallet wallet;
   final VoidCallback? onTap;
   final VoidCallback? onLongPress;
+  final VoidCallback? onMore;
   final double shareOfTotal;
 
   const WalletCard({
@@ -15,128 +90,123 @@ class WalletCard extends StatelessWidget {
     required this.wallet,
     this.onTap,
     this.onLongPress,
+    this.onMore,
     required this.shareOfTotal,
   });
 
-  IconData get _icon {
-    switch (wallet.type) {
-      case 'bank':
-        return Icons.account_balance;
-      case 'eWallet':
-        return Icons.phone_iphone;
-      case 'cash':
-        return Icons.payments;
-      default:
-        return Icons.account_balance_wallet;
-    }
-  }
-
-  Color _typeColor(String type) {
-    switch (type) {
-      case 'cash':
-        return AppColors.income; // xanh lá
-      case 'bank':
-        return Colors.blueAccent;
-      case 'eWallet':
-        return Colors.pinkAccent;
-      default:
-        return AppColors.textSecondary;
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 20, vertical: 6),
-      decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.grey.shade200),
-      ),
-      child: Material(
-        color: Colors.transparent,
-        borderRadius: BorderRadius.circular(16),
-        child: InkWell(
-          onTap: onTap,
-          onLongPress: onLongPress,
-          borderRadius: BorderRadius.circular(16),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
+    final style = WalletTypeStyle.of(wallet.type);
+    final isNegative = wallet.balance < 0;
+    final hasDesc = wallet.description != null && wallet.description!.trim().isNotEmpty;
+    final share = shareOfTotal.clamp(0.0, 1.0);
+
+    return GestureDetector(
+      onLongPress: onLongPress,
+      child: AppCard(
+        onTap: onTap,
+        margin: const EdgeInsets.only(bottom: 10),
+        padding: const EdgeInsets.fromLTRB(14, 14, 6, 14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                Row(
-                  children: [
-                    Container(
-                      width: 44,
-                      height: 44,
-                      decoration: BoxDecoration(
-                        color: _typeColor(wallet.type).withOpacity(0.15),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Icon(_icon, color: _typeColor(wallet.type)),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            wallet.walletName,
-                            style: TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 15,
-                              color: AppColors.textPrimary,
-                            ),
-                          ),
-                          if (wallet.description != null && wallet.description!.isNotEmpty)
-                            Text(
-                              wallet.description!,
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: AppColors.textSecondary,
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                    Text(
-                      AppFormatters.currency(wallet.balance),
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
-                        color: AppColors.textPrimary,
-                      ),
-                    ),
-                  ],
+                Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(
+                    color: style.color.withAlpha(context.isDarkMode ? 45 : 28),
+                    borderRadius: BorderRadius.circular(14),
+                  ),
+                  child: Icon(style.icon, color: style.color, size: 23),
                 ),
-                const SizedBox(height: 12),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(4),
-                  child: LinearProgressIndicator(
-                    value: shareOfTotal.clamp(0.0, 1.0),
-                    minHeight: 6,
-                    backgroundColor: Colors.grey.shade200,
-                    valueColor: AlwaysStoppedAnimation<Color>(_typeColor(wallet.type)),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        wallet.walletName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          fontSize: 15,
+                          color: context.appTextPrimary,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        hasDesc ? '${style.label} • ${wallet.description!.trim()}' : style.label,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: context.appTextSecondary,
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 4),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                  children: [
-                    Text(
-                      'Tỷ lệ trong tổng tài sản',
-                      style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                const SizedBox(width: 8),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 130),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerRight,
+                    child: Text(
+                      AppFormatters.compactCurrency(wallet.balance, unit: '₫'),
+                      style: TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 16,
+                        color: isNegative ? AppColors.expense : context.appTextPrimary,
+                        fontFeatures: const [FontFeature.tabularFigures()],
+                      ),
                     ),
-                    Text(
-                      '${(shareOfTotal * 100).round()}%',
-                      style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
-                    ),
-                  ],
+                  ),
                 ),
+                if (onMore != null)
+                  IconButton(
+                    onPressed: onMore,
+                    visualDensity: VisualDensity.compact,
+                    tooltip: 'Tùy chọn',
+                    icon: Icon(Icons.more_vert_rounded, size: 20, color: context.appTextSecondary),
+                  )
+                else
+                  const SizedBox(width: 8),
               ],
             ),
-          ),
+            const SizedBox(height: 14),
+            Padding(
+              padding: const EdgeInsets.only(right: 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(4),
+                      child: LinearProgressIndicator(
+                        value: share,
+                        minHeight: 5,
+                        backgroundColor: context.appInputFill,
+                        valueColor: AlwaysStoppedAnimation<Color>(style.color),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    '${(share * 100).round()}% tổng tài sản',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w500,
+                      color: context.appTextSecondary,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );

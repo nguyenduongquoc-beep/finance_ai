@@ -3,8 +3,10 @@ import '../models/category_model.dart';
 import '../models/financial_forecast_result.dart';
 import '../models/financial_issue.dart';
 import '../models/recurring_transaction_model.dart';
+import '../models/saving_goal_model.dart';
 import '../models/transaction_model.dart';
 import '../models/wallet_model.dart';
+import 'financial_analytics_service.dart';
 import 'recurring_transaction_service.dart';
 
 /// ============================================================
@@ -390,9 +392,24 @@ class FinancialForecastService {
 
     // 4. Các vấn đề tài chính khác (FinancialIssue không trùng với category anomalies)
     for (final issue in issues) {
-      // Chỉ tính nếu chưa được gộp
       if (issue.category == IssueCategory.lowSaving) {
         final pts = issue.severity == IssueSeverity.critical ? 15 : 8;
+        outDeductions.add(HealthScoreDeduction(
+          reason: issue.title,
+          points: pts,
+        ));
+        score -= pts;
+      } else if (issue.category == IssueCategory.negativeCashflow &&
+          monthEndForecast.projectedEndBalance >= 0) {
+        // Chỉ phạt thêm nếu chưa bị phạt nặng ở mục âm số dư cuối tháng
+        const pts = 12;
+        outDeductions.add(HealthScoreDeduction(
+          reason: issue.title,
+          points: pts,
+        ));
+        score -= pts;
+      } else if (issue.category == IssueCategory.incomeDrop) {
+        final pts = issue.severity == IssueSeverity.critical ? 10 : 5;
         outDeductions.add(HealthScoreDeduction(
           reason: issue.title,
           points: pts,
@@ -404,7 +421,7 @@ class FinancialForecastService {
     return score.clamp(0, 100).round();
   }
 
-  /// 5. Tạo FinancialInsightSummary hoàn chỉnh
+  /// 5. Tạo FinancialInsightSummary hoàn chỉnh tích hợp phân tích đa chiều
   FinancialInsightSummary generateSummary({
     required List<Wallet> activeWallets,
     required List<Budget> currentMonthBudgets,
@@ -413,10 +430,16 @@ class FinancialForecastService {
     required List<List<AppTransaction>> preceding3MonthsTx,
     required double monthlyIncome,
     required List<FinancialIssue> issues,
+    List<SavingGoal>? savingGoals,
     List<RecurringTransactionSchedule>? recurringSchedules,
     DateTime? refDate,
   }) {
     final today = refDate ?? DateTime.now();
+    final analytics = FinancialAnalyticsService();
+
+    final lastMonthTx = preceding3MonthsTx.isNotEmpty
+        ? preceding3MonthsTx.last
+        : <AppTransaction>[];
 
     final monthEnd = calculateMonthEndForecast(
       activeWallets: activeWallets,
@@ -448,12 +471,61 @@ class FinancialForecastService {
       outDeductions: deductions,
     );
 
+    // 1. Phân tích thu nhập & độ ổn định
+    final incomeAnalytics = analytics.computeIncomeAnalytics(
+      currentMonthTx: currentMonthTx,
+      lastMonthTx: lastMonthTx,
+      categories: categories,
+      precedingMonthsTx: preceding3MonthsTx,
+      fallbackMonthlyIncome: monthlyIncome,
+    );
+
+    // 2. Phân tích dòng tiền & khả năng giữ lại
+    final lastMonthExpense = lastMonthTx
+        .where((t) => t.type == 'expense')
+        .fold<double>(0, (sum, t) => sum + t.amount);
+    final cashFlowAnalytics = analytics.computeCashFlowAnalytics(
+      currentMonthIncome: incomeAnalytics.currentMonthIncome,
+      currentMonthExpense: monthEnd.monthToDateExpense,
+      lastMonthIncome: incomeAnalytics.lastMonthIncome,
+      lastMonthExpense: lastMonthExpense,
+    );
+
+    // 3. Đánh giá tính khả thi mục tiêu tiết kiệm
+    final savingsGoalAssessment = savingGoals != null
+        ? analytics.evaluateSavingGoals(
+            goals: savingGoals,
+            netCashFlow: cashFlowAnalytics.netCashFlow,
+          )
+        : null;
+
+    // 4. Kế hoạch hành động cải thiện cụ thể tháng tới
+    final actionPlan = analytics.generateActionPlan(
+      currentMonthTx: currentMonthTx,
+      categories: categories,
+      budgetForecasts: budgetForecasts,
+      anomalies: anomalies,
+      issues: issues,
+      netCashFlow: cashFlowAnalytics.netCashFlow,
+      savingsShortfall: savingsGoalAssessment?.gapAmount ?? 0,
+    );
+
+    // 5. Trích xuất điểm mạnh tài chính
+    final strengths = analytics.extractStrengths(
+      cashFlow: cashFlowAnalytics,
+      income: incomeAnalytics,
+      budgetForecasts: budgetForecasts,
+      anomalies: anomalies,
+    );
+
     final String healthRating;
-    if (healthScore >= 80) {
-      healthRating = 'Tốt';
-    } else if (healthScore >= 60) {
+    if (healthScore >= 85) {
+      healthRating = 'Xuất sắc';
+    } else if (healthScore >= 70) {
+      healthRating = 'Khá tốt';
+    } else if (healthScore >= 50) {
       healthRating = 'Cần theo dõi';
-    } else if (healthScore >= 40) {
+    } else if (healthScore >= 35) {
       healthRating = 'Có rủi ro';
     } else {
       healthRating = 'Cần hành động ngay';
@@ -467,6 +539,11 @@ class FinancialForecastService {
       healthScore: healthScore,
       healthRating: healthRating,
       deductions: deductions,
+      strengths: strengths,
+      incomeAnalytics: incomeAnalytics,
+      cashFlowAnalytics: cashFlowAnalytics,
+      savingsGoalAssessment: savingsGoalAssessment,
+      actionPlan: actionPlan,
       referenceDate: today,
     );
   }

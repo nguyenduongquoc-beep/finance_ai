@@ -1,18 +1,81 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import '../../models/transaction_model.dart';
-import '../../models/wallet_model.dart';
-import '../../models/budget_model.dart';
+import 'package:uuid/uuid.dart';
 import '../../models/category_model.dart';
 import '../../services/firestore_service.dart';
 import '../../services/ai_service.dart';
-import '../../services/theme_controller.dart';
+import '../../services/financial_chat_context_service.dart';
 import '../../utils/constants.dart';
 import '../../utils/formatters.dart';
 import '../../widgets/app_snackbar.dart';
+import '../management/budget_management_screen.dart';
+import '../management/saving_goal_screen.dart';
+import '../home/transaction_list_screen.dart';
+import '../home/add_transaction_screen.dart';
 
-/// 17. AI Financial Assistant - Chatbot tài chính (giống ChatGPT)
-/// AI đọc dữ liệu Firestore của người dùng -> phân tích -> trả lời
+/// Model tin nhắn trong phiên trò chuyện
+class _ChatMessage {
+  final String id;
+  String text;
+  final bool isUser;
+  final DateTime timestamp;
+  ChatInsightCardData? insightCard;
+  final bool isError;
+  final String? retryPrompt;
+
+  _ChatMessage({
+    String? id,
+    required this.text,
+    required this.isUser,
+    DateTime? timestamp,
+    this.insightCard,
+    this.isError = false,
+    this.retryPrompt,
+  })  : id = id ?? const Uuid().v4(),
+        timestamp = timestamp ?? DateTime.now();
+
+  Map<String, dynamic> toMap() {
+    return {
+      'id': id,
+      'text': text,
+      'isUser': isUser,
+      'timestamp': timestamp.toIso8601String(),
+      'insightCard': insightCard?.toMap(),
+      'isError': isError,
+      'retryPrompt': retryPrompt,
+    };
+  }
+
+  factory _ChatMessage.fromMap(Map<String, dynamic> map) {
+    ChatInsightCardData? card;
+    if (map['insightCard'] != null && map['insightCard'] is Map) {
+      card = ChatInsightCardData.fromMap(
+        Map<String, dynamic>.from(map['insightCard'] as Map),
+      );
+    }
+    return _ChatMessage(
+      id: map['id'] as String?,
+      text: map['text'] as String? ?? '',
+      isUser: map['isUser'] == true,
+      timestamp: map['timestamp'] != null
+          ? DateTime.tryParse(map['timestamp'] as String) ?? DateTime.now()
+          : DateTime.now(),
+      insightCard: card,
+      isError: map['isError'] == true,
+      retryPrompt: map['retryPrompt'] as String?,
+    );
+  }
+}
+
+/// ============================================================
+/// AI FINANCIAL ASSISTANT SCREEN (TRỢ LÝ AI TÀI CHÍNH CÁ NHÂN)
+/// - Quản lý phiên trò chuyện (Conversation Session) bền vững trên Firestore
+/// - Hiểu ngữ cảnh dữ liệu 90 ngày (Ví, Giao dịch, Ngân sách, Mục tiêu)
+/// - Phản hồi đa cấp độ: Trả lời nhanh, Phân tích thu-chi, Tư vấn cắt giảm, Phản biện mục tiêu
+/// - Actionable Insight Cards tương tác điều hướng trực tiếp
+/// - Phân nhóm câu hỏi gợi ý thông minh (Nổi bật, Tổng quan, Chi tiêu, Ngân sách, Tiết kiệm)
+/// ============================================================
 class AiChatScreen extends StatefulWidget {
   const AiChatScreen({super.key});
 
@@ -20,34 +83,253 @@ class AiChatScreen extends StatefulWidget {
   State<AiChatScreen> createState() => _AiChatScreenState();
 }
 
-class _ChatMessage {
-  final String text;
-  final bool isUser;
-  final DateTime timestamp;
-  _ChatMessage(this.text, this.isUser) : timestamp = DateTime.now();
-}
-
 class _AiChatScreenState extends State<AiChatScreen> {
   final _aiService = AiService();
   final _firestoreService = FirestoreService();
+  final _contextService = FinancialChatContextService();
+
   final _inputController = TextEditingController();
   final _scrollController = ScrollController();
   final _inputFocusNode = FocusNode();
 
-  final List<_ChatMessage> _messages = [
-    _ChatMessage(
-        'Xin chào! Mình là trợ lý tài chính AI. Hãy hỏi mình về thu chi, ngân sách hoặc '
-        'kế hoạch tiết kiệm của bạn nhé. 💡',
-        false),
-  ];
+  final List<_ChatMessage> _messages = [];
+  FinancialChatContext? _financialContext;
+  List<Category> _categories = [];
+  bool _isLoadingContext = true;
   bool _isSending = false;
+  String _selectedPromptCategory = 'all';
+
+  // Quản lý Conversation Session
+  String _currentSessionId = const Uuid().v4();
+  String _currentSessionTitle = 'Cuộc trò chuyện mới';
+
+  // Trạng thái cuộn mượt mà & vị trí đọc tin nhắn
+  bool _showScrollToBottom = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+    _initChatData();
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients) return;
+    final maxScroll = _scrollController.position.maxScrollExtent;
+    final current = _scrollController.offset;
+    final isFarFromBottom = (maxScroll - current) > 280;
+    if (isFarFromBottom != _showScrollToBottom) {
+      setState(() {
+        _showScrollToBottom = isFarFromBottom;
+      });
+    }
+  }
 
   @override
   void dispose() {
+    _scrollController.removeListener(_onScroll);
     _inputController.dispose();
     _scrollController.dispose();
     _inputFocusNode.dispose();
     super.dispose();
+  }
+
+  /// Khởi tạo dữ liệu: Tải ngữ cảnh tài chính và phiên trò chuyện gần nhất
+  Future<void> _initChatData() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null || uid.isEmpty) {
+      if (mounted) {
+        setState(() {
+          _isLoadingContext = false;
+          _messages.add(_ChatMessage(
+            text:
+                'Vui lòng đăng nhập để Trợ lý AI có thể truy xuất dữ liệu tài chính của bạn.',
+            isUser: false,
+          ));
+        });
+      }
+      return;
+    }
+
+    try {
+      // 1. Tải ngữ cảnh tài chính định lượng và categories an toàn
+      final results = await Future.wait<dynamic>([
+        _contextService.buildContext(uid),
+        _firestoreService.getCategoriesSafely(uid),
+        _firestoreService.getUserChatSessions(uid),
+      ]);
+
+      if (mounted) {
+        setState(() {
+          _financialContext = results[0] as FinancialChatContext;
+          _categories = results[1] as List<Category>;
+          _isLoadingContext = false;
+        });
+
+        final sessions = results[2] as List<Map<String, dynamic>>;
+        if (sessions.isNotEmpty) {
+          // Khôi phục phiên trò chuyện gần nhất của người dùng
+          final latest = sessions.first;
+          _loadExistingSession(latest);
+        } else {
+          // Tạo phiên trò chuyện đầu tiên
+          _setupInitialGreeting();
+        }
+      }
+    } catch (e, stack) {
+      debugPrint('Error loading financial chat context: $e\n$stack');
+      if (mounted) {
+        setState(() {
+          _isLoadingContext = false;
+          _setupInitialGreeting();
+        });
+      }
+    }
+  }
+
+  /// Nạp dữ liệu một phiên trò chuyện cũ từ Firestore
+  void _loadExistingSession(Map<String, dynamic> sessionData) {
+    final rawMessages = sessionData['messages'] as List<dynamic>? ?? [];
+    final loadedMessages = <_ChatMessage>[];
+
+    for (final item in rawMessages) {
+      if (item is Map) {
+        loadedMessages
+            .add(_ChatMessage.fromMap(Map<String, dynamic>.from(item)));
+      }
+    }
+
+    setState(() {
+      _currentSessionId =
+          sessionData['sessionId'] as String? ?? const Uuid().v4();
+      _currentSessionTitle =
+          sessionData['title'] as String? ?? 'Cuộc trò chuyện';
+      _messages.clear();
+      if (loadedMessages.isNotEmpty) {
+        _messages.addAll(loadedMessages);
+      } else {
+        _setupInitialGreeting();
+      }
+    });
+
+    // Phục hồi Conversation Context cho Gemini AI
+    if (_financialContext != null && loadedMessages.isNotEmpty) {
+      final messageMaps = loadedMessages.map((m) => m.toMap()).toList();
+      _aiService.restoreChatHistory(
+        contextData: _financialContext!.rawPromptContext,
+        previousMessages: messageMaps,
+      );
+    }
+
+    _scrollToBottom(animated: false);
+  }
+
+  /// Thiết lập lời chào và thẻ tóm tắt ban đầu cho phiên mới
+  void _setupInitialGreeting() {
+    _messages.clear();
+    final ctx = _financialContext;
+
+    if (ctx == null || ctx.isEmptyData) {
+      _messages.add(_ChatMessage(
+        text:
+            'Xin chào! Mình là Trợ lý AI Tài chính Cá nhân của bạn. Hiện tại bạn chưa có giao dịch nào được ghi nhận. Hãy thêm các giao dịch đầu tiên để mình có thể theo dõi và phân tích tài chính giúp bạn nhé! 💡',
+        isUser: false,
+        insightCard: const ChatInsightCardData(
+          type: ChatInsightCardType.emptyDataPrompt,
+          title: 'Khởi đầu quản lý tài chính',
+          subtitle:
+              'Ghi chép giao dịch để kích hoạt toàn bộ tính năng phân tích của AI',
+          primaryMetric: '0 giao dịch',
+          actionLabel: 'Thêm giao dịch ngay',
+        ),
+      ));
+      return;
+    }
+
+    final greetingBuffer = StringBuffer();
+    greetingBuffer
+        .writeln('Xin chào! Mình là Trợ lý AI Tài chính Cá nhân của bạn.');
+    greetingBuffer.writeln(
+        'Mình đã đồng bộ toàn bộ dữ liệu thu - chi, ngân sách và mục tiêu trong 90 ngày qua.');
+    greetingBuffer.writeln('');
+    greetingBuffer.writeln('📊 **Tóm tắt nhanh tháng này:**');
+    greetingBuffer.writeln(
+        '• **Thu nhập:** ${AppFormatters.compactCurrency(ctx.incomeThisMonth)}');
+    greetingBuffer.writeln(
+        '• **Chi tiêu:** ${AppFormatters.compactCurrency(ctx.expenseThisMonth)}');
+    greetingBuffer.writeln(
+        '• **Dòng tiền ròng:** ${ctx.netCashFlow >= 0 ? '+' : ''}${AppFormatters.compactCurrency(ctx.netCashFlow)} (${ctx.netCashFlow >= 0 ? 'Thặng dư' : 'Thâm hụt'})');
+    greetingBuffer.writeln('• **Tỷ lệ tiết kiệm:** ${ctx.savingsRate}%');
+
+    if (ctx.overBudgets.isNotEmpty) {
+      greetingBuffer.writeln('');
+      greetingBuffer.writeln(
+          '⚠️ **Cảnh báo:** Bạn đang có ${ctx.overBudgets.length} danh mục vượt ngân sách.');
+    }
+
+    greetingBuffer.writeln('');
+    greetingBuffer.writeln(
+        'Bạn có thể chọn nhanh các câu hỏi gợi ý bên dưới hoặc hỏi mình bất cứ điều gì nhé! 💡');
+
+    ChatInsightCardData? initialCard;
+    if (ctx.overBudgets.isNotEmpty) {
+      final b = ctx.overBudgets.first;
+      final cat = _categories.firstWhere(
+        (c) => c.categoryId == b.categoryId,
+        orElse: () => Category(
+            categoryId: b.categoryId,
+            userId: '',
+            name: 'Danh mục',
+            type: 'expense',
+            icon: '',
+            color: 0),
+      );
+      initialCard = ChatInsightCardData(
+        type: ChatInsightCardType.budgetOverrun,
+        title: 'Cảnh báo: ${cat.name}',
+        subtitle: 'Đã vượt hạn mức ngân sách tháng này',
+        primaryMetric: 'Hạn mức: ${AppFormatters.compactCurrency(b.limit)}',
+        actionLabel: 'Xem ngân sách',
+        targetId: b.budgetId,
+      );
+    }
+
+    _messages.add(_ChatMessage(
+      text: greetingBuffer.toString(),
+      isUser: false,
+      insightCard: initialCard,
+    ));
+  }
+
+  /// Tự động lưu phiên trò chuyện hiện tại vào Firestore (chỉ khi có ít nhất 1 tin nhắn từ user)
+  Future<void> _saveCurrentSession() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null || uid.isEmpty || _messages.isEmpty) return;
+
+    // Không lưu phiên rỗng nếu người dùng chưa tương tác gửi câu hỏi nào
+    final hasUserMessage = _messages.any((m) => m.isUser);
+    if (!hasUserMessage) return;
+
+    if (_currentSessionTitle == 'Cuộc trò chuyện mới' ||
+        _currentSessionTitle == 'Cuộc trò chuyện') {
+      final firstUserMsg = _messages.firstWhere(
+        (m) => m.isUser,
+        orElse: () => _ChatMessage(text: '', isUser: false),
+      );
+      if (firstUserMsg.text.isNotEmpty) {
+        _currentSessionTitle = firstUserMsg.text.length > 32
+            ? '${firstUserMsg.text.substring(0, 32)}...'
+            : firstUserMsg.text;
+      }
+    }
+
+    final messageMaps = _messages.map((m) => m.toMap()).toList();
+    await _firestoreService.saveChatSession(
+      userId: uid,
+      sessionId: _currentSessionId,
+      title: _currentSessionTitle,
+      messages: messageMaps,
+    );
   }
 
   void _scrollToBottom({bool animated = true}) {
@@ -66,280 +348,1172 @@ class _AiChatScreenState extends State<AiChatScreen> {
     });
   }
 
-  Future<String> _buildFinancialContext(String uid) async {
-    final now = DateTime.now();
-    final monthStart = DateTime(now.year, now.month, 1);
-
-    final results = await Future.wait<dynamic>([
-      _firestoreService.streamTransactions(uid, from: monthStart).first,
-      _firestoreService.streamWallets(uid).first,
-      _firestoreService.streamBudgets(uid, month: AppFormatters.month(now)).first,
-      _firestoreService.streamCategories(uid).first,
-    ]);
-
-    final transactions = results[0] as List<AppTransaction>;
-    final wallets = results[1] as List<Wallet>;
-    final budgets = results[2] as List<Budget>;
-    final categories = results[3] as List<Category>;
-
-    final income = transactions.where((t) => t.type == 'income').fold<double>(0, (a, t) => a + t.amount);
-    final expense = transactions.where((t) => t.type == 'expense').fold<double>(0, (a, t) => a + t.amount);
-    final totalBalance = wallets.where((w) => w.isActive).fold<double>(0, (a, w) => a + w.balance);
-
-    final buffer = StringBuffer();
-    buffer.writeln('Tổng số dư các ví: ${AppFormatters.number(totalBalance)} đồng');
-    buffer.writeln('Thu nhập tháng này: ${AppFormatters.number(income)} đồng');
-    buffer.writeln('Chi tiêu tháng này: ${AppFormatters.number(expense)} đồng');
-    buffer.writeln('Tiết kiệm ròng tháng này: ${AppFormatters.number(income - expense)} đồng');
-    if (budgets.isNotEmpty) {
-      final Map<String, double> spentByCategory = {};
-      for (final t in transactions.where((t) => t.type == 'expense')) {
-        spentByCategory[t.categoryId] = (spentByCategory[t.categoryId] ?? 0) + t.amount;
-      }
-      buffer.writeln('\nTình trạng ngân sách:');
-      for (final b in budgets) {
-        final spent = spentByCategory[b.categoryId] ?? 0;
-        final percent = b.limit > 0 ? (spent / b.limit * 100).round() : 0;
-        final categoryName = categories
-            .where((c) => c.categoryId == b.categoryId)
-            .firstOrNull
-            ?.name ?? 'Danh mục';
-        buffer.writeln('- $categoryName: đã chi ${AppFormatters.number(spent)}/${AppFormatters.number(b.limit)} đ ($percent%)');
-      }
-    }
-    return buffer.toString();
+  /// Định vị cuộn êm đến vị trí bắt đầu câu trả lời của AI để người dùng đọc tự nhiên từ đầu câu
+  void _scrollToAiResponseStart(double anchorExtent) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      final maxScroll = _scrollController.position.maxScrollExtent;
+      final target = (anchorExtent - 12).clamp(0.0, maxScroll);
+      _scrollController.animateTo(
+        target,
+        duration: const Duration(milliseconds: 320),
+        curve: Curves.easeOutCubic,
+      );
+    });
   }
 
+  /// Gửi tin nhắn và nhận phản hồi dòng (Streaming) từ Trợ lý AI
   Future<void> _sendMessage(String text) async {
-    if (text.isEmpty || _isSending) return;
+    final trimmedText = text.trim();
+    if (trimmedText.isEmpty || _isSending) return;
+
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+
+    // Ghi nhận vị trí cuối cùng trước khi thêm tin nhắn
+    final double anchorBeforeSend = _scrollController.hasClients
+        ? _scrollController.position.maxScrollExtent
+        : 0.0;
 
     setState(() {
-      _messages.add(_ChatMessage(text, true));
+      _messages.add(_ChatMessage(text: trimmedText, isUser: true));
       _isSending = true;
     });
     _inputController.clear();
     _scrollToBottom();
 
     try {
-      final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-      final context = await _buildFinancialContext(uid);
-      final reply = await _aiService.chatWithFinancialData(
-        userQuestion: text,
-        contextData: context,
-      );
-      if (mounted) {
-        setState(() => _messages.add(_ChatMessage(reply, false)));
-        _scrollToBottom();
+      // Đảm bảo dữ liệu tài chính luôn được tải đầy đủ
+      if (_financialContext == null && uid.isNotEmpty) {
+        _financialContext = await _contextService.buildContext(uid);
       }
+
+      final contextData = _financialContext?.rawPromptContext ??
+          'Người dùng chưa có dữ liệu tài chính.';
+
+      final aiMessage = _ChatMessage(
+        text: '',
+        isUser: false,
+      );
+
+      bool messageAdded = false;
+      final responseBuffer = StringBuffer();
+
+      // Sử dụng streaming để người dùng nhìn thấy phản hồi tức thì
+      await for (final chunk in _aiService.chatWithFinancialDataStream(
+        userQuestion: trimmedText,
+        contextData: contextData,
+      )) {
+        if (!mounted) return;
+        responseBuffer.write(chunk);
+
+        if (!messageAdded) {
+          final double anchorBeforeAi = _scrollController.hasClients
+              ? _scrollController.position.maxScrollExtent
+              : anchorBeforeSend;
+
+          setState(() {
+            _isSending = false; // Tắt typing indicator
+            _messages.add(aiMessage);
+            messageAdded = true;
+          });
+
+          // Cuộn đến đầu câu trả lời của AI
+          _scrollToAiResponseStart(anchorBeforeAi);
+        }
+
+        setState(() {
+          aiMessage.text = responseBuffer.toString();
+        });
+      }
+
+      final fullReply = responseBuffer.toString();
+
+      // Nhận diện Action Card dựa trên toàn bộ ngữ cảnh hỏi & đáp
+      ChatInsightCardData? card;
+      if (_financialContext != null) {
+        card = _contextService.detectInsightCard(
+          question: trimmedText,
+          answer: fullReply,
+          context: _financialContext!,
+          categories: _categories,
+        );
+      }
+
+      if (mounted) {
+        setState(() {
+          aiMessage.text = fullReply;
+          aiMessage.insightCard = card;
+        });
+      }
+
+      // Tự động lưu phiên trò chuyện sau khi hoàn thành
+      await _saveCurrentSession();
     } catch (e, stackTrace) {
-      debugPrint('AI Chat error: $e');
+      debugPrint('AI Chat Error: $e');
       debugPrintStack(stackTrace: stackTrace);
       if (mounted) {
-        final msg = AiService.isNoNetworkException(e)
+        final isNoNet = AiService.isNoNetworkException(e);
+        final errorMessage = isNoNet
             ? 'Không có kết nối mạng. Vui lòng kiểm tra Internet và thử lại.'
-            : 'Xin lỗi, đã có lỗi xảy ra. Vui lòng thử lại sau.';
-        setState(() => _messages.add(_ChatMessage(msg, false)));
+            : 'Đã có sự cố khi kết nối tới Trợ lý AI. Vui lòng thử lại sau giây lát.';
+        setState(() {
+          _messages.add(_ChatMessage(
+            text: errorMessage,
+            isUser: false,
+            isError: true,
+            retryPrompt: trimmedText,
+          ));
+        });
         _scrollToBottom();
       }
     } finally {
-      if (mounted) setState(() => _isSending = false);
+      if (mounted) {
+        setState(() => _isSending = false);
+      }
     }
   }
 
-  Future<void> _handleSend() async {
-    final text = _inputController.text.trim();
-    await _sendMessage(text);
-  }
-
-  void _resetChat() {
+  /// Tạo cuộc trò chuyện mới
+  void _createNewChatSession({bool showSnack = true}) async {
+    final hasUserMessage = _messages.any((m) => m.isUser);
+    if (hasUserMessage) {
+      await _saveCurrentSession();
+    }
     _aiService.resetChatSession();
     setState(() {
-      _messages.clear();
-      _messages.add(_ChatMessage(
-        'Phiên trò chuyện mới bắt đầu. Hỏi mình bất cứ điều gì về tài chính của bạn nhé! 💡',
-        false,
-      ));
+      _currentSessionId = const Uuid().v4();
+      _currentSessionTitle = 'Cuộc trò chuyện mới';
+      _setupInitialGreeting();
     });
+    if (mounted && showSnack) {
+      AppSnackbar.show(context, 'Đã mở cuộc trò chuyện mới');
+    }
   }
 
-  @override
-  Widget build(BuildContext context) {
-    return ValueListenableBuilder<ThemeMode>(
-      valueListenable: ThemeController.mode,
-      builder: (context, _, __) {
-        return Scaffold(
-          backgroundColor: AppColors.background,
-          appBar: AppBar(
-            title: Row(
+  /// Xem và chuyển đổi các phiên trò chuyện đã lưu trong lịch sử
+  void _showChatHistoryModal() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null || uid.isEmpty) return;
+
+    final sessions = await _firestoreService.getUserChatSessions(uid);
+
+    if (!mounted) return;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: context.appCard,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const CircleAvatar(
-                  backgroundColor: AppColors.primary,
-                  radius: 18,
-                  child: Icon(Icons.auto_awesome, color: Colors.white, size: 18),
-                ),
-                const SizedBox(width: 10),
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Text(
-                      'Trợ lý AI',
-                      style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, color: AppColors.textPrimary),
-                    ),
                     Row(
                       children: [
-                        Container(
-                          width: 6,
-                          height: 6,
-                          decoration: const BoxDecoration(
-                            color: Color(0xFF4CAF50), // active green dot
-                            shape: BoxShape.circle,
-                          ),
-                        ),
-                        const SizedBox(width: 4),
+                        const Icon(Icons.history_rounded,
+                            color: AppColors.primary, size: 22),
+                        const SizedBox(width: 8),
                         Text(
-                          'Đang hoạt động',
-                          style: TextStyle(fontSize: 11, color: AppColors.textSecondary),
+                          'Lịch sử trò chuyện',
+                          style: TextStyle(
+                            fontSize: 16.5,
+                            fontWeight: FontWeight.bold,
+                            color: context.appTextPrimary,
+                          ),
                         ),
                       ],
                     ),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () => Navigator.pop(ctx),
+                    ),
                   ],
                 ),
+                const SizedBox(height: 10),
+                if (sessions.isEmpty)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 24),
+                    child: Center(
+                      child: Text(
+                        'Chưa có phiên trò chuyện nào được lưu.',
+                        style: TextStyle(
+                            color: context.appTextSecondary, fontSize: 13.5),
+                      ),
+                    ),
+                  )
+                else
+                  Flexible(
+                    child: ListView.separated(
+                      shrinkWrap: true,
+                      itemCount: sessions.length,
+                      separatorBuilder: (_, __) =>
+                          Divider(height: 1, color: context.appBorder),
+                      itemBuilder: (context, index) {
+                        final s = sessions[index];
+                        final sId = s['sessionId'] as String? ?? '';
+                        final sTitle =
+                            s['title'] as String? ?? 'Cuộc trò chuyện';
+                        final sUpdated = s['updatedAt'] as String? ?? '';
+                        final isCurrent = sId == _currentSessionId;
+
+                        return ListTile(
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 4, vertical: 2),
+                          leading: Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              color: isCurrent
+                                  ? AppColors.primary.withValues(alpha: 0.15)
+                                  : context.appInputFill,
+                              shape: BoxShape.circle,
+                            ),
+                            child: Icon(
+                              Icons.chat_bubble_outline_rounded,
+                              size: 18,
+                              color: isCurrent
+                                  ? AppColors.primary
+                                  : context.appTextSecondary,
+                            ),
+                          ),
+                          title: Text(
+                            sTitle,
+                            style: TextStyle(
+                              fontSize: 14,
+                              fontWeight:
+                                  isCurrent ? FontWeight.bold : FontWeight.w500,
+                              color: isCurrent
+                                  ? AppColors.primary
+                                  : context.appTextPrimary,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                          subtitle: Text(
+                            sUpdated.isNotEmpty
+                                ? (DateTime.tryParse(sUpdated) != null
+                                    ? AppFormatters.dateTime(
+                                        DateTime.parse(sUpdated))
+                                    : sUpdated)
+                                : '',
+                            style: TextStyle(
+                                fontSize: 11.5,
+                                color: context.appTextSecondary),
+                          ),
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if (isCurrent)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 8, vertical: 3),
+                                  margin: const EdgeInsets.only(right: 4),
+                                  decoration: BoxDecoration(
+                                    color: AppColors.primary
+                                        .withValues(alpha: 0.12),
+                                    borderRadius: BorderRadius.circular(10),
+                                  ),
+                                  child: const Text('Hiện tại',
+                                      style: TextStyle(
+                                          fontSize: 10,
+                                          color: AppColors.primary,
+                                          fontWeight: FontWeight.bold)),
+                                ),
+                              IconButton(
+                                icon: const Icon(Icons.delete_outline_rounded,
+                                    size: 19, color: AppColors.expense),
+                                tooltip: 'Xóa phiên',
+                                onPressed: () async {
+                                  final sheetNav = Navigator.of(ctx);
+                                  final confirm = await showDialog<bool>(
+                                    context: ctx,
+                                    builder: (dCtx) => AlertDialog(
+                                      backgroundColor: context.appCard,
+                                      shape: RoundedRectangleBorder(
+                                          borderRadius:
+                                              BorderRadius.circular(16)),
+                                      title: const Text('Xóa phiên trò chuyện?',
+                                          style: TextStyle(
+                                              fontSize: 16,
+                                              fontWeight: FontWeight.bold)),
+                                      content: const Text(
+                                        'Phiên trò chuyện này sẽ bị xóa khỏi lịch sử. Dữ liệu tài chính của bạn hoàn toàn không bị ảnh hưởng.',
+                                        style: TextStyle(fontSize: 13),
+                                      ),
+                                      actions: [
+                                        TextButton(
+                                            onPressed: () =>
+                                                Navigator.pop(dCtx, false),
+                                            child: const Text('Hủy')),
+                                        ElevatedButton(
+                                          style: ElevatedButton.styleFrom(
+                                              backgroundColor:
+                                                  AppColors.expense),
+                                          onPressed: () =>
+                                              Navigator.pop(dCtx, true),
+                                          child: const Text('Xóa',
+                                              style: TextStyle(
+                                                  color: Colors.white,
+                                                  fontWeight: FontWeight.bold)),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+
+                                  if (confirm == true) {
+                                    await _firestoreService.deleteChatSession(
+                                        uid, sId);
+                                    sheetNav.pop();
+                                    if (isCurrent) {
+                                      _createNewChatSession(showSnack: false);
+                                    }
+                                    if (!mounted) return;
+                                    AppSnackbar.show(this.context,
+                                        'Đã xóa phiên trò chuyện');
+                                  }
+                                },
+                              ),
+                            ],
+                          ),
+                          onTap: () async {
+                            Navigator.pop(ctx);
+                            if (!isCurrent) {
+                              if (_messages.any((m) => m.isUser)) {
+                                await _saveCurrentSession();
+                              }
+                              if (!mounted) return;
+                              _loadExistingSession(s);
+                              AppSnackbar.show(this.context,
+                                  'Đã mở: ${sTitle.length > 25 ? "${sTitle.substring(0, 25)}..." : sTitle}');
+                            }
+                          },
+                        );
+                      },
+                    ),
+                  ),
               ],
             ),
-            actions: [
-              IconButton(
-                icon: const Icon(Icons.refresh_rounded),
-                tooltip: 'Phiên mới',
-                onPressed: _resetChat,
-              ),
-              IconButton(
-                icon: const Icon(Icons.info_outline),
-                tooltip: 'Thông tin',
-                onPressed: () {
-                  AppSnackbar.show(context, 'Trợ lý AI hỗ trợ quản lý chi tiêu cá nhân');
-                },
-              ),
-            ],
-            elevation: 0,
-          ),
-          body: Column(
-            children: [
-              Expanded(
-                child: ListView.builder(
-                  controller: _scrollController,
-                  padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-                  itemCount: _messages.length + (_isSending ? 1 : 0),
-                  itemBuilder: (context, i) {
-                    if (_isSending && i == _messages.length) {
-                      return _TypingIndicator();
-                    }
-                    final msg = _messages[i];
-                    return _ChatBubble(message: msg);
-                  },
-                ),
-              ),
-              if (_messages.length == 1)
-                _buildSuggestions(),
-              _buildInputBar(),
-            ],
           ),
         );
       },
     );
   }
 
-  Widget _buildSuggestions() {
-    final suggestions = [
-      'Tháng này tôi chi tiêu bao nhiêu?',
-      'Gợi ý tiết kiệm cho tôi',
-      'Ngân sách nào sắp vượt hạn mức?',
+  /// Xác nhận xóa cuộc trò chuyện hiện tại
+  void _confirmDeleteCurrentSession() {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: context.appCard,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            const Icon(Icons.delete_outline_rounded,
+                color: AppColors.expense, size: 22),
+            const SizedBox(width: 8),
+            Text('Xóa cuộc trò chuyện?',
+                style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: context.appTextPrimary)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Cuộc trò chuyện này sẽ bị xóa khỏi lịch sử và không thể khôi phục.',
+              style: TextStyle(fontSize: 13.5, color: context.appTextSecondary),
+            ),
+            const SizedBox(height: 10),
+            Container(
+              padding: const EdgeInsets.all(10),
+              decoration: BoxDecoration(
+                color: AppColors.primary.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: Row(
+                children: [
+                  const Icon(Icons.shield_outlined,
+                      size: 16, color: AppColors.primary),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      'Dữ liệu tài chính (giao dịch, ví, ngân sách, mục tiêu) hoàn toàn KHÔNG bị ảnh hưởng.',
+                      style: TextStyle(
+                          fontSize: 12,
+                          color: context.appTextPrimary,
+                          fontWeight: FontWeight.w500),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child:
+                Text('Hủy', style: TextStyle(color: context.appTextSecondary)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.expense),
+            onPressed: () async {
+              Navigator.pop(ctx);
+              final uid = FirebaseAuth.instance.currentUser?.uid;
+              if (uid != null && uid.isNotEmpty) {
+                await _firestoreService.deleteChatSession(
+                    uid, _currentSessionId);
+              }
+              _createNewChatSession(showSnack: false);
+              if (mounted) {
+                AppSnackbar.show(context, 'Đã xóa cuộc trò chuyện');
+              }
+            },
+            child: const Text('Xóa',
+                style: TextStyle(
+                    color: Colors.white, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Nút ⚡ Phân tích nhanh - Mở sheet gợi ý các phân tích chuyên sâu
+  void _showQuickAnalysisSheet() {
+    final quickQueries = [
+      {
+        'icon': '📊',
+        'title': 'Tóm tắt dòng tiền tháng này',
+        'prompt':
+            'Tóm tắt toàn diện tình hình thu chi và dòng tiền tháng này cho tôi.'
+      },
+      {
+        'icon': '⚠️',
+        'title': 'Khoản chi tăng bất thường',
+        'prompt':
+            'Kiểm tra xem tháng này có khoản chi tiêu nào tăng bất thường hoặc đáng chú ý không?'
+      },
+      {
+        'icon': '🎯',
+        'title': 'Tính khả thi mục tiêu tiết kiệm',
+        'prompt':
+            'Đánh giá tính khả thi của các mục tiêu tiết kiệm hiện tại dựa trên thặng dư tài chính của tôi.'
+      },
+      {
+        'icon': '💡',
+        'title': 'Gợi ý cắt giảm chi tiêu',
+        'prompt':
+            'Dựa trên chi tiêu thực tế, tôi nên cắt giảm khoản nào để tối ưu dòng tiền nhất?'
+      },
     ];
-    return Container(
-      height: 44,
-      margin: const EdgeInsets.only(bottom: 8),
-      padding: const EdgeInsets.only(left: 16),
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        itemCount: suggestions.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 8),
-        itemBuilder: (context, i) => ActionChip(
-          label: Text(
-            suggestions[i],
-            style: TextStyle(fontSize: 13, color: AppColors.textPrimary, fontWeight: FontWeight.w500),
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: context.appCard,
+      shape: const RoundedRectangleBorder(
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20))),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.bolt_rounded,
+                            color: AppColors.primary, size: 24),
+                        const SizedBox(width: 8),
+                        Text(
+                          '⚡ Phân tích tài chính nhanh',
+                          style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.bold,
+                              color: context.appTextPrimary),
+                        ),
+                      ],
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () => Navigator.pop(ctx),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 10),
+                ...quickQueries.map((q) {
+                  return ListTile(
+                    contentPadding:
+                        const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    leading: Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: AppColors.primary.withValues(alpha: 0.1),
+                        shape: BoxShape.circle,
+                      ),
+                      child: Text(q['icon']!,
+                          style: const TextStyle(fontSize: 16)),
+                    ),
+                    title: Text(
+                      q['title']!,
+                      style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: context.appTextPrimary),
+                    ),
+                    trailing: const Icon(Icons.arrow_forward_ios_rounded,
+                        size: 14, color: AppColors.primary),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _sendMessage(q['prompt']!);
+                    },
+                  );
+                }),
+              ],
+            ),
           ),
-          backgroundColor: AppColors.card,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(20),
-            side: BorderSide(color: AppColors.aiAccent.withValues(alpha: 0.3)),
+        );
+      },
+    );
+  }
+
+  void _copyToClipboard(String text) {
+    Clipboard.setData(ClipboardData(text: text));
+    AppSnackbar.show(context, 'Đã sao chép nội dung');
+  }
+
+  void _showAiAssistantInfo() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: context.appCard,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 20, 20, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: AppColors.primary.withValues(alpha: 0.12),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(Icons.auto_awesome,
+                          color: AppColors.primary, size: 22),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Text(
+                        'Về Trợ lý AI Tài chính',
+                        style: TextStyle(
+                          fontSize: 17,
+                          fontWeight: FontWeight.bold,
+                          color: context.appTextPrimary,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close),
+                      onPressed: () => Navigator.pop(ctx),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                _buildInfoRow(
+                  Icons.calculate_outlined,
+                  'Số liệu định lượng chính xác',
+                  'Toàn bộ thu chi, số dư ví, ngân sách và mục tiêu được hệ thống trích xuất và tính toán trước 100% từ cơ sở dữ liệu của bạn.',
+                ),
+                const SizedBox(height: 12),
+                _buildInfoRow(
+                  Icons.psychology_outlined,
+                  'Đóng vai Cố vấn Tài chính (CFP AI)',
+                  'AI tập trung phân tích nguyên nhân thặng dư/thâm hụt, phát hiện nguy cơ bội chi và phản biện tính khả thi của mục tiêu.',
+                ),
+                const SizedBox(height: 12),
+                _buildInfoRow(
+                  Icons.forum_outlined,
+                  'Lưu trữ phiên trò chuyện (Conversation Sessions)',
+                  'Các cuộc hội thoại được lưu an toàn trên Firestore, giúp bạn xem lại hoặc tiếp tục trò chuyện bất kỳ lúc nào.',
+                ),
+                const SizedBox(height: 20),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.primary,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12)),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                    onPressed: () => Navigator.pop(ctx),
+                    child: const Text('Đã hiểu',
+                        style: TextStyle(fontWeight: FontWeight.w600)),
+                  ),
+                ),
+              ],
+            ),
           ),
-          onPressed: _isSending ? null : () {
-            _sendMessage(suggestions[i]);
+        );
+      },
+    );
+  }
+
+  Widget _buildInfoRow(IconData icon, String title, String description) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 20, color: AppColors.primary),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: context.appTextPrimary),
+              ),
+              const SizedBox(height: 2),
+              Text(
+                description,
+                style: TextStyle(
+                    fontSize: 13,
+                    color: context.appTextSecondary,
+                    height: 1.35),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _handleInsightCardAction(ChatInsightCardData card) async {
+    switch (card.type) {
+      case ChatInsightCardType.budgetOverrun:
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const BudgetManagementScreen()),
+        );
+        break;
+      case ChatInsightCardType.savingGoalProgress:
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const SavingGoalScreen()),
+        );
+        break;
+      case ChatInsightCardType.cashFlowSnapshot:
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const TransactionListScreen()),
+        );
+        break;
+      case ChatInsightCardType.emptyDataPrompt:
+        await Navigator.push(
+          context,
+          MaterialPageRoute(builder: (_) => const AddTransactionScreen()),
+        );
+        break;
+      case ChatInsightCardType.none:
+        return;
+    }
+
+    // Làm mới ngữ cảnh nếu người dùng vừa thao tác dữ liệu
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid != null && mounted) {
+      final updatedContext = await _contextService.buildContext(uid);
+      if (mounted) {
+        setState(() => _financialContext = updatedContext);
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: context.appBackground,
+      appBar: _buildAppBar(),
+      body: Stack(
+        children: [
+          Column(
+            children: [
+              Expanded(
+                child: ListView.builder(
+                  controller: _scrollController,
+                  keyboardDismissBehavior:
+                      ScrollViewKeyboardDismissBehavior.onDrag,
+                  padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+                  itemCount: _messages.length + (_isSending ? 1 : 0),
+                  itemBuilder: (context, index) {
+                    if (_isSending && index == _messages.length) {
+                      return const _TypingIndicator();
+                    }
+                    final msg = _messages[index];
+                    return _ChatBubble(
+                      message: msg,
+                      onCopy: () => _copyToClipboard(msg.text),
+                      onRetry: msg.retryPrompt != null
+                          ? () => _sendMessage(msg.retryPrompt!)
+                          : null,
+                      onCardAction: msg.insightCard != null
+                          ? () => _handleInsightCardAction(msg.insightCard!)
+                          : null,
+                    );
+                  },
+                ),
+              ),
+              _buildPromptFilterBar(),
+              _buildDynamicPromptsList(),
+              _buildInputBar(),
+            ],
+          ),
+          if (_showScrollToBottom)
+            Positioned(
+              bottom: 125,
+              right: 16,
+              child: _buildScrollToBottomButton(),
+            ),
+        ],
+      ),
+    );
+  }
+
+  PreferredSizeWidget _buildAppBar() {
+    final canPop = Navigator.canPop(context);
+
+    return AppBar(
+      elevation: 0,
+      backgroundColor: context.appCard,
+      surfaceTintColor: Colors.transparent,
+      automaticallyImplyLeading: false,
+      leading: canPop
+          ? IconButton(
+              icon: Icon(Icons.arrow_back, color: context.appTextPrimary),
+              onPressed: () => Navigator.pop(context),
+            )
+          : null,
+      titleSpacing: canPop ? 0 : 16,
+      title: Row(
+        children: [
+          Container(
+            width: 36,
+            height: 36,
+            decoration: BoxDecoration(
+              color: AppColors.primary.withValues(alpha: 0.12),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.auto_awesome,
+                color: AppColors.primary, size: 20),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Trợ lý AI Tài chính',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: context.appTextPrimary,
+                  ),
+                ),
+                Row(
+                  children: [
+                    Container(
+                      width: 7,
+                      height: 7,
+                      decoration: BoxDecoration(
+                        color: _isLoadingContext
+                            ? AppColors.warning
+                            : const Color(0xFF10B981),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                    const SizedBox(width: 5),
+                    Text(
+                      _isLoadingContext
+                          ? 'Đang đồng bộ...'
+                          : (_financialContext?.isEmptyData ?? false)
+                              ? 'Dữ liệu mới bắt đầu'
+                              : 'Hiểu dữ liệu 90 ngày',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: context.appTextSecondary,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        IconButton(
+          icon: const Icon(Icons.bolt_rounded),
+          tooltip: 'Phân tích nhanh',
+          color: AppColors.primary,
+          onPressed: _isSending ? null : _showQuickAnalysisSheet,
+        ),
+        PopupMenuButton<String>(
+          icon: Icon(Icons.more_vert_rounded, color: context.appTextSecondary),
+          tooltip: 'Tùy chọn cuộc trò chuyện',
+          color: context.appCard,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          onSelected: (value) {
+            if (value == 'new') {
+              _createNewChatSession();
+            } else if (value == 'history') {
+              _showChatHistoryModal();
+            } else if (value == 'delete') {
+              _confirmDeleteCurrentSession();
+            }
           },
+          itemBuilder: (context) => [
+            const PopupMenuItem(
+              value: 'new',
+              child: Row(
+                children: [
+                  Icon(Icons.add_comment_outlined,
+                      size: 18, color: AppColors.primary),
+                  SizedBox(width: 10),
+                  Text('Cuộc trò chuyện mới', style: TextStyle(fontSize: 13.5)),
+                ],
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'history',
+              child: Row(
+                children: [
+                  Icon(Icons.history_rounded,
+                      size: 18, color: AppColors.primary),
+                  SizedBox(width: 10),
+                  Text('Lịch sử trò chuyện', style: TextStyle(fontSize: 13.5)),
+                ],
+              ),
+            ),
+            const PopupMenuItem(
+              value: 'delete',
+              child: Row(
+                children: [
+                  Icon(Icons.delete_outline_rounded,
+                      size: 18, color: AppColors.expense),
+                  SizedBox(width: 10),
+                  Text('Xóa cuộc trò chuyện',
+                      style:
+                          TextStyle(fontSize: 13.5, color: AppColors.expense)),
+                ],
+              ),
+            ),
+          ],
+        ),
+        IconButton(
+          icon: const Icon(Icons.info_outline_rounded),
+          tooltip: 'Thông tin Trợ lý',
+          color: context.appTextSecondary,
+          onPressed: _showAiAssistantInfo,
+        ),
+      ],
+    );
+  }
+
+  /// Nút cuộn xuống tin nhắn mới nhất xuất hiện khi người dùng cuộn lên trên
+  Widget _buildScrollToBottomButton() {
+    return Material(
+      color: Colors.transparent,
+      elevation: 4,
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: () => _scrollToBottom(animated: true),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+          decoration: BoxDecoration(
+            color: context.appCard,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: context.appBorder),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.08),
+                blurRadius: 8,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.arrow_downward_rounded,
+                  size: 16, color: AppColors.primary),
+              const SizedBox(width: 5),
+              Text(
+                'Mới nhất',
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                  color: context.appTextPrimary,
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Widget _buildInputBar() {
-    return SafeArea(
-      child: Container(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
-        decoration: BoxDecoration(
-          color: AppColors.card,
-          boxShadow: [
-            BoxShadow(
-              color: Colors.black.withValues(alpha: 0.04),
-              blurRadius: 10,
-              offset: const Offset(0, -3),
-            )
-          ],
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _inputController,
-                focusNode: _inputFocusNode,
-                decoration: InputDecoration(
-                  hintText: 'Hỏi Trợ lý AI về chi tiêu của bạn...',
-                  hintStyle: TextStyle(color: AppColors.textSecondary, fontSize: 14),
-                  filled: true,
-                  fillColor: AppColors.background,
-                  suffixIcon: Icon(Icons.mic_none_outlined, color: AppColors.textSecondary),
-                  contentPadding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(24),
-                    borderSide: BorderSide.none,
+  /// Thanh chọn danh mục câu hỏi gợi ý
+  Widget _buildPromptFilterBar() {
+    final tabs = [
+      {'id': 'all', 'label': 'Tất cả'},
+      {'id': 'featured', 'label': '⚡ Nổi bật'},
+      {'id': 'overview', 'label': '📊 Tổng quan'},
+      {'id': 'expense', 'label': '💸 Chi tiêu'},
+      {'id': 'budget', 'label': '🎯 Ngân sách'},
+      {'id': 'saving', 'label': '💎 Tiết kiệm'},
+    ];
+
+    return Container(
+      height: 36,
+      margin: const EdgeInsets.only(top: 6, bottom: 4),
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        itemCount: tabs.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 6),
+        itemBuilder: (context, index) {
+          final tab = tabs[index];
+          final isSelected = _selectedPromptCategory == tab['id'];
+
+          return InkWell(
+            borderRadius: BorderRadius.circular(18),
+            onTap: () {
+              setState(() {
+                _selectedPromptCategory = tab['id']!;
+              });
+            },
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 180),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(
+                color: isSelected ? AppColors.primary : context.appCard,
+                borderRadius: BorderRadius.circular(18),
+                border: Border.all(
+                  color: isSelected ? AppColors.primary : context.appBorder,
+                ),
+              ),
+              child: Center(
+                child: Text(
+                  tab['label']!,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
+                    color: isSelected ? Colors.white : context.appTextSecondary,
                   ),
                 ),
-                maxLines: null,
-                textInputAction: TextInputAction.send,
-                onSubmitted: (_) => _handleSend(),
               ),
             ),
-            const SizedBox(width: 12),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Danh sách câu hỏi gợi ý động dựa trên ngữ cảnh thực tế
+  Widget _buildDynamicPromptsList() {
+    final allPrompts = _financialContext?.dynamicPrompts ??
+        [
+          const DynamicPromptChip(
+              label: 'Tôi đang có vấn đề tài chính nào cần chú ý?',
+              category: 'featured',
+              icon: '🔥'),
+          const DynamicPromptChip(
+              label: 'Tôi nên cải thiện khoản chi nào trước?',
+              category: 'featured',
+              icon: '💡'),
+          const DynamicPromptChip(
+              label: 'Làm thế nào để tôi tiết kiệm thêm mỗi tháng?',
+              category: 'featured',
+              icon: '💎'),
+          const DynamicPromptChip(
+              label: 'Tóm tắt tình hình tài chính tháng này',
+              category: 'overview'),
+          const DynamicPromptChip(
+              label: 'Thu nhập và chi tiêu đang thay đổi ra sao?',
+              category: 'overview'),
+          const DynamicPromptChip(
+              label: 'Danh mục nào đang chiếm chi tiêu nhiều nhất?',
+              category: 'expense'),
+          const DynamicPromptChip(
+              label: 'Tôi nên cắt giảm khoản chi tiêu nào?',
+              category: 'expense'),
+          const DynamicPromptChip(
+              label: 'Ngân sách nào sắp vượt hạn mức?', category: 'budget'),
+          const DynamicPromptChip(
+              label: 'Tôi có thể đạt mục tiêu tiết kiệm đúng hạn không?',
+              category: 'saving'),
+        ];
+
+    final filteredPrompts = _selectedPromptCategory == 'all'
+        ? allPrompts
+        : allPrompts
+            .where((p) => p.category == _selectedPromptCategory)
+            .toList();
+
+    if (filteredPrompts.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      height: 40,
+      margin: const EdgeInsets.only(bottom: 6),
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        itemCount: filteredPrompts.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 8),
+        itemBuilder: (context, i) {
+          final prompt = filteredPrompts[i];
+          final isAlert = prompt.isAlert;
+
+          return ActionChip(
+            label: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (isAlert) ...[
+                  const Icon(Icons.warning_amber_rounded,
+                      size: 14, color: AppColors.expense),
+                  const SizedBox(width: 4),
+                ] else if (prompt.icon != null) ...[
+                  Text(prompt.icon!, style: const TextStyle(fontSize: 12)),
+                  const SizedBox(width: 4),
+                ],
+                Text(
+                  prompt.label,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w500,
+                    color: isAlert ? AppColors.expense : context.appTextPrimary,
+                  ),
+                ),
+              ],
+            ),
+            backgroundColor:
+                isAlert ? AppColors.expenseBackground : context.appCard,
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+              side: BorderSide(
+                color: isAlert
+                    ? AppColors.expense.withValues(alpha: 0.5)
+                    : context.appBorder,
+              ),
+            ),
+            onPressed: _isSending ? null : () => _sendMessage(prompt.label),
+          );
+        },
+      ),
+    );
+  }
+
+  /// Thanh nhập tin nhắn bên dưới
+  Widget _buildInputBar() {
+    return SafeArea(
+      top: false,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+        decoration: BoxDecoration(
+          color: context.appCard,
+          border: Border(top: BorderSide(color: context.appBorder)),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Expanded(
+              child: Container(
+                constraints: const BoxConstraints(maxHeight: 110),
+                decoration: BoxDecoration(
+                  color: context.appInputFill,
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: context.appBorder),
+                ),
+                child: TextField(
+                  controller: _inputController,
+                  focusNode: _inputFocusNode,
+                  style: TextStyle(fontSize: 14, color: context.appTextPrimary),
+                  decoration: InputDecoration(
+                    hintText:
+                        'Hỏi Trợ lý AI về thu chi, ngân sách, mục tiêu...',
+                    hintStyle: TextStyle(
+                        color: context.appTextSecondary, fontSize: 13.5),
+                    border: InputBorder.none,
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 16, vertical: 10),
+                  ),
+                  minLines: 1,
+                  maxLines: 4,
+                  textInputAction: TextInputAction.send,
+                  onSubmitted: (_) {
+                    final text = _inputController.text;
+                    _sendMessage(text);
+                  },
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
             AnimatedContainer(
               duration: const Duration(milliseconds: 200),
-              width: 44,
-              height: 44,
+              width: 42,
+              height: 42,
               decoration: BoxDecoration(
-                color: _isSending
-                    ? AppColors.textSecondary
-                    : AppColors.primary,
+                color:
+                    _isSending ? context.appTextSecondary : AppColors.primary,
                 shape: BoxShape.circle,
               ),
               child: IconButton(
+                padding: EdgeInsets.zero,
                 icon: _isSending
                     ? const SizedBox(
                         width: 18,
                         height: 18,
                         child: CircularProgressIndicator(
-                            color: Colors.white, strokeWidth: 2))
-                    : const Icon(Icons.send_rounded, color: Colors.white, size: 20),
-                onPressed: _isSending ? null : _handleSend,
+                            color: Colors.white, strokeWidth: 2),
+                      )
+                    : const Icon(Icons.send_rounded,
+                        color: Colors.white, size: 20),
+                onPressed: _isSending
+                    ? null
+                    : () {
+                        final text = _inputController.text;
+                        _sendMessage(text);
+                      },
               ),
             ),
           ],
@@ -349,49 +1523,182 @@ class _AiChatScreenState extends State<AiChatScreen> {
   }
 }
 
+/// ============================================================
+/// BONG BÓNG TIN NHẮN (CHAT BUBBLE)
+/// Hỗ trợ Markdown, RichText và Thẻ Hành Động Tương Tác
+/// ============================================================
 class _ChatBubble extends StatelessWidget {
   final _ChatMessage message;
-  const _ChatBubble({required this.message});
+  final VoidCallback onCopy;
+  final VoidCallback? onRetry;
+  final VoidCallback? onCardAction;
+
+  const _ChatBubble({
+    required this.message,
+    required this.onCopy,
+    this.onRetry,
+    this.onCardAction,
+  });
 
   @override
   Widget build(BuildContext context) {
     final isUser = message.isUser;
+    final isError = message.isError;
+
+    if (isUser) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Flexible(
+              child: Container(
+                constraints: BoxConstraints(
+                    maxWidth: MediaQuery.of(context).size.width * 0.78),
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                decoration: const BoxDecoration(
+                  color: AppColors.primary,
+                  borderRadius: BorderRadius.only(
+                    topLeft: Radius.circular(18),
+                    topRight: Radius.circular(18),
+                    bottomLeft: Radius.circular(18),
+                    bottomRight: Radius.circular(4),
+                  ),
+                ),
+                child: Text(
+                  message.text,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    height: 1.4,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w400,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // AI Message
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
-        mainAxisAlignment:
-            isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
-        crossAxisAlignment: CrossAxisAlignment.end,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Flexible(
-            child: Container(
-              constraints: BoxConstraints(
-                  maxWidth: MediaQuery.of(context).size.width * 0.75),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              decoration: BoxDecoration(
-                color: isUser ? AppColors.primary : AppColors.card,
-                borderRadius: BorderRadius.only(
-                  topLeft: const Radius.circular(16),
-                  topRight: const Radius.circular(16),
-                  bottomLeft: Radius.circular(isUser ? 16 : 4),
-                  bottomRight: Radius.circular(isUser ? 4 : 16),
+          Container(
+            width: 32,
+            height: 32,
+            margin: const EdgeInsets.only(top: 2, right: 10),
+            decoration: BoxDecoration(
+              color: isError
+                  ? AppColors.expense.withValues(alpha: 0.12)
+                  : AppColors.primary.withValues(alpha: 0.12),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(
+              isError ? Icons.error_outline : Icons.auto_awesome,
+              color: isError ? AppColors.expense : AppColors.primary,
+              size: 18,
+            ),
+          ),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Container(
+                  constraints: BoxConstraints(
+                      maxWidth: MediaQuery.of(context).size.width * 0.85),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  decoration: BoxDecoration(
+                    color:
+                        isError ? AppColors.expenseBackground : context.appCard,
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(4),
+                      topRight: Radius.circular(18),
+                      bottomLeft: Radius.circular(18),
+                      bottomRight: Radius.circular(18),
+                    ),
+                    border: Border.all(
+                      color: isError
+                          ? AppColors.expense.withValues(alpha: 0.4)
+                          : context.appBorder,
+                    ),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _FormattedMarkdownText(
+                        text: message.text,
+                        isError: isError,
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.end,
+                        children: [
+                          if (isError && onRetry != null)
+                            InkWell(
+                              onTap: onRetry,
+                              borderRadius: BorderRadius.circular(4),
+                              child: const Padding(
+                                padding: EdgeInsets.symmetric(
+                                    horizontal: 6, vertical: 2),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.refresh,
+                                        size: 14, color: AppColors.expense),
+                                    SizedBox(width: 4),
+                                    Text('Thử lại',
+                                        style: TextStyle(
+                                            fontSize: 11,
+                                            color: AppColors.expense,
+                                            fontWeight: FontWeight.bold)),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          if (!isError)
+                            InkWell(
+                              onTap: onCopy,
+                              borderRadius: BorderRadius.circular(4),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                    horizontal: 4, vertical: 2),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    Icon(Icons.copy_rounded,
+                                        size: 13,
+                                        color: context.appTextSecondary),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      'Sao chép',
+                                      style: TextStyle(
+                                          fontSize: 11,
+                                          color: context.appTextSecondary),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
                 ),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.03),
-                    blurRadius: 8,
-                    offset: const Offset(0, 3),
-                  )
+                if (message.insightCard != null) ...[
+                  const SizedBox(height: 8),
+                  _ActionableInsightCard(
+                    card: message.insightCard!,
+                    onAction: onCardAction,
+                  ),
                 ],
-              ),
-              child: Text(
-                message.text,
-                style: TextStyle(
-                  color: isUser ? Colors.white : AppColors.textPrimary,
-                  height: 1.4,
-                  fontSize: 14,
-                ),
-              ),
+              ],
             ),
           ),
         ],
@@ -400,7 +1707,336 @@ class _ChatBubble extends StatelessWidget {
   }
 }
 
+/// ============================================================
+/// ACTIONABLE INSIGHT CARD
+/// Thẻ hành động tương tác hiển thị trực tiếp trong dòng chat
+/// ============================================================
+class _ActionableInsightCard extends StatelessWidget {
+  final ChatInsightCardData card;
+  final VoidCallback? onAction;
+
+  const _ActionableInsightCard({
+    required this.card,
+    this.onAction,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    Color themeColor;
+    Color bgColor;
+    IconData icon;
+
+    switch (card.type) {
+      case ChatInsightCardType.budgetOverrun:
+        themeColor = AppColors.expense;
+        bgColor = AppColors.expenseBackground;
+        icon = Icons.warning_amber_rounded;
+        break;
+      case ChatInsightCardType.savingGoalProgress:
+        themeColor = AppColors.income;
+        bgColor = AppColors.incomeBackground;
+        icon = Icons.savings_outlined;
+        break;
+      case ChatInsightCardType.cashFlowSnapshot:
+        themeColor = AppColors.primary;
+        bgColor = AppColors.aiBackgroundLight;
+        icon = Icons.account_balance_wallet_outlined;
+        break;
+      case ChatInsightCardType.emptyDataPrompt:
+        themeColor = AppColors.primary;
+        bgColor = AppColors.aiBackgroundLight;
+        icon = Icons.add_circle_outline_rounded;
+        break;
+      case ChatInsightCardType.none:
+        return const SizedBox.shrink();
+    }
+
+    return Container(
+      constraints:
+          BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.85),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: bgColor,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: themeColor.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(6),
+                decoration: BoxDecoration(
+                  color: themeColor.withValues(alpha: 0.15),
+                  shape: BoxShape.circle,
+                ),
+                child: Icon(icon, size: 16, color: themeColor),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  card.title,
+                  style: TextStyle(
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.bold,
+                    color: context.appTextPrimary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            card.subtitle,
+            style: TextStyle(
+                fontSize: 12, color: context.appTextSecondary, height: 1.3),
+          ),
+          const SizedBox(height: 8),
+          if (card.progressPercent != null) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: card.progressPercent!.clamp(0.0, 1.0),
+                backgroundColor: context.appBorder,
+                color: themeColor,
+                minHeight: 6,
+              ),
+            ),
+            const SizedBox(height: 8),
+          ],
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                card.primaryMetric,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.bold,
+                  color: themeColor,
+                ),
+              ),
+              InkWell(
+                onTap: onAction,
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                  decoration: BoxDecoration(
+                    color: themeColor,
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        card.actionLabel,
+                        style: const TextStyle(
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      const Icon(Icons.arrow_forward_ios_rounded,
+                          size: 10, color: Colors.white),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// ============================================================
+/// PARSER VĂN BẢN MARKDOWN TỐI ƯU CHO GIAO DIỆN CHAT FINTECH
+/// Hỗ trợ Header, Bullet Points, Bold/Italic TextSpans
+/// ============================================================
+class _FormattedMarkdownText extends StatelessWidget {
+  final String text;
+  final bool isError;
+
+  const _FormattedMarkdownText({
+    required this.text,
+    this.isError = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (isError) {
+      return Text(
+        text,
+        style: const TextStyle(
+          color: AppColors.expense,
+          fontSize: 13.5,
+          height: 1.4,
+          fontWeight: FontWeight.w500,
+        ),
+      );
+    }
+
+    final lines = text.split('\n');
+    final List<Widget> widgets = [];
+
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i].trimRight();
+      if (line.isEmpty) {
+        widgets.add(const SizedBox(height: 6));
+        continue;
+      }
+
+      // 1. Tiêu đề H2 hoặc H3
+      if (line.startsWith('### ') || line.startsWith('## ')) {
+        final headingText = line.replaceFirst(RegExp(r'^#{2,3}\s*'), '');
+        widgets.add(Padding(
+          padding: const EdgeInsets.only(top: 6, bottom: 4),
+          child: Text(
+            headingText,
+            style: TextStyle(
+              fontSize: 14.5,
+              fontWeight: FontWeight.bold,
+              color: context.appTextPrimary,
+            ),
+          ),
+        ));
+        continue;
+      }
+
+      // 2. Dấu đầu dòng Bullet (• hoặc - hoặc *)
+      final bulletMatch = RegExp(r'^([•\-\*])\s+(.*)$').firstMatch(line);
+      if (bulletMatch != null) {
+        final content = bulletMatch.group(2) ?? '';
+        widgets.add(Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Container(
+                width: 5,
+                height: 5,
+                margin: const EdgeInsets.only(top: 7, right: 8),
+                decoration: const BoxDecoration(
+                  color: AppColors.primary,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              Expanded(
+                child: _buildRichSpanText(context, content),
+              ),
+            ],
+          ),
+        ));
+        continue;
+      }
+
+      // 3. Danh sách có số (1. 2. 3.)
+      final numberMatch = RegExp(r'^(\d+)\.\s+(.*)$').firstMatch(line);
+      if (numberMatch != null) {
+        final numStr = numberMatch.group(1) ?? '1';
+        final content = numberMatch.group(2) ?? '';
+        widgets.add(Padding(
+          padding: const EdgeInsets.symmetric(vertical: 2),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '$numStr. ',
+                style: const TextStyle(
+                  fontSize: 13.5,
+                  fontWeight: FontWeight.bold,
+                  color: AppColors.primary,
+                ),
+              ),
+              Expanded(
+                child: _buildRichSpanText(context, content),
+              ),
+            ],
+          ),
+        ));
+        continue;
+      }
+
+      // 4. Dòng văn bản bình thường (có thể chứa **bold**)
+      widgets.add(Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: _buildRichSpanText(context, line),
+      ));
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: widgets,
+    );
+  }
+
+  Widget _buildRichSpanText(BuildContext context, String content) {
+    final spans = <TextSpan>[];
+    final regExp = RegExp(r'(\*\*[^*]+\*\*|\*[^*]+\*)');
+    int lastMatchEnd = 0;
+
+    for (final match in regExp.allMatches(content)) {
+      if (match.start > lastMatchEnd) {
+        spans.add(TextSpan(
+          text: content.substring(lastMatchEnd, match.start),
+          style: TextStyle(
+            color: context.appTextPrimary,
+            fontSize: 13.5,
+            height: 1.45,
+          ),
+        ));
+      }
+
+      final matchedStr = match.group(0)!;
+      if (matchedStr.startsWith('**') && matchedStr.endsWith('**')) {
+        spans.add(TextSpan(
+          text: matchedStr.substring(2, matchedStr.length - 2),
+          style: TextStyle(
+            fontWeight: FontWeight.bold,
+            color: context.appTextPrimary,
+            fontSize: 13.5,
+            height: 1.45,
+          ),
+        ));
+      } else if (matchedStr.startsWith('*') && matchedStr.endsWith('*')) {
+        spans.add(TextSpan(
+          text: matchedStr.substring(1, matchedStr.length - 1),
+          style: TextStyle(
+            fontStyle: FontStyle.italic,
+            color: context.appTextPrimary,
+            fontSize: 13.5,
+            height: 1.45,
+          ),
+        ));
+      }
+
+      lastMatchEnd = match.end;
+    }
+
+    if (lastMatchEnd < content.length) {
+      spans.add(TextSpan(
+        text: content.substring(lastMatchEnd),
+        style: TextStyle(
+          color: context.appTextPrimary,
+          fontSize: 13.5,
+          height: 1.45,
+        ),
+      ));
+    }
+
+    return RichText(
+      text: TextSpan(children: spans),
+    );
+  }
+}
+
+/// Typing indicator 3 chấm hoạt họa mượt mà
 class _TypingIndicator extends StatefulWidget {
+  const _TypingIndicator();
+
   @override
   State<_TypingIndicator> createState() => _TypingIndicatorState();
 }
@@ -427,46 +2063,53 @@ class _TypingIndicatorState extends State<_TypingIndicator>
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
+      padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.start,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            width: 32,
+            height: 32,
+            margin: const EdgeInsets.only(top: 2, right: 10),
             decoration: BoxDecoration(
-              color: Colors.white,
+              color: AppColors.primary.withValues(alpha: 0.12),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(Icons.auto_awesome,
+                color: AppColors.primary, size: 18),
+          ),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            decoration: BoxDecoration(
+              color: context.appCard,
               borderRadius: const BorderRadius.only(
-                topLeft: Radius.circular(16),
-                topRight: Radius.circular(16),
-                bottomRight: Radius.circular(16),
-                bottomLeft: Radius.circular(4),
+                topLeft: Radius.circular(4),
+                topRight: Radius.circular(18),
+                bottomLeft: Radius.circular(18),
+                bottomRight: Radius.circular(18),
               ),
-              boxShadow: [
-                BoxShadow(
-                    color: Colors.black.withValues(alpha: 0.03),
-                    blurRadius: 8,
-                    offset: const Offset(0, 3))
-              ],
+              border: Border.all(color: context.appBorder),
             ),
             child: AnimatedBuilder(
               animation: _controller,
               builder: (_, __) {
                 return Row(
+                  mainAxisSize: MainAxisSize.min,
                   children: List.generate(3, (i) {
                     final delay = i / 3;
                     final offset = ((_controller.value + delay) % 1.0);
                     final dy = offset < 0.5
-                        ? -4.0 * (offset / 0.5)
-                        : -4.0 * (1 - (offset - 0.5) / 0.5);
+                        ? -3.5 * (offset / 0.5)
+                        : -3.5 * (1 - (offset - 0.5) / 0.5);
                     return Padding(
                       padding: const EdgeInsets.symmetric(horizontal: 3),
                       child: Transform.translate(
                         offset: Offset(0, dy),
                         child: Container(
-                          width: 7,
-                          height: 7,
+                          width: 6.5,
+                          height: 6.5,
                           decoration: const BoxDecoration(
-                            color: AppColors.aiAccent,
+                            color: AppColors.primary,
                             shape: BoxShape.circle,
                           ),
                         ),

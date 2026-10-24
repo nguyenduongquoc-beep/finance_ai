@@ -39,3 +39,12 @@ lib/config/api_keys.dart
 
 # Kotlin build/cache
 android/.kotlin/
+
+# Generated test coverage
+coverage/
+
+# Firebase Cloud Functions
+functions/node_modules/
+functions/.env
+functions/.env.*
+!functions/.env.example

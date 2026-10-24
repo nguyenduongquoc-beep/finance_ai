@@ -1,21 +1,23 @@
 import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
 import '../models/transaction_model.dart';
 import '../models/category_model.dart';
 import '../utils/constants.dart';
 import '../utils/formatters.dart';
+import 'app_card.dart';
 
-/// Widget hiển thị một dòng giao dịch trong danh sách
+/// Widget hiển thị một dòng giao dịch trong danh sách chuẩn Fintech
 class TransactionCard extends StatelessWidget {
   final AppTransaction transaction;
   final Category? category;
   final VoidCallback? onTap;
+  final EdgeInsetsGeometry margin;
 
   const TransactionCard({
     super.key,
     required this.transaction,
     this.category,
     this.onTap,
+    this.margin = const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
   });
 
   IconData _getCategoryIcon(String? iconName) {
@@ -41,7 +43,7 @@ class TransactionCard extends StatelessWidget {
       case 'local_hospital':
         return Icons.local_hospital_outlined;
       default:
-        return Icons.receipt_long;
+        return Icons.receipt_long_rounded;
     }
   }
 
@@ -51,9 +53,10 @@ class TransactionCard extends StatelessWidget {
     final isGoalWithdraw = transaction.type == 'goal_withdraw';
     final isTransfer = transaction.type == 'transfer' || isGoalDeposit || isGoalWithdraw;
     final isIncome = transaction.type == 'income';
-    final color = isTransfer
-        ? AppColors.textSecondary
+    final amountColor = isTransfer
+        ? context.appTextPrimary
         : (isIncome ? AppColors.income : AppColors.expense);
+
     final hasNote = transaction.note != null && transaction.note!.trim().isNotEmpty;
     final categoryLabel = isGoalDeposit
         ? 'Nạp mục tiêu tiết kiệm'
@@ -65,65 +68,80 @@ class TransactionCard extends StatelessWidget {
     final titleText = hasNote ? transaction.note! : categoryLabel;
     final subtitleText = hasNote ? categoryLabel : null;
 
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      elevation: 0,
-      color: AppColors.card,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(14),
-        side: BorderSide(color: Colors.grey.shade100, width: 1),
-      ),
-      child: ListTile(
-        onTap: onTap,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        leading: Container(
-          width: 44,
-          height: 44,
-          decoration: BoxDecoration(
-            color: isTransfer
-                ? AppColors.textSecondary.withValues(alpha: 0.1)
-                : AppColors.primary.withValues(alpha: 0.1),
-            borderRadius: BorderRadius.circular(12),
+    final iconColor = isTransfer
+        ? context.appTextSecondary
+        : (isIncome ? AppColors.income : AppColors.expense);
+
+    return AppCard(
+      onTap: onTap,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      margin: margin,
+      child: Row(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              color: context.isDarkMode ? AppColors.slate700 : AppColors.slate100,
+              borderRadius: BorderRadius.circular(AppColors.radiusControl),
+            ),
+            child: Icon(
+              (isGoalDeposit || isGoalWithdraw)
+                  ? Icons.savings_outlined
+                  : (isTransfer ? Icons.swap_horiz_rounded : _getCategoryIcon(category?.icon)),
+              color: iconColor,
+              size: 20,
+            ),
           ),
-          child: Icon(
-            (isGoalDeposit || isGoalWithdraw)
-                ? Icons.savings_outlined
-                : (isTransfer ? Icons.swap_horiz : _getCategoryIcon(category?.icon)),
-            color: isTransfer ? AppColors.textSecondary : AppColors.primary,
-            size: 22,
-          ),
-        ),
-        title: Text(
-          titleText,
-          style: GoogleFonts.inter(
-            fontWeight: FontWeight.w600,
-            fontSize: 15,
-            color: AppColors.textPrimary,
-          ),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
-        subtitle: subtitleText != null
-            ? Text(
-                subtitleText,
-                style: GoogleFonts.inter(
-                  fontSize: 13,
-                  color: AppColors.textSecondary,
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  titleText,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                    color: context.appTextPrimary,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              )
-            : null,
-        trailing: Text(
-          isTransfer
-              ? '${AppFormatters.number(transaction.amount)} VNĐ'
-              : '${isIncome ? '+' : '-'}${AppFormatters.number(transaction.amount)} VNĐ',
-          style: GoogleFonts.inter(
-            color: color,
-            fontWeight: FontWeight.bold,
-            fontSize: 15,
+                const SizedBox(height: 2),
+                Text(
+                  subtitleText ?? AppFormatters.date(transaction.date),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: context.appTextSecondary,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
           ),
-        ),
+          const SizedBox(width: 8),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 120),
+            child: FittedBox(
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerRight,
+              child: Text(
+                isTransfer
+                    ? AppFormatters.compactCurrency(transaction.amount, unit: '₫')
+                    : '${isIncome ? '+' : '-'}${AppFormatters.compactCurrency(transaction.amount, unit: '₫')}',
+                style: TextStyle(
+                  color: amountColor,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 14,
+                  fontFeatures: const [FontFeature.tabularFigures()],
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }

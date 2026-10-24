@@ -25,23 +25,52 @@ class SavingGoal {
   double get percentComplete =>
       targetAmount == 0 ? 0 : (savedAmount / targetAmount).clamp(0, 1);
 
-  double get monthlyRequired =>
-      months == 0 ? 0 : (targetAmount - savedAmount) / months;
+  double get monthlyRequired {
+    if (months <= 0) return 0;
+    final remaining = targetAmount - savedAmount;
+    if (remaining <= 0) return 0;
+    return remaining / months;
+  }
 
   double get dailyRequired => monthlyRequired / 30;
 
   factory SavingGoal.fromMap(Map<String, dynamic> map, String id) {
     return SavingGoal(
       goalId: id,
-      userId: map['userId'] ?? '',
-      name: map['name'] ?? '',
-      targetAmount: (map['targetAmount'] ?? 0).toDouble(),
-      savedAmount: (map['savedAmount'] ?? 0).toDouble(),
-      months: map['months'] ?? 1,
-      createdAt: map['createdAt'] != null
-          ? DateTime.parse(map['createdAt'])
-          : DateTime.now(),
+      userId: map['userId']?.toString() ?? '',
+      name: map['name']?.toString() ?? '',
+      targetAmount: _parseDouble(map['targetAmount']),
+      savedAmount: _parseDouble(map['savedAmount']),
+      months: _parseInt(map['months'], defaultValue: 1),
+      createdAt: _parseDate(map['createdAt']),
     );
+  }
+
+  static double _parseDouble(dynamic val) {
+    if (val == null) return 0.0;
+    if (val is num) return val.toDouble();
+    if (val is String) return double.tryParse(val) ?? 0.0;
+    return 0.0;
+  }
+
+  static int _parseInt(dynamic val, {int defaultValue = 1}) {
+    if (val == null) return defaultValue;
+    if (val is int) return val;
+    if (val is num) return val.toInt();
+    if (val is String) return int.tryParse(val) ?? defaultValue;
+    return defaultValue;
+  }
+
+  static DateTime _parseDate(dynamic val) {
+    if (val == null) return DateTime.now();
+    if (val is DateTime) return val;
+    if (val is String) return DateTime.tryParse(val) ?? DateTime.now();
+    try {
+      // Hỗ trợ Firestore Timestamp (có toDate())
+      return (val as dynamic).toDate() as DateTime;
+    } catch (_) {
+      return DateTime.now();
+    }
   }
 
   Map<String, dynamic> toMap() {

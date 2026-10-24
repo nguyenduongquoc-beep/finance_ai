@@ -1,21 +1,39 @@
 import 'package:flutter/material.dart';
 import '../utils/constants.dart';
 
-/// ============================================================
-/// APP SNACKBAR
-/// Helper hiển thị SnackBar thống nhất toàn app — dùng kiểu "floating"
-/// để KHÔNG đẩy FloatingActionButton (+) lên khi hiện thông báo.
-/// ============================================================
+/// Helper hiển thị SnackBar floating chuẩn Fintech
 class AppSnackbar {
   static void show(BuildContext context, String message, {bool isError = false}) {
+    final isDark = Theme.of(context).brightness == Brightness.dark;
+    final bg = isError
+        ? AppColors.expense
+        : (isDark ? AppColors.slate800 : AppColors.slate900);
+    final textCol = Colors.white;
+
     ScaffoldMessenger.of(context).hideCurrentSnackBar();
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text(
-          message,
-          style: TextStyle(color: isError ? Colors.white : AppColors.textPrimary),
+        content: Row(
+          children: [
+            Icon(
+              isError ? Icons.error_outline_rounded : Icons.check_circle_outline_rounded,
+              color: textCol,
+              size: 20,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                message,
+                style: TextStyle(
+                  color: textCol,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          ],
         ),
-        backgroundColor: isError ? AppColors.expense : AppColors.card,
+        backgroundColor: bg,
         behavior: SnackBarBehavior.floating,
         margin: const EdgeInsets.fromLTRB(16, 0, 16, 90),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),

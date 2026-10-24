@@ -3,13 +3,13 @@ import 'package:fl_chart/fl_chart.dart';
 import '../utils/constants.dart';
 import '../utils/formatters.dart';
 
-/// Biểu đồ cột: Thu / Chi theo tháng (hỗ trợ chạm chọn tháng)
+/// Biểu đồ cột: Thu / Chi theo tháng (hỗ trợ chạm chọn tháng chuẩn Fintech)
 class IncomeExpenseBarChart extends StatelessWidget {
-  final List<double> incomeByMonth; // 6 tháng
+  final List<double> incomeByMonth;
   final List<double> expenseByMonth;
   final List<String> monthLabels;
-  final int selectedIndex; // tháng đang được chọn
-  final void Function(int monthIndex) onMonthTap; // callback khi chạm cột
+  final int selectedIndex;
+  final void Function(int monthIndex) onMonthTap;
 
   const IncomeExpenseBarChart({
     super.key,
@@ -23,23 +23,31 @@ class IncomeExpenseBarChart extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final maxVal = [...incomeByMonth, ...expenseByMonth].fold<double>(0, (a, b) => a > b ? a : b);
+    final hasAnyData = maxVal > 0;
+    final chartMaxY = hasAnyData ? maxVal * 1.25 : 1.0;
+
     return SizedBox(
       height: 220,
       child: BarChart(
         BarChartData(
-          maxY: maxVal == 0 ? 1 : maxVal * 1.2,
+          maxY: chartMaxY,
+          minY: 0,
+          alignment: BarChartAlignment.spaceAround,
           barTouchData: BarTouchData(
+            enabled: true,
             touchTooltipData: BarTouchTooltipData(
+              getTooltipColor: (group) =>
+                  context.isDarkMode ? AppColors.slate800 : AppColors.slate900,
               tooltipRoundedRadius: 8,
               tooltipPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
               getTooltipItem: (group, groupIndex, rod, rodIndex) {
                 final isIncome = rodIndex == 0;
                 final rawValue = (isIncome ? incomeByMonth : expenseByMonth)[groupIndex] * 1e6;
                 return BarTooltipItem(
-                  AppFormatters.currency(rawValue),
-                  TextStyle(
+                  '${isIncome ? "Thu: " : "Chi: "}${AppFormatters.compactCurrency(rawValue, unit: '₫')}',
+                  const TextStyle(
                     color: Colors.white,
-                    fontWeight: FontWeight.bold,
+                    fontWeight: FontWeight.w600,
                     fontSize: 12,
                   ),
                 );
@@ -53,47 +61,68 @@ class IncomeExpenseBarChart extends StatelessWidget {
           ),
           barGroups: List.generate(monthLabels.length, (i) {
             final isSelected = i == selectedIndex;
-            return BarChartGroupData(x: i, barRods: [
-              BarChartRodData(
-                toY: incomeByMonth[i],
-                color: isSelected
-                    ? AppColors.income
-                    : AppColors.income.withOpacity(0.45),
-                width: 10,
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(4)),
-                borderSide: isSelected
-                    ? const BorderSide(color: Colors.white, width: 1.5)
-                    : BorderSide.none,
-              ),
-              BarChartRodData(
-                toY: expenseByMonth[i],
-                color: isSelected
-                    ? AppColors.expense
-                    : AppColors.expense.withOpacity(0.45),
-                width: 10,
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(4)),
-                borderSide: isSelected
-                    ? const BorderSide(color: Colors.white, width: 1.5)
-                    : BorderSide.none,
-              ),
-            ]);
+            final incVal = incomeByMonth[i];
+            final expVal = expenseByMonth[i];
+
+            return BarChartGroupData(
+              x: i,
+              barsSpace: 4,
+              barRods: [
+                BarChartRodData(
+                  toY: incVal > 0 ? incVal : (hasAnyData ? 0 : 0.04),
+                  color: isSelected
+                      ? AppColors.income
+                      : AppColors.income.withValues(alpha: hasAnyData ? 0.35 : 0.15),
+                  width: 8.5,
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(5)),
+                  borderSide: BorderSide.none,
+                ),
+                BarChartRodData(
+                  toY: expVal > 0 ? expVal : (hasAnyData ? 0 : 0.04),
+                  color: isSelected
+                      ? AppColors.expense
+                      : AppColors.expense.withValues(alpha: hasAnyData ? 0.35 : 0.15),
+                  width: 8.5,
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(5)),
+                  borderSide: BorderSide.none,
+                ),
+              ],
+            );
           }),
           titlesData: FlTitlesData(
             bottomTitles: AxisTitles(
               sideTitles: SideTitles(
                 showTitles: true,
+                reservedSize: 32,
                 getTitlesWidget: (value, meta) {
                   final i = value.toInt();
                   if (i < 0 || i >= monthLabels.length) return const SizedBox();
                   final isSelected = i == selectedIndex;
                   return Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: Text(
-                      monthLabels[i],
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                        color: isSelected ? AppColors.textPrimary : AppColors.textSecondary,
+                    padding: const EdgeInsets.only(top: 8),
+                    child: GestureDetector(
+                      onTap: () => onMonthTap(i),
+                      child: Container(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: isSelected ? 6 : 2,
+                          vertical: 2,
+                        ),
+                        decoration: isSelected
+                            ? BoxDecoration(
+                                color: AppColors.primary.withValues(alpha: 0.12),
+                                borderRadius: BorderRadius.circular(6),
+                              )
+                            : null,
+                        child: Text(
+                          monthLabels[i],
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
+                            color: isSelected
+                                ? (context.isDarkMode ? Colors.white : AppColors.primary)
+                                : context.appTextSecondary,
+                          ),
+                        ),
                       ),
                     ),
                   );
@@ -104,7 +133,19 @@ class IncomeExpenseBarChart extends StatelessWidget {
             topTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
             rightTitles: const AxisTitles(sideTitles: SideTitles(showTitles: false)),
           ),
-          gridData: const FlGridData(show: false),
+          gridData: FlGridData(
+            show: true,
+            drawVerticalLine: false,
+            drawHorizontalLine: true,
+            horizontalInterval: hasAnyData ? (chartMaxY / 3) : 0.5,
+            getDrawingHorizontalLine: (value) => FlLine(
+              color: context.isDarkMode
+                  ? AppColors.slate700.withValues(alpha: 0.4)
+                  : AppColors.slate200.withValues(alpha: 0.7),
+              strokeWidth: 1,
+              dashArray: [4, 4],
+            ),
+          ),
           borderData: FlBorderData(show: false),
         ),
       ),
@@ -114,7 +155,7 @@ class IncomeExpenseBarChart extends StatelessWidget {
 
 /// Biểu đồ tròn: Tỷ lệ chi tiêu theo danh mục
 class CategoryPieChart extends StatelessWidget {
-  final Map<String, double> categoryTotals; // tên danh mục -> tổng tiền
+  final Map<String, double> categoryTotals;
   final List<Color> colors;
 
   const CategoryPieChart({super.key, required this.categoryTotals, required this.colors});
@@ -124,10 +165,8 @@ class CategoryPieChart extends StatelessWidget {
     final total = categoryTotals.values.fold<double>(0, (a, b) => a + b);
     final entries = categoryTotals.entries.toList();
 
-    // Sắp xếp các danh mục giảm dần theo giá trị chi tiêu
     entries.sort((a, b) => b.value.compareTo(a.value));
 
-    // Tính phần trăm bằng thuật toán "Largest Remainder Method"
     final List<int> percentages = List.filled(entries.length, 0);
     if (total > 0) {
       final List<double> rawPercentages = entries.map((e) => (e.value / total) * 100).toList();
@@ -137,17 +176,13 @@ class CategoryPieChart extends StatelessWidget {
       final int sumFloors = floors.fold<int>(0, (a, b) => a + b);
       final int difference = 100 - sumFloors;
 
-      // Sắp xếp index theo phần dư (remainder) giảm dần
       final List<int> indices = List.generate(entries.length, (i) => i);
       indices.sort((a, b) {
-        // Nếu phần dư khác nhau thì sắp xếp theo phần dư giảm dần
         final cmp = remainders[b].compareTo(remainders[a]);
         if (cmp != 0) return cmp;
-        // Nếu phần dư bằng nhau, ưu tiên danh mục có giá trị lớn hơn để có kết quả ổn định
         return entries[b].value.compareTo(entries[a].value);
       });
 
-      // Cộng thêm 1% cho đúng số danh mục có phần dư lớn nhất
       for (int i = 0; i < difference; i++) {
         if (i < indices.length) {
           floors[indices[i]] += 1;
@@ -176,24 +211,30 @@ class CategoryPieChart extends StatelessWidget {
                       return PieChartSectionData(
                         value: entries[i].value,
                         color: colors[i % colors.length],
-                        title: '', // Bỏ hiển thị chữ/số % trên lát để gọn gàng
+                        title: '',
                         radius: 55,
                       );
                     }),
                   ),
                 ),
-                // Center text "Tổng 100%"
                 Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text('Tổng', style: TextStyle(fontSize: 11, color: AppColors.textSecondary)),
-                    const Text('100%', style: TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+                    Text('Tổng', style: TextStyle(fontSize: 11, color: context.appTextSecondary)),
+                    Text(
+                      '100%',
+                      style: TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: context.appTextPrimary,
+                      ),
+                    ),
                   ],
                 ),
               ],
             ),
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: 12),
           Expanded(
             flex: 2,
             child: ListView.builder(
@@ -201,7 +242,7 @@ class CategoryPieChart extends StatelessWidget {
               itemBuilder: (context, i) {
                 final percent = percentages[i];
                 return Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 3),
+                  padding: const EdgeInsets.symmetric(vertical: 4),
                   child: Row(
                     children: [
                       Container(
@@ -209,13 +250,16 @@ class CategoryPieChart extends StatelessWidget {
                         height: 10,
                         decoration: BoxDecoration(
                           color: colors[i % colors.length],
-                          borderRadius: BorderRadius.circular(2),
+                          borderRadius: BorderRadius.circular(3),
                         ),
                       ),
-                      const SizedBox(width: 6),
+                      const SizedBox(width: 8),
                       Expanded(
-                        child: Text(entries[i].key,
-                            style: const TextStyle(fontSize: 12), overflow: TextOverflow.ellipsis),
+                        child: Text(
+                          entries[i].key,
+                          style: TextStyle(fontSize: 12, color: context.appTextPrimary),
+                          overflow: TextOverflow.ellipsis,
+                        ),
                       ),
                       const SizedBox(width: 4),
                       Text(
@@ -223,7 +267,7 @@ class CategoryPieChart extends StatelessWidget {
                         style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w600,
-                          color: AppColors.textPrimary,
+                          color: context.appTextPrimary,
                         ),
                       ),
                     ],

@@ -145,23 +145,12 @@ $months tháng. Số tiền cần tiết kiệm là khoảng $monthlyRequired đ
         'Bạn cần tiết kiệm khoảng ${monthlyRequired.round()} đồng/tháng để đạt mục tiêu.';
   }
 
-  /// AI 5: Chatbot tài chính - trả lời câu hỏi dựa trên dữ liệu Firestore
+  /// AI 5: Chatbot tài chính - Trợ lý AI tài chính cá nhân dựa trên dữ liệu định lượng
   Future<String> chatWithFinancialData({
     required String userQuestion,
-    required String
-        contextData, // dữ liệu tổng hợp từ Firestore (thu/chi/ví/ngân sách)
+    required String contextData, // Dữ liệu tài chính định lượng tổng hợp từ Firestore
   }) async {
-    if (_chatHistory.isEmpty) {
-      _chatHistory.add(Content.text('''
-Bạn là trợ lý tài chính cá nhân thông minh. Bạn được cung cấp dữ liệu tài chính thực
-tế của người dùng (thu nhập, chi tiêu, ví, ngân sách). Hãy trả lời câu hỏi của người
-dùng dựa CHÍNH XÁC trên dữ liệu này, bằng tiếng Việt, ngắn gọn, dễ hiểu.
-
-Dữ liệu tài chính hiện tại của người dùng:
-$contextData
-'''));
-    }
-    _chatHistory.add(Content.text(userQuestion));
+    _syncSystemPromptAndHistory(contextData, userQuestion);
     try {
       final response = await _generateWithFallback(_chatHistory);
       if (response.text != null) {
@@ -174,6 +163,83 @@ $contextData
         _chatHistory.removeLast();
       }
       rethrow;
+    }
+  }
+
+  /// AI 5 (Stream): Trợ lý AI tài chính cá nhân phản hồi dạng dòng (Stream) giảm độ trễ hiển thị
+  Stream<String> chatWithFinancialDataStream({
+    required String userQuestion,
+    required String contextData,
+  }) async* {
+    _syncSystemPromptAndHistory(contextData, userQuestion);
+
+    final accumulatedText = StringBuffer();
+    bool streamSucceeded = false;
+    Exception? lastError;
+
+    for (final modelName in _modelFallbackChain) {
+      try {
+        debugPrint('🚀 Đang gọi Gemini Stream với model: $modelName');
+        final model = GenerativeModel(model: modelName, apiKey: geminiApiKey);
+        final stream = model
+            .generateContentStream(_chatHistory)
+            .timeout(const Duration(seconds: 25));
+
+        await for (final chunk in stream) {
+          final text = chunk.text;
+          if (text != null && text.isNotEmpty) {
+            accumulatedText.write(text);
+            yield text;
+          }
+        }
+        streamSucceeded = true;
+        break;
+      } catch (e) {
+        if (_isNetworkError(e)) {
+          debugPrint('⚠️ Phát hiện lỗi mất mạng khi gọi stream model "$modelName": $e');
+          throw Exception('NO_NETWORK');
+        }
+        lastError = e is Exception ? e : Exception(e.toString());
+        debugPrint('⚠️ Model Stream "$modelName" thất bại: $e — thử fallback tiếp theo...');
+        accumulatedText.clear();
+      }
+    }
+
+    // Nếu toàn bộ stream fallback thất bại, thử gọi fallback chuẩn (non-streaming)
+    if (!streamSucceeded) {
+      try {
+        debugPrint('⚠️ Chuyển sang fallback non-streaming cho câu trả lời');
+        final response = await _generateWithFallback(_chatHistory);
+        final fullText = response.text ?? 'Xin lỗi, mình chưa thể trả lời câu hỏi này.';
+        accumulatedText.write(fullText);
+        yield fullText;
+        streamSucceeded = true;
+      } catch (fallbackError) {
+        if (_chatHistory.isNotEmpty) {
+          _chatHistory.removeLast();
+        }
+        throw lastError ?? fallbackError;
+      }
+    }
+
+    if (streamSucceeded && accumulatedText.isNotEmpty) {
+      _chatHistory.add(Content.model([TextPart(accumulatedText.toString())]));
+    }
+  }
+
+  /// Đồng bộ System Prompt định lượng mới nhất và duy trì Sliding Window lịch sử (tối đa 10 tin gần nhất)
+  void _syncSystemPromptAndHistory(String contextData, String userQuestion) {
+    if (_chatHistory.isEmpty) {
+      _chatHistory.add(Content.text(_buildSystemCfpPrompt(contextData)));
+    } else {
+      // Cập nhật System Prompt với ngữ cảnh tài chính mới nhất
+      _chatHistory[0] = Content.text(_buildSystemCfpPrompt(contextData));
+    }
+    _chatHistory.add(Content.text(userQuestion));
+
+    // Duy trì sliding window: Giữ index 0 (System Prompt) và tối đa 10 tin nhắn gần nhất
+    if (_chatHistory.length > 11) {
+      _chatHistory.removeRange(1, _chatHistory.length - 10);
     }
   }
 
@@ -367,74 +433,111 @@ lời chào.
     return response.text ?? 'Không thể tạo đề xuất lúc này.';
   }
 
-  /// AI diễn giải tổng hợp FinancialInsightSummary đã được Dart tính sẵn.
+  /// AI Cố vấn tài chính diễn giải tổng hợp FinancialInsightSummary đã được Dart tính sẵn.
   /// Tuyệt đối không gửi UID, email, ảnh hay thông tin cá nhân.
   Future<String> explainFinancialInsights(
       FinancialInsightSummary summary) async {
     final buffer = StringBuffer();
     buffer.writeln(
-        'Điểm sức khỏe tài chính: ${summary.healthScore}/100 (${summary.healthRating})');
+        '=== CHỈ SỐ SỨC KHỎE TÀI CHÍNH: ${summary.healthScore}/100 (${summary.healthRating}) ===');
+
+    if (summary.strengths.isNotEmpty) {
+      buffer.writeln('Điểm mạnh ghi nhận:');
+      for (final s in summary.strengths) {
+        buffer.writeln('- $s');
+      }
+    }
+
+    if (summary.deductions.isNotEmpty) {
+      buffer.writeln('Các điểm cần cải thiện (khoản trừ):');
+      for (final d in summary.deductions) {
+        buffer.writeln('- ${d.reason} (-${d.points} điểm)');
+      }
+    }
+
+    buffer.writeln('\n=== PHÂN TÍCH THU NHẬP & DÒNG TIỀN ===');
+    buffer.writeln(
+        '- Tổng thu nhập tháng: ${summary.incomeAnalytics.currentMonthIncome.round()}đ');
+    buffer.writeln(
+        '- Tăng trưởng thu so tháng trước: ${(summary.incomeAnalytics.growthRate * 100).round()}% (Độ ổn định: ${summary.incomeAnalytics.stability})');
+    if (summary.incomeAnalytics.sources.isNotEmpty) {
+      final topSource = summary.incomeAnalytics.sources.first;
+      buffer.writeln(
+          '- Nguồn thu lớn nhất: ${topSource.categoryName} (${topSource.amount.round()}đ, ${(topSource.percentage * 100).round()}%)');
+    }
+
+    buffer.writeln(
+        '- Tổng chi tiêu thực tế: ${summary.cashFlowAnalytics.totalExpense.round()}đ');
+    buffer.writeln(
+        '- Dòng tiền ròng (Số tiền còn lại): ${summary.cashFlowAnalytics.netCashFlow.round()}đ (${summary.cashFlowAnalytics.isPositive ? "DƯƠNG" : "ÂM"}, tỷ lệ tiết kiệm: ${summary.cashFlowAnalytics.savingsRate.round()}%)');
+    buffer.writeln(
+        '- Trạng thái duy trì dòng tiền: ${summary.cashFlowAnalytics.sustainabilityStatus}');
 
     if (summary.monthEndForecast.hasEnoughData) {
       buffer.writeln(
-          'Tổng số dư hiện tại: ${summary.monthEndForecast.currentTotalBalance.round()}đ');
-      buffer.writeln(
-          'Đã chi trong tháng: ${summary.monthEndForecast.monthToDateExpense.round()}đ');
-      buffer.writeln(
-          'Trung bình chi linh hoạt/ngày: ${summary.monthEndForecast.averageDailyDiscretionaryExpense.round()}đ');
-      if (summary.monthEndForecast.plannedRemainingIncome > 0) {
-        buffer.writeln(
-            'Thu nhập định kỳ cam kết sắp tới: +${summary.monthEndForecast.plannedRemainingIncome.round()}đ');
-      }
-      if (summary.monthEndForecast.plannedRemainingExpense > 0) {
-        buffer.writeln(
-            'Chi phí/Hóa đơn định kỳ sắp tới: -${summary.monthEndForecast.plannedRemainingExpense.round()}đ');
-      }
-      buffer.writeln(
-          'Số dư dự kiến cuối tháng: ${summary.monthEndForecast.projectedEndBalance.round()}đ');
-    } else {
-      if (summary.monthEndForecast.plannedRemainingIncome > 0 ||
-          summary.monthEndForecast.plannedRemainingExpense > 0) {
-        buffer.writeln(
-            'Thu nhập định kỳ sắp tới: +${summary.monthEndForecast.plannedRemainingIncome.round()}đ, Chi định kỳ sắp tới: -${summary.monthEndForecast.plannedRemainingExpense.round()}đ');
-      }
-      buffer.writeln('Dự báo số dư: Chưa đủ dữ liệu chi tiêu tháng này.');
+          '- Số dư dự kiến cuối tháng: ${summary.monthEndForecast.projectedEndBalance.round()}đ');
     }
 
-    if (summary.budgetForecasts.isNotEmpty) {
-      buffer.writeln('\nTrạng thái ngân sách:');
-      for (final b in summary.budgetForecasts) {
-        if (b.status == BudgetForecastStatus.exceeded) {
-          buffer.writeln(
-              '- Danh mục "${b.categoryName}": Đã vượt hạn mức (Đã chi ${b.spent.round()}đ / Hạn mức ${b.limit.round()}đ)');
-        } else if (b.status == BudgetForecastStatus.atRisk) {
-          buffer.writeln(
-              '- Danh mục "${b.categoryName}": Có nguy cơ vượt (Đã chi ${b.spent.round()}đ / Hạn mức ${b.limit.round()}đ, dự kiến chạm hạn mức sau ${b.daysToLimit} ngày)');
-        } else if (b.status == BudgetForecastStatus.warning) {
-          buffer.writeln(
-              '- Danh mục "${b.categoryName}": Cảnh báo (Đã dùng ${(b.percentUsed * 100).round()}% hạn mức)');
-        }
+    if (summary.savingsGoalAssessment != null &&
+        summary.savingsGoalAssessment!.goals.isNotEmpty) {
+      buffer.writeln('\n=== ĐÁNH GIÁ MỤC TIÊU TIẾT KIỆM ===');
+      buffer.writeln(
+          '- Tổng tiền cần tích lũy/tháng: ${summary.savingsGoalAssessment!.totalMonthlyRequired.round()}đ');
+      buffer.writeln(
+          '- Thặng dư khả dụng: ${summary.savingsGoalAssessment!.availableCashFlow.round()}đ');
+      buffer.writeln(
+          '- Chênh lệch ngân sách mục tiêu: ${summary.savingsGoalAssessment!.gapAmount > 0 ? "Thiếu ${summary.savingsGoalAssessment!.gapAmount.round()}đ/tháng" : "Đủ ngân sách"}');
+      for (final g in summary.savingsGoalAssessment!.goals) {
+        buffer.writeln(
+            '  * Mục tiêu "${g.goalName}": Cần ${g.monthlyRequired.round()}đ/tháng (${(g.percentComplete * 100).round()}% hoàn thành) - ${g.statusText}');
       }
     }
 
-    if (summary.anomalies.isNotEmpty) {
-      buffer.writeln('\nChi tiêu bất thường:');
-      for (final a in summary.anomalies) {
+    if (summary.issues.isNotEmpty) {
+      buffer.writeln('\n=== CÁC VẤN ĐỀ TÀI CHÍNH PHÁT HIỆN ===');
+      for (final i in summary.issues) {
         buffer.writeln(
-            '- Danh mục "${a.categoryName}": Đã chi ${a.currentSpend.round()}đ (kỳ vọng ${a.expectedSpendToDate.round()}đ, vượt ${(a.excessRatio * 100 - 100).round()}%, chênh lệch +${a.excessAmount.round()}đ)');
+            '- ${i.title} (Mức độ: ${i.severity == IssueSeverity.critical ? "Nghiêm trọng" : "Cảnh báo"})');
+        buffer.writeln('  Nguyên nhân: ${i.effectiveRootCause}');
+        buffer.writeln('  Tác động: ${i.effectiveImpact}');
+        buffer.writeln('  Đề xuất: ${i.effectiveRecommendation}');
+      }
+    }
+
+    if (summary.actionPlan.items.isNotEmpty) {
+      buffer.writeln('\n=== KẾ HOẠCH HÀNH ĐỘNG ĐỀ XUẤT ===');
+      buffer.writeln(
+          'Mục tiêu: Tiết kiệm thêm ${summary.actionPlan.totalProjectedSavings.round()}đ/tháng');
+      for (final item in summary.actionPlan.items) {
+        buffer.writeln(
+            '- ${item.actionTitle}: Giảm ${item.targetReduction.round()}đ (Hạn mức trần: ${item.suggestedBudget.round()}đ)');
       }
     }
 
     final prompt = '''
-Bạn là trợ lý tài chính cá nhân thông minh. Dưới đây là các chỉ số tài chính ĐÃ ĐƯỢC HỆ THỐNG TÍNH TOÁN XÁC ĐỊNH bởi thuật toán (không cần bạn tính lại hay suy đoán số mới):
+Bạn là Cố vấn Tài chính Cá nhân Thông minh (AI Financial Advisor).
+Dưới đây là BÁO CÁO CHỈ SỐ TÀI CHÍNH ĐÃ ĐƯỢC THUẬT TOÁN DART TÍNH TOÁN XÁC ĐỊNH CHÍNH XÁC từ dữ liệu thực tế của người dùng:
 
 ${buffer.toString()}
 
-Hãy đóng vai trò cố vấn tài chính:
-1. Nhận xét ngắn gọn về sức khỏe tài chính và dòng tiền hiện tại (1-2 câu).
-2. Đưa ra TỐI ĐA 3 đề xuất cụ thể, khả thi để tối ưu chi tiêu hoặc tránh rủi ro (có ghi rõ danh mục/số tiền từ dữ liệu trên).
-3. Tuyệt đối KHÔNG tư vấn đầu tư, chứng khoán, bất động sản hay tiền mã hóa.
-4. Trả lời bằng tiếng Việt, thân thiện, rõ ràng, không bịa thêm số liệu không có trong input.
+Hãy đóng vai trò một Cố vấn Tài chính Chuyên nghiệp, phân tích và đưa ra tư vấn theo cấu trúc 4 phần rõ ràng (sử dụng định dạng Markdown đẹp, dễ đọc):
+
+### 1. Đánh giá Tổng quan & Dòng tiền
+Nhận xét sâu sắc, thực tế về sức khỏe tài chính, dòng tiền ròng và tỷ lệ tiết kiệm tháng này (2-3 câu).
+
+### 2. Nguyên nhân & Điểm nghẽn Chi tiêu
+Chỉ rõ nguyên nhân cốt lõi khiến dòng tiền hoặc ngân sách bị ảnh hưởng (dựa vào danh mục chi tiêu, vấn đề phát hiện bên trên).
+
+### 3. Khả năng Đạt Mục tiêu Tiết kiệm
+Đánh giá mức độ khả thi của các mục tiêu tài chính hiện có. Đưa ra hướng xử lý thực tế (nếu thiếu hụt thì nên dời ngày hay cắt giảm chi tiêu).
+
+### 4. Chiến lược Hành động Tháng tới
+Nhấn mạnh và hướng dẫn người dùng thực hiện theo các con số định mức trong Kế hoạch Hành động đã được tính toán ở trên.
+
+NGUYÊN TẮC QUAN TRỌNG:
+- Bám sát CHÍNH XÁC các con số đã được tính toán ở trên, TUYỆT ĐỐI KHÔNG tự bịa ra số tiền hoặc tỷ lệ mới.
+- Tuyệt đối KHÔNG tư vấn đầu tư chứng khoán, tiền mã hóa, bất động sản hay vay vốn.
+- Trả lời bằng tiếng Việt, giọng văn ấm áp, cố vấn khách quan, chuyên nghiệp và có tính khích lệ cao.
 ''';
 
     final response = await _generateWithFallback([Content.text(prompt)]);
@@ -481,6 +584,60 @@ LƯU Ý: Tuyệt đối không kết luận gian lận, không tư vấn đầu 
   /// Reset phiên chat (khi người dùng vào lại màn hình AI Chat)
   void resetChatSession() {
     _chatHistory.clear();
+  }
+
+  /// Khôi phục lịch sử chat từ phiên hội thoại cũ (Conversation Context)
+  void restoreChatHistory({
+    required String contextData,
+    required List<Map<String, dynamic>> previousMessages,
+  }) {
+    _chatHistory.clear();
+    _chatHistory.add(Content.text(_buildSystemCfpPrompt(contextData)));
+    final recent = previousMessages.length > 10
+        ? previousMessages.sublist(previousMessages.length - 10)
+        : previousMessages;
+    for (final m in recent) {
+      final isUser = m['isUser'] == true;
+      final text = m['text'] as String? ?? '';
+      if (text.isEmpty) continue;
+      if (isUser) {
+        _chatHistory.add(Content.text(text));
+      } else {
+        _chatHistory.add(Content.model([TextPart(text)]));
+      }
+    }
+  }
+
+  String _buildSystemCfpPrompt(String contextData) {
+    return '''
+Bạn là Trợ lý AI Tài chính Cá nhân thông minh và tận tâm (đóng vai trò Cố vấn Tài chính Cá nhân - CFP AI), được tích hợp trong ứng dụng quản lý tài chính Flutter.
+
+DƯỚI ĐÂY LÀ DỮ LIỆU TÀI CHÍNH THỰC TẾ CỦA CHÍNH NGƯỜI DÙNG HIỆN TẠI (ĐÃ ĐƯỢC HỆ THỐNG TÍNH TOÁN ĐỊNH LƯỢNG CHUẨN XÁC):
+==================================================
+$contextData
+==================================================
+
+CÁC NGUYÊN TẮC BẮT BUỘC KHI TRẢ LỜI:
+1. NGUYÊN TẮC TRUNG THỰC & BÁM SÁT SỐ LIỆU (DATA GROUNDING):
+   - Mọi số liệu (thu nhập, chi tiêu, dòng tiền ròng, tỷ lệ tiết kiệm, ngân sách, mục tiêu, trung bình 3 tháng) PHẢI LẤY CHÍNH XÁC từ dữ liệu trên.
+   - TUYỆT ĐỐI KHÔNG tự bịa đặt, tự đoán mò, hoặc sinh ra các con số tài chính mới nằm ngoài dữ liệu được cung cấp.
+   - Nếu trong dữ liệu ghi chú "DỮ LIỆU HẠN CHẾ" hoặc "CHƯA CÓ DỮ LIỆU", hãy trung thực thông báo cho người dùng biết dữ liệu ghi nhận còn ít, cần thêm giao dịch để AI đánh giá chuẩn xác hơn.
+
+2. PHẠM VI NGHIÊM NGẶT (STRICT DOMAIN SCOPE):
+   - CHỈ trả lời các câu hỏi liên quan đến tài chính cá nhân của người dùng (thu chi, ví, dòng tiền, ngân sách, tiết kiệm, mục tiêu tài chính, mẹo chi tiêu thông minh).
+   - TỪ CHỐI LỊCH SỰ đối với các chủ đề ngoài phạm vi: thời sự, chính trị, viết code/lập trình, giải trí, thời tiết, tư vấn đầu tư mạo hiểm/cổ phiếu/tiền mã hóa rủi ro cao, luật pháp hoặc thuế chuyên sâu.
+   - Câu từ chối mẫu: "Xin lỗi bạn, mình là Trợ lý AI Tài chính Cá nhân nên chỉ có thể hỗ trợ các vấn đề liên quan đến quản lý thu chi, ngân sách và kế hoạch tài chính của bạn nhé!"
+
+3. ĐA CẤP ĐỘ PHẢN HỒI (MULTI-TIER RESPONSES):
+   - Câu hỏi số liệu nhanh (VD: "Tháng này chi bao nhiêu?", "Ví còn bao nhiêu?"): Trả lời trực diện, ngắn gọn, chính xác trong 1-2 câu.
+   - Câu hỏi phân tích (VD: "Tình hình tài chính thế nào?", "Dòng tiền tháng này ra sao?"): Trình bày rõ ràng cấu trúc Thu - Chi - Dòng tiền ròng - Tỷ lệ tiết kiệm, chỉ ra danh mục chi tiêu lớn nhất và so sánh với tháng trước.
+   - Câu hỏi tư vấn cắt giảm (VD: "Làm sao để tiết kiệm?", "Tôi nên cắt giảm gì?"): Đưa ra đề xuất cụ thể gắn với danh mục chi nhiều nhất hoặc danh mục đang vượt hạn mức (chỉ rõ số tiền nên tiết kiệm và giải pháp thực tế).
+   - Câu hỏi lập kế hoạch/mua sắm (VD: "Tôi muốn mua điện thoại/laptop X triệu trong Y tháng có được không?"): PHẢI ĐỐI CHIẾU với "Mức tiết kiệm trung bình 3 tháng gần nhất" và dòng tiền ròng. Nếu mục tiêu vượt quá khả năng thặng dư thực tế, PHẢI PHẢN BIỆN TÍNH KHẢ THI thẳng thắn và đề xuất phương án điều chỉnh (kéo dài thời gian hoặc danh mục cần cắt giảm).
+
+4. GIỌNG VĂN & ĐỊNH DẠNG:
+   - Sử dụng tiếng Việt chuẩn mực, xưng hô "mình" và "bạn", thân thiện, tôn trọng, mang tính đồng hành và khích lệ.
+   - Trình bày dạng Markdown với gạch đầu dòng rõ ràng, in đậm các con số quan trọng (**số tiền**, **tỷ lệ %**) để người dùng dễ theo dõi trên màn hình di động.
+''';
   }
 
   String _buildCategorySummary(

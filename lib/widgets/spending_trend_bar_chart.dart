@@ -3,8 +3,8 @@ import '../utils/constants.dart';
 
 /// Biểu đồ cột đơn giản hiển thị xu hướng chi tiêu 3 tháng gần nhất
 class SpendingTrendBarChart extends StatelessWidget {
-  final List<double> amounts; // 3 tháng (cũ -> mới)
-  final List<String> monthLabels; // VD: ['Tháng 8', 'Tháng 9', 'Tháng 10']
+  final List<double> amounts;
+  final List<String> monthLabels;
 
   const SpendingTrendBarChart({
     super.key,
@@ -28,9 +28,14 @@ class SpendingTrendBarChart extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (amounts.isEmpty || monthLabels.isEmpty) {
-      return const SizedBox(
+      return SizedBox(
         height: 120,
-        child: Center(child: Text('Chưa có dữ liệu xu hướng')),
+        child: Center(
+          child: Text(
+            'Chưa có dữ liệu xu hướng',
+            style: TextStyle(color: context.appTextSecondary),
+          ),
+        ),
       );
     }
 
@@ -43,7 +48,7 @@ class SpendingTrendBarChart extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.end,
         children: List.generate(amounts.length, (i) {
           final isCurrent = i == amounts.length - 1;
-          final heightFactor = maxVal <= 0 ? 0.1 : (amounts[i] / maxVal).clamp(0.12, 1.0);
+          final heightFactor = maxVal <= 0 ? 0.12 : (amounts[i] / maxVal).clamp(0.12, 1.0);
 
           return Column(
             mainAxisSize: MainAxisSize.min,
@@ -52,17 +57,22 @@ class SpendingTrendBarChart extends StatelessWidget {
                 _compact(amounts[i]),
                 style: TextStyle(
                   fontSize: 12,
-                  fontWeight: isCurrent ? FontWeight.bold : FontWeight.w500,
-                  color: isCurrent ? AppColors.textPrimary : AppColors.textSecondary,
+                  fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w500,
+                  color: isCurrent ? context.appTextPrimary : context.appTextSecondary,
                 ),
               ),
               const SizedBox(height: 8),
               Container(
-                width: 48,
+                width: 44,
                 height: 90 * heightFactor,
                 decoration: BoxDecoration(
-                  color: isCurrent ? AppColors.accentGreen : Colors.grey.shade200,
-                  borderRadius: BorderRadius.circular(8),
+                  color: isCurrent
+                      ? AppColors.primaryLight
+                      : context.appInputFill,
+                  borderRadius: BorderRadius.circular(10),
+                  border: isCurrent
+                      ? null
+                      : Border.all(color: context.appBorder, width: 1),
                 ),
               ),
               const SizedBox(height: 8),
@@ -70,8 +80,8 @@ class SpendingTrendBarChart extends StatelessWidget {
                 monthLabels[i],
                 style: TextStyle(
                   fontSize: 12,
-                  fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
-                  color: isCurrent ? AppColors.textPrimary : AppColors.textSecondary,
+                  fontWeight: isCurrent ? FontWeight.w600 : FontWeight.w500,
+                  color: isCurrent ? context.appTextPrimary : context.appTextSecondary,
                 ),
               ),
             ],

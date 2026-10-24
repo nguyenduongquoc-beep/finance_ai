@@ -9,7 +9,6 @@ import '../../models/category_model.dart';
 import '../../services/firestore_service.dart';
 import '../../services/local_notification_service.dart';
 import '../../services/recurring_transaction_service.dart';
-import '../../services/theme_controller.dart';
 import '../../utils/constants.dart';
 import '../../utils/formatters.dart';
 import '../../widgets/app_snackbar.dart';
@@ -74,14 +73,20 @@ class _RecurringTransactionScreenState
       }
 
       // Cảnh báo nếu có khoản không tạo được vì ví không đủ số dư
-      if (failedMessages.isNotEmpty) {
+      if (failedMessages.isNotEmpty && showFeedback) {
         _showFailedDialog(failedMessages);
       }
     } catch (e) {
       if (!mounted) return;
       setState(() => _isProcessingDue = false);
-      AppSnackbar.show(context, 'Lỗi kiểm tra giao dịch đến hạn: $e',
-          isError: true);
+      debugPrint('[Recurring] Error checking due transactions: $e');
+      if (showFeedback) {
+        AppSnackbar.show(
+          context,
+          'Không thể kiểm tra giao dịch đến hạn lúc này. Vui lòng thử lại sau.',
+          isError: true,
+        );
+      }
     }
   }
 
@@ -112,7 +117,7 @@ class _RecurringTransactionScreenState
                     children: [
                       const Text('• ',
                           style: TextStyle(
-                              fontWeight: FontWeight.bold,
+                              fontWeight: FontWeight.w600,
                               color: AppColors.expense)),
                       Expanded(
                           child:
@@ -141,96 +146,261 @@ class _RecurringTransactionScreenState
   Widget build(BuildContext context) {
     final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
 
-    return ValueListenableBuilder<ThemeMode>(
-      valueListenable: ThemeController.mode,
-      builder: (context, _, __) {
-        return Scaffold(
-          backgroundColor: AppColors.background,
-          appBar: AppBar(
-            title: const Text('Giao dịch định kỳ & Hóa đơn'),
-            actions: [
-              IconButton(
-                icon: _isProcessingDue
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          color: AppColors.primary,
-                        ),
-                      )
-                    : const Icon(Icons.sync_rounded),
-                tooltip: 'Kiểm tra giao dịch đến hạn',
-                onPressed: _isProcessingDue
-                    ? null
-                    : () => _processDueTransactions(showFeedback: true),
-              ),
-            ],
+    return Scaffold(
+      backgroundColor: Theme.of(context).colorScheme.surface,
+      appBar: AppBar(
+        title: const Text('Giao dịch định kỳ & Hóa đơn'),
+        actions: [
+          IconButton(
+            icon: _isProcessingDue
+                ? const SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: AppColors.primary,
+                    ),
+                  )
+                : const Icon(Icons.sync_rounded),
+            tooltip: 'Kiểm tra giao dịch đến hạn',
+            onPressed: _isProcessingDue
+                ? null
+                : () => _processDueTransactions(showFeedback: true),
           ),
-          body: StreamBuilder<List<RecurringTransactionSchedule>>(
-            stream: _firestoreService.streamRecurringTransactions(uid),
-            builder: (context, scheduleSnap) {
-              if (scheduleSnap.connectionState == ConnectionState.waiting) {
-                return const Center(
-                    child: CircularProgressIndicator(color: AppColors.primary));
-              }
+        ],
+      ),
+      body: StreamBuilder<List<RecurringTransactionSchedule>>(
+        stream: _firestoreService.streamRecurringTransactions(uid),
+        builder: (context, scheduleSnap) {
+          if (scheduleSnap.connectionState == ConnectionState.waiting) {
+            return const Center(
+                child: CircularProgressIndicator(color: AppColors.primary));
+          }
 
-              final schedules = scheduleSnap.data ?? [];
+          final schedules = scheduleSnap.data ?? [];
 
-              return StreamBuilder<List<RecurringTransactionOccurrence>>(
-                stream: _firestoreService.streamRecurringOccurrences(uid),
-                builder: (context, occurrenceSnap) {
-                  final occurrences = occurrenceSnap.data ?? [];
+          return StreamBuilder<List<RecurringTransactionOccurrence>>(
+            stream: _firestoreService.streamRecurringOccurrences(uid),
+            builder: (context, occurrenceSnap) {
+              final occurrences = occurrenceSnap.data ?? [];
 
-                  return StreamBuilder<List<Wallet>>(
-                    stream: _firestoreService.streamWallets(uid),
-                    builder: (context, walletSnap) {
-                      final wallets = walletSnap.data ?? [];
+              return StreamBuilder<List<Wallet>>(
+                stream: _firestoreService.streamWallets(uid),
+                builder: (context, walletSnap) {
+                  final wallets = walletSnap.data ?? [];
 
-                      return StreamBuilder<List<Category>>(
-                        stream: _firestoreService.streamCategories(uid),
-                        builder: (context, categorySnap) {
-                          final categories = categorySnap.data ?? [];
+                  return StreamBuilder<List<Category>>(
+                    stream: _firestoreService.streamCategories(uid),
+                    builder: (context, categorySnap) {
+                      final categories = categorySnap.data ?? [];
 
-                          return ListView(
-                            padding: const EdgeInsets.all(16),
-                            children: [
-                              // Section 0: Cần xác nhận hôm nay (Ưu tiên)
-                              _buildNeedsConfirmationSection(
-                                  schedules, occurrences, wallets, categories),
+                      final now = DateTime.now();
+                      final dueCount = schedules.where((s) {
+                        if (!s.isActive) return false;
+                        if (s.nextDueDate.isAfter(now)) return false;
+                        final key =
+                            RecurringTransactionService.getOccurrenceKey(
+                                s.nextDueDate);
+                        return !occurrences.any(
+                          (o) =>
+                              o.scheduleId == s.scheduleId &&
+                              o.occurrenceKey == key,
+                        );
+                      }).length;
 
-                              // Section 1: Lịch hóa đơn sắp tới
-                              _buildUpcomingSection(
-                                  schedules, wallets, categories),
-                              const SizedBox(height: 20),
-
-                              // Section 2: Danh sách lịch định kỳ
-                              _buildScheduleListSection(
-                                  schedules, wallets, categories),
-                              const SizedBox(height: 80), // Padding cho FAB
-                            ],
-                          );
-                        },
+                      return ListView(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 100),
+                        children: [
+                          _buildRecurringHero(
+                            context: context,
+                            schedules: schedules,
+                            dueCount: dueCount,
+                          ),
+                          _buildNeedsConfirmationSection(
+                              schedules, occurrences, wallets, categories),
+                          _buildUpcomingSection(schedules, wallets, categories),
+                          const SizedBox(height: 20),
+                          _buildScheduleListSection(
+                              schedules, wallets, categories),
+                        ],
                       );
                     },
                   );
                 },
               );
             },
+          );
+        },
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () => _showFormDialog(),
+        icon: const Icon(Icons.add_rounded, color: Colors.white),
+        label:
+            const Text('Thêm lịch mới', style: TextStyle(color: Colors.white)),
+        backgroundColor: AppColors.primary,
+      ),
+    );
+  }
+
+  Widget _buildRecurringHero({
+    required BuildContext context,
+    required List<RecurringTransactionSchedule> schedules,
+    required int dueCount,
+  }) {
+    final active = schedules.where((s) => s.isActive).toList();
+    final expenseTotal = active
+        .where((s) => s.type == 'expense')
+        .fold<double>(0, (a, s) => a + s.amount);
+    final incomeTotal = active
+        .where((s) => s.type == 'income')
+        .fold<double>(0, (a, s) => a + s.amount);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(22),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF1F6F8B), Color(0xFF134A5D)],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primary.withValues(alpha: 0.25),
+            blurRadius: 14,
+            offset: const Offset(0, 6),
           ),
-          floatingActionButton: FloatingActionButton.extended(
-            onPressed: () => _showFormDialog(),
-            icon: const Icon(Icons.add_rounded),
-            label: const Text('Thêm lịch mới'),
-            backgroundColor: AppColors.primary,
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(7),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.18),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: const Icon(Icons.event_repeat_rounded,
+                        color: Colors.white, size: 18),
+                  ),
+                  const SizedBox(width: 10),
+                  Text(
+                    'Dự chi định kỳ / kỳ',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.white.withValues(alpha: 0.88),
+                    ),
+                  ),
+                ],
+              ),
+              if (dueCount > 0)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: AppColors.expense.withValues(alpha: 0.9),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.warning_amber_rounded,
+                          color: Colors.white, size: 13),
+                      const SizedBox(width: 4),
+                      Text(
+                        '$dueCount cần xử lý',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              else
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Text(
+                    '${active.length} lịch bật',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+            ],
           ),
-        );
-      },
+          const SizedBox(height: 12),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              AppFormatters.compactCurrency(expenseTotal, unit: '₫'),
+              style: const TextStyle(
+                fontSize: 30,
+                fontWeight: FontWeight.w800,
+                color: Colors.white,
+                letterSpacing: -0.6,
+              ),
+            ),
+          ),
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.arrow_downward_rounded,
+                        color: Color(0xFF56D69B), size: 14),
+                    const SizedBox(width: 4),
+                    Text(
+                      'Dự thu: ${AppFormatters.compactCurrency(incomeTotal, unit: '₫')}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white.withValues(alpha: 0.95),
+                      ),
+                    ),
+                  ],
+                ),
+                Text(
+                  'Tổng: ${schedules.length} lịch',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.white.withValues(alpha: 0.75),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 
   // ============================================================
-  // 0. NEEDS CONFIRMATION SECTION (KHU VỰC ƯU TIÊN)
+  // 0. NEEDS CONFIRMATION & OVERDUE SECTION (KHU VỰC ƯU TIÊN)
   // ============================================================
   Widget _buildNeedsConfirmationSection(
     List<RecurringTransactionSchedule> schedules,
@@ -240,11 +410,8 @@ class _RecurringTransactionScreenState
   ) {
     final now = DateTime.now();
 
-    final manualSchedules = schedules.where((s) {
+    final dueSchedules = schedules.where((s) {
       if (!s.isActive) return false;
-      if (s.postingMode != RecurringTransactionSchedule.postingModeManual) {
-        return false;
-      }
       if (s.nextDueDate.isAfter(now)) return false;
 
       final key = RecurringTransactionService.getOccurrenceKey(s.nextDueDate);
@@ -254,22 +421,16 @@ class _RecurringTransactionScreenState
       return !isProcessed;
     }).toList();
 
-    if (manualSchedules.isEmpty) return const SizedBox.shrink();
+    if (dueSchedules.isEmpty) return const SizedBox.shrink();
 
     return Container(
       margin: const EdgeInsets.only(bottom: 20),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: AppColors.primary.withOpacity(0.3), width: 1.5),
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.primary.withOpacity(0.08),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
+        color: context.appCard,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+            color: AppColors.primary.withValues(alpha: 0.3), width: 1.5),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -279,7 +440,7 @@ class _RecurringTransactionScreenState
               Container(
                 padding: const EdgeInsets.all(6),
                 decoration: BoxDecoration(
-                  color: AppColors.primary.withOpacity(0.15),
+                  color: AppColors.primary.withValues(alpha: 0.15),
                   shape: BoxShape.circle,
                 ),
                 child: const Icon(Icons.assignment_late_rounded,
@@ -288,25 +449,25 @@ class _RecurringTransactionScreenState
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  'Cần xác nhận hôm nay',
+                  'Cần xử lý',
                   style: TextStyle(
                     fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: AppColors.textPrimary,
+                    fontWeight: FontWeight.w600,
+                    color: context.appTextPrimary,
                   ),
                 ),
               ),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                 decoration: BoxDecoration(
-                  color: AppColors.primary.withOpacity(0.1),
+                  color: AppColors.primary.withValues(alpha: 0.1),
                   borderRadius: BorderRadius.circular(12),
                 ),
                 child: Text(
-                  '${manualSchedules.length} khoản',
+                  '${dueSchedules.length} khoản',
                   style: const TextStyle(
                     fontSize: 12,
-                    fontWeight: FontWeight.bold,
+                    fontWeight: FontWeight.w600,
                     color: AppColors.primary,
                   ),
                 ),
@@ -316,7 +477,7 @@ class _RecurringTransactionScreenState
           const SizedBox(height: 12),
           const Divider(height: 1),
           const SizedBox(height: 12),
-          ...manualSchedules.map((schedule) {
+          ...dueSchedules.map((schedule) {
             final isIncome = schedule.type == 'income';
             final color = isIncome ? AppColors.income : AppColors.expense;
             final wallet = wallets.firstWhere(
@@ -331,17 +492,23 @@ class _RecurringTransactionScreenState
               ),
             );
 
-            final displayName = schedule.note != null && schedule.note!.isNotEmpty
-                ? schedule.note!
-                : (isIncome ? 'Thu nhập định kỳ' : 'Hóa đơn định kỳ');
+            final isManual = schedule.postingMode ==
+                RecurringTransactionSchedule.postingModeManual;
+            final isOverdue = schedule.nextDueDate
+                .isBefore(DateTime(now.year, now.month, now.day));
+
+            final displayName =
+                schedule.note != null && schedule.note!.isNotEmpty
+                    ? schedule.note!
+                    : (isIncome ? 'Thu nhập định kỳ' : 'Hóa đơn định kỳ');
 
             return Container(
               margin: const EdgeInsets.only(bottom: 12),
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: color.withOpacity(0.05),
+                color: color.withValues(alpha: 0.05),
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: color.withOpacity(0.2)),
+                border: Border.all(color: color.withValues(alpha: 0.2)),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -351,7 +518,7 @@ class _RecurringTransactionScreenState
                       Container(
                         padding: const EdgeInsets.all(8),
                         decoration: BoxDecoration(
-                          color: color.withOpacity(0.12),
+                          color: color.withValues(alpha: 0.12),
                           shape: BoxShape.circle,
                         ),
                         child: Icon(
@@ -367,29 +534,90 @@ class _RecurringTransactionScreenState
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text(
-                              displayName,
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                                fontSize: 14,
-                              ),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    displayName,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      fontWeight: FontWeight.w600,
+                                      fontSize: 14,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 6),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 6, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: (isManual
+                                            ? Colors.orange
+                                            : AppColors.expense)
+                                        .withValues(alpha: 0.12),
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  child: Text(
+                                    isManual
+                                        ? 'Chờ duyệt'
+                                        : (isOverdue ? 'Quá hạn' : 'Chưa trừ'),
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      fontWeight: FontWeight.w600,
+                                      color: isManual
+                                          ? Colors.orange.shade800
+                                          : AppColors.expense,
+                                    ),
+                                  ),
+                                ),
+                              ],
                             ),
-                            Text(
-                              'Ví: ${wallet.walletName} • Đã đến hạn (${DateFormat('dd/MM/yyyy').format(schedule.nextDueDate)})',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: AppColors.textSecondary,
-                              ),
+                            const SizedBox(height: 2),
+                            Row(
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    'Ví: ${wallet.walletName}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: context.appTextSecondary,
+                                    ),
+                                  ),
+                                ),
+                                Text(
+                                  ' • ${isOverdue ? 'Quá hạn từ ' : 'Hạn: '}${DateFormat('dd/MM/yyyy').format(schedule.nextDueDate)}',
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: isOverdue
+                                        ? FontWeight.w600
+                                        : FontWeight.normal,
+                                    color: isOverdue
+                                        ? AppColors.expense
+                                        : context.appTextSecondary,
+                                  ),
+                                ),
+                              ],
                             ),
                           ],
                         ),
                       ),
-                      Text(
-                        '${isIncome ? '+' : '-'}${AppFormatters.number(schedule.amount)}đ',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 15,
-                          color: color,
+                      const SizedBox(width: 8),
+                      ConstrainedBox(
+                        constraints: const BoxConstraints(maxWidth: 120),
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          alignment: Alignment.centerRight,
+                          child: Text(
+                            '${isIncome ? '+' : '-'}${AppFormatters.compactCurrency(schedule.amount, unit: 'đ')}',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 15,
+                              color: color,
+                            ),
+                          ),
                         ),
                       ),
                     ],
@@ -403,10 +631,11 @@ class _RecurringTransactionScreenState
                     children: [
                       FilledButton.icon(
                         key: ValueKey('btn_confirm_${schedule.scheduleId}'),
-                        onPressed: _actionInProgressIds.contains(schedule.scheduleId)
-                            ? null
-                            : () => _showConfirmOccurrenceDialog(
-                                schedule, schedule.nextDueDate, wallet.walletName),
+                        onPressed:
+                            _actionInProgressIds.contains(schedule.scheduleId)
+                                ? null
+                                : () => _showConfirmOccurrenceDialog(schedule,
+                                    schedule.nextDueDate, wallet.walletName),
                         style: FilledButton.styleFrom(
                           backgroundColor: color,
                           padding: const EdgeInsets.symmetric(
@@ -415,7 +644,8 @@ class _RecurringTransactionScreenState
                         ),
                         icon: _actionInProgressIds.contains(schedule.scheduleId)
                             ? const SizedBox(
-                                width: 14, height: 14,
+                                width: 14,
+                                height: 14,
                                 child: CircularProgressIndicator(
                                     strokeWidth: 2, color: Colors.white))
                             : const Icon(Icons.check_circle_outline, size: 16),
@@ -426,10 +656,11 @@ class _RecurringTransactionScreenState
                       ),
                       OutlinedButton.icon(
                         key: ValueKey('btn_skip_${schedule.scheduleId}'),
-                        onPressed: _actionInProgressIds.contains(schedule.scheduleId)
-                            ? null
-                            : () => _showSkipOccurrenceDialog(
-                                schedule, schedule.nextDueDate),
+                        onPressed:
+                            _actionInProgressIds.contains(schedule.scheduleId)
+                                ? null
+                                : () => _showSkipOccurrenceDialog(
+                                    schedule, schedule.nextDueDate),
                         style: OutlinedButton.styleFrom(
                           padding: const EdgeInsets.symmetric(
                               horizontal: 10, vertical: 8),
@@ -441,10 +672,11 @@ class _RecurringTransactionScreenState
                       ),
                       TextButton.icon(
                         key: ValueKey('btn_defer_${schedule.scheduleId}'),
-                        onPressed: _actionInProgressIds.contains(schedule.scheduleId)
-                            ? null
-                            : () => _handleDeferOccurrence(
-                                schedule, schedule.nextDueDate),
+                        onPressed:
+                            _actionInProgressIds.contains(schedule.scheduleId)
+                                ? null
+                                : () => _handleDeferOccurrence(
+                                    schedule, schedule.nextDueDate),
                         style: TextButton.styleFrom(
                           padding: const EdgeInsets.symmetric(
                               horizontal: 8, vertical: 8),
@@ -493,29 +725,34 @@ class _RecurringTransactionScreenState
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Bạn có chắc muốn hạch toán khoản tiền thật này vào tài khoản?'),
+            const Text(
+                'Bạn có chắc muốn hạch toán khoản tiền thật này vào tài khoản?'),
             const SizedBox(height: 12),
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: AppColors.background,
+                color: context.appBackground,
                 borderRadius: BorderRadius.circular(8),
               ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text('Tên khoản: $displayName',
-                      style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w600, fontSize: 13)),
                   const SizedBox(height: 4),
                   Text('Số tiền: ${AppFormatters.number(schedule.amount)} VNĐ',
                       style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: isIncome ? AppColors.income : AppColors.expense,
+                          fontWeight: FontWeight.w600,
+                          color:
+                              isIncome ? AppColors.income : AppColors.expense,
                           fontSize: 14)),
                   const SizedBox(height: 4),
-                  Text('Ví hạch toán: $walletName', style: const TextStyle(fontSize: 12)),
+                  Text('Ví hạch toán: $walletName',
+                      style: const TextStyle(fontSize: 12)),
                   const SizedBox(height: 4),
-                  Text('Ngày hạch toán: ${DateFormat('dd/MM/yyyy').format(occurrenceDate)}',
+                  Text(
+                      'Ngày hạch toán: ${DateFormat('dd/MM/yyyy').format(occurrenceDate)}',
                       style: const TextStyle(fontSize: 12)),
                 ],
               ),
@@ -548,12 +785,14 @@ class _RecurringTransactionScreenState
                 }
               } finally {
                 if (mounted) {
-                  setState(() => _actionInProgressIds.remove(schedule.scheduleId));
+                  setState(
+                      () => _actionInProgressIds.remove(schedule.scheduleId));
                 }
               }
             },
             style: FilledButton.styleFrom(
-                backgroundColor: isIncome ? AppColors.income : AppColors.expense),
+                backgroundColor:
+                    isIncome ? AppColors.income : AppColors.expense),
             child: const Text('Xác nhận'),
           ),
         ],
@@ -598,7 +837,8 @@ class _RecurringTransactionScreenState
                 }
               } finally {
                 if (mounted) {
-                  setState(() => _actionInProgressIds.remove(schedule.scheduleId));
+                  setState(
+                      () => _actionInProgressIds.remove(schedule.scheduleId));
                 }
               }
             },
@@ -644,7 +884,7 @@ class _RecurringTransactionScreenState
               'Lưu ý: Các kỳ sau sẽ được tính tiếp từ ngày đã dời.',
               style: TextStyle(
                   fontSize: 12,
-                  fontWeight: FontWeight.bold,
+                  fontWeight: FontWeight.w600,
                   color: AppColors.primary),
             ),
           ],
@@ -675,7 +915,8 @@ class _RecurringTransactionScreenState
                 }
               } finally {
                 if (mounted) {
-                  setState(() => _actionInProgressIds.remove(schedule.scheduleId));
+                  setState(
+                      () => _actionInProgressIds.remove(schedule.scheduleId));
                 }
               }
             },
@@ -705,64 +946,102 @@ class _RecurringTransactionScreenState
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: AppColors.card,
-        borderRadius: BorderRadius.circular(16),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.05),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
+        color: context.appCard,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(
+          color: context.appBorder.withValues(alpha: 0.08),
+        ),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          // Header Row
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              const Row(
-                children: [
-                  Icon(Icons.calendar_month_rounded,
-                      color: AppColors.primary, size: 20),
-                  SizedBox(width: 8),
-                  Text(
-                    'Sắp đến hạn',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              Container(
+                padding: const EdgeInsets.all(7),
+                decoration: BoxDecoration(
+                  color: AppColors.primary.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Icon(Icons.calendar_month_rounded,
+                    color: AppColors.primary, size: 18),
+              ),
+              const SizedBox(width: 10),
+              Text(
+                'Sắp đến hạn',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: context.appTextPrimary,
+                ),
+              ),
+              const Spacer(),
+              if (upcomingList.isNotEmpty)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: AppColors.primary.withValues(alpha: 0.1),
+                    borderRadius: BorderRadius.circular(10),
                   ),
-                ],
-              ),
-              Row(
-                children: [7, 14, 30].map((days) {
-                  final isSelected = _selectedUpcomingDays == days;
-                  return Padding(
-                    padding: const EdgeInsets.only(left: 4),
-                    child: ChoiceChip(
-                      label: Text('$days ngày',
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: isSelected
-                                ? FontWeight.bold
-                                : FontWeight.normal,
-                            color: isSelected
-                                ? Colors.white
-                                : AppColors.textSecondary,
-                          )),
-                      selected: isSelected,
-                      selectedColor: AppColors.primary,
-                      backgroundColor: AppColors.background,
-                      padding: const EdgeInsets.symmetric(horizontal: 4),
-                      visualDensity: VisualDensity.compact,
-                      onSelected: (val) {
-                        if (val) {
-                          setState(() => _selectedUpcomingDays = days);
-                        }
-                      },
+                  child: Text(
+                    '${upcomingList.length} khoản',
+                    style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: AppColors.primary,
                     ),
-                  );
-                }).toList(),
-              ),
+                  ),
+                ),
             ],
+          ),
+          const SizedBox(height: 12),
+          // Clean Segmented Tabs (7 ngày | 14 ngày | 30 ngày) Full Width
+          Container(
+            padding: const EdgeInsets.all(3),
+            decoration: BoxDecoration(
+              color: context.appBackground,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(
+                color: context.appBorder.withValues(alpha: 0.08),
+              ),
+            ),
+            child: Row(
+              children: [7, 14, 30].map((days) {
+                final isSelected = _selectedUpcomingDays == days;
+                return Expanded(
+                  child: GestureDetector(
+                    onTap: () {
+                      if (!isSelected) {
+                        setState(() => _selectedUpcomingDays = days);
+                      }
+                    },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      decoration: BoxDecoration(
+                        color:
+                            isSelected ? AppColors.primary : Colors.transparent,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      alignment: Alignment.center,
+                      child: Text(
+                        '$days ngày',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight:
+                              isSelected ? FontWeight.w600 : FontWeight.w500,
+                          color: isSelected
+                              ? Colors.white
+                              : context.appTextSecondary,
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
           ),
           const SizedBox(height: 12),
           const Divider(height: 1),
@@ -774,7 +1053,7 @@ class _RecurringTransactionScreenState
                 child: Text(
                   'Không có khoản thu/chi nào sắp đến hạn trong $_selectedUpcomingDays ngày tới.',
                   style:
-                      TextStyle(fontSize: 13, color: AppColors.textSecondary),
+                      TextStyle(fontSize: 13, color: context.appTextSecondary),
                 ),
               ),
             )
@@ -794,20 +1073,32 @@ class _RecurringTransactionScreenState
                 ),
               );
 
+              final daysUntil = item.dueDate
+                  .difference(DateTime(now.year, now.month, now.day))
+                  .inDays;
+              final String dueBadgeText;
+              if (daysUntil <= 0) {
+                dueBadgeText = 'Hôm nay';
+              } else if (daysUntil == 1) {
+                dueBadgeText = 'Ngày mai';
+              } else {
+                dueBadgeText = 'Còn $daysUntil ngày';
+              }
+
               return Container(
                 margin: const EdgeInsets.only(bottom: 8),
-                padding: const EdgeInsets.all(10),
+                padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
-                  color: color.withOpacity(0.05),
+                  color: color.withValues(alpha: 0.04),
                   borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: color.withOpacity(0.15)),
+                  border: Border.all(color: color.withValues(alpha: 0.12)),
                 ),
                 child: Row(
                   children: [
                     Container(
                       padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
-                        color: color.withOpacity(0.12),
+                        color: color.withValues(alpha: 0.12),
                         shape: BoxShape.circle,
                       ),
                       child: Icon(
@@ -830,28 +1121,82 @@ class _RecurringTransactionScreenState
                                 : (isIncome
                                     ? 'Thu nhập định kỳ'
                                     : 'Hóa đơn định kỳ'),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                              fontWeight: FontWeight.bold,
+                              fontWeight: FontWeight.w600,
                               fontSize: 13,
-                              color: AppColors.textPrimary,
+                              color: context.appTextPrimary,
                             ),
                           ),
-                          const SizedBox(height: 2),
-                          Text(
-                            'Ví: ${wallet.walletName} • Hạn: ${DateFormat('dd/MM/yyyy').format(item.dueDate)}',
-                            style: TextStyle(
-                                fontSize: 11, color: AppColors.textSecondary),
+                          const SizedBox(height: 3),
+                          Row(
+                            children: [
+                              Flexible(
+                                child: Text(
+                                  'Ví: ${wallet.walletName}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: context.appTextSecondary,
+                                  ),
+                                ),
+                              ),
+                              Text(
+                                ' • Hạn ${DateFormat('dd/MM/yyyy').format(item.dueDate)}',
+                                style: TextStyle(
+                                  fontSize: 11,
+                                  color: context.appTextSecondary,
+                                ),
+                              ),
+                            ],
                           ),
                         ],
                       ),
                     ),
-                    Text(
-                      '${isIncome ? '+' : '-'}${AppFormatters.number(item.schedule.amount)}đ',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
-                        color: color,
-                      ),
+                    const SizedBox(width: 8),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 120),
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerRight,
+                            child: Text(
+                              '${isIncome ? '+' : '-'}${AppFormatters.compactCurrency(item.schedule.amount, unit: 'đ')}',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 14,
+                                color: color,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 3),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 1.5),
+                          decoration: BoxDecoration(
+                            color: (daysUntil <= 1
+                                    ? AppColors.expense
+                                    : AppColors.primary)
+                                .withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            dueBadgeText,
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w600,
+                              color: daysUntil <= 1
+                                  ? AppColors.expense
+                                  : AppColors.primary,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -878,32 +1223,49 @@ class _RecurringTransactionScreenState
           children: [
             const Text(
               'Danh sách lịch lặp lại',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
             ),
-            Text(
-              '${schedules.length} lịch',
-              style: TextStyle(fontSize: 12, color: AppColors.textSecondary),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+              decoration: BoxDecoration(
+                color: context.appBorder.withValues(alpha: 0.08),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Text(
+                '${schedules.length} lịch',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: context.appTextSecondary,
+                ),
+              ),
             ),
           ],
         ),
         const SizedBox(height: 12),
         if (schedules.isEmpty)
           Container(
-            padding: const EdgeInsets.all(24),
+            padding: const EdgeInsets.all(28),
             decoration: BoxDecoration(
-              color: AppColors.card,
-              borderRadius: BorderRadius.circular(16),
+              color: context.appCard,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(
+                color: context.appBorder.withValues(alpha: 0.08),
+              ),
             ),
             child: Center(
               child: Column(
                 children: [
                   Icon(Icons.event_repeat_rounded,
                       size: 40,
-                      color: AppColors.textSecondary.withOpacity(0.5)),
-                  const SizedBox(height: 8),
+                      color: context.appTextSecondary.withValues(alpha: 0.4)),
+                  const SizedBox(height: 10),
                   Text(
                     'Chưa có lịch giao dịch định kỳ nào',
-                    style: TextStyle(color: AppColors.textSecondary),
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: context.appTextSecondary,
+                    ),
                   ),
                 ],
               ),
@@ -927,163 +1289,273 @@ class _RecurringTransactionScreenState
 
             final isManual = schedule.postingMode ==
                 RecurringTransactionSchedule.postingModeManual;
+            final isOverdue = schedule.isActive &&
+                !schedule.nextDueDate.isAfter(DateTime.now());
 
-            return Card(
-              color: AppColors.card,
-              margin: const EdgeInsets.only(bottom: 10),
-              shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12)),
-              child: ListTile(
-                contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-                leading: CircleAvatar(
-                  backgroundColor: color.withOpacity(0.12),
-                  child: Icon(
-                    isIncome
-                        ? Icons.account_balance_wallet_outlined
-                        : Icons.receipt_long_outlined,
-                    color: color,
-                    size: 20,
-                  ),
+            return Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              decoration: BoxDecoration(
+                color: context.appCard,
+                borderRadius: BorderRadius.circular(14),
+                border: Border.all(
+                  color: isOverdue
+                      ? Colors.orange.withValues(alpha: 0.3)
+                      : context.appBorder.withValues(alpha: 0.08),
+                  width: isOverdue ? 1.5 : 1.0,
                 ),
-                title: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        schedule.note != null && schedule.note!.isNotEmpty
-                            ? schedule.note!
-                            : (isIncome
-                                ? 'Thu nhập lặp lại'
-                                : 'Chi phí lặp lại'),
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          fontSize: 14,
-                          decoration: schedule.isActive
-                              ? null
-                              : TextDecoration.lineThrough,
-                          color: schedule.isActive
-                              ? AppColors.textPrimary
-                              : AppColors.textSecondary,
+              ),
+              child: Column(
+                children: [
+                  // Header Row
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 12, 10, 8),
+                    child: Row(
+                      children: [
+                        CircleAvatar(
+                          radius: 18,
+                          backgroundColor: color.withValues(alpha: 0.12),
+                          child: Icon(
+                            isIncome
+                                ? Icons.account_balance_wallet_outlined
+                                : Icons.receipt_long_outlined,
+                            color: color,
+                            size: 18,
+                          ),
                         ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                schedule.note != null &&
+                                        schedule.note!.isNotEmpty
+                                    ? schedule.note!
+                                    : (isIncome
+                                        ? 'Thu nhập lặp lại'
+                                        : 'Chi phí lặp lại'),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontWeight: FontWeight.w600,
+                                  fontSize: 14,
+                                  decoration: schedule.isActive
+                                      ? null
+                                      : TextDecoration.lineThrough,
+                                  color: schedule.isActive
+                                      ? context.appTextPrimary
+                                      : context.appTextSecondary,
+                                ),
+                              ),
+                              const SizedBox(height: 2),
+                              Row(
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 6, vertical: 1.5),
+                                    decoration: BoxDecoration(
+                                      color: (isManual
+                                              ? Colors.orange
+                                              : AppColors.primary)
+                                          .withValues(alpha: 0.12),
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                    child: Text(
+                                      isManual ? 'Cần duyệt' : 'Tự động',
+                                      style: TextStyle(
+                                        fontSize: 10,
+                                        fontWeight: FontWeight.w600,
+                                        color: isManual
+                                            ? Colors.orange.shade800
+                                            : AppColors.primary,
+                                      ),
+                                    ),
+                                  ),
+                                  const SizedBox(width: 6),
+                                  Flexible(
+                                    child: Text(
+                                      wallet.walletName,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                        fontSize: 11,
+                                        color: context.appTextSecondary,
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 120),
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerRight,
+                            child: Text(
+                              '${isIncome ? '+' : '-'}${AppFormatters.compactCurrency(schedule.amount, unit: 'đ')}',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 15,
+                                color: schedule.isActive ? color : Colors.grey,
+                              ),
+                            ),
+                          ),
+                        ),
+                        PopupMenuButton<String>(
+                          icon: const Icon(Icons.more_vert, size: 20),
+                          padding: EdgeInsets.zero,
+                          constraints: const BoxConstraints(),
+                          onSelected: (val) {
+                            if (val == 'edit') {
+                              _showFormDialog(schedule: schedule);
+                            } else if (val == 'delete') {
+                              _confirmDelete(schedule);
+                            }
+                          },
+                          itemBuilder: (context) => [
+                            const PopupMenuItem(
+                              value: 'edit',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.edit_outlined, size: 18),
+                                  SizedBox(width: 8),
+                                  Text('Chỉnh sửa'),
+                                ],
+                              ),
+                            ),
+                            const PopupMenuItem(
+                              value: 'delete',
+                              child: Row(
+                                children: [
+                                  Icon(Icons.delete_outline,
+                                      size: 18, color: AppColors.expense),
+                                  SizedBox(width: 8),
+                                  Text('Xóa lịch',
+                                      style:
+                                          TextStyle(color: AppColors.expense)),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  // Middle Details Row (Frequency, Next Due Date)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 8),
+                      decoration: BoxDecoration(
+                        color: context.appBackground.withValues(alpha: 0.5),
+                        borderRadius: BorderRadius.circular(8),
                       ),
-                    ),
-                    Text(
-                      '${isIncome ? '+' : '-'}${AppFormatters.number(schedule.amount)}đ',
-                      style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 14,
-                        color: schedule.isActive ? color : Colors.grey,
-                      ),
-                    ),
-                  ],
-                ),
-                subtitle: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const SizedBox(height: 4),
-                    Text(
-                      'Ví: ${wallet.walletName} • Tần suất: ${schedule.frequency == 'weekly' ? 'Hàng tuần' : 'Hàng tháng'}',
-                      style: TextStyle(
-                          fontSize: 12, color: AppColors.textSecondary),
-                    ),
-                    Text(
-                      'Ghi nhận: ${isManual ? 'Cần xác nhận' : 'Tự động'}',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: isManual
-                            ? Colors.orange.shade800
-                            : AppColors.primary,
-                      ),
-                    ),
-                    Text(
-                      'Hạn tiếp theo: ${DateFormat('dd/MM/yyyy').format(schedule.nextDueDate)}',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: schedule.isActive
-                            ? AppColors.primary
-                            : AppColors.textSecondary,
-                      ),
-                    ),
-                    if (schedule.reminderDaysBefore > 0)
-                      Row(
+                      child: Row(
                         children: [
-                          Icon(Icons.notifications_active_outlined,
-                              size: 12, color: AppColors.textSecondary),
+                          Icon(Icons.repeat_rounded,
+                              size: 14, color: context.appTextSecondary),
                           const SizedBox(width: 4),
                           Text(
-                            'Nhắc trước ${schedule.reminderDaysBefore} ngày',
+                            schedule.frequency == 'weekly'
+                                ? 'Hàng tuần'
+                                : 'Hàng tháng',
                             style: TextStyle(
-                                fontSize: 11, color: AppColors.textSecondary),
+                              fontSize: 11,
+                              color: context.appTextSecondary,
+                            ),
+                          ),
+                          const Spacer(),
+                          Icon(
+                            isOverdue
+                                ? Icons.warning_amber_rounded
+                                : Icons.event_rounded,
+                            size: 14,
+                            color: isOverdue
+                                ? Colors.orange.shade800
+                                : context.appTextSecondary,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            'Kỳ tới: ${DateFormat('dd/MM/yyyy').format(schedule.nextDueDate)}',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: isOverdue
+                                  ? FontWeight.w600
+                                  : FontWeight.normal,
+                              color: isOverdue
+                                  ? Colors.orange.shade800
+                                  : (schedule.isActive
+                                      ? context.appTextPrimary
+                                      : context.appTextSecondary),
+                            ),
                           ),
                         ],
                       ),
-                  ],
-                ),
-                trailing: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Switch(
-                      value: schedule.isActive,
-                      activeColor: AppColors.primary,
-                      onChanged: (val) async {
-                        await _firestoreService.setRecurringTransactionActive(
-                            schedule.scheduleId, val);
-                        if (val) {
-                          final w = wallets.firstWhere(
-                            (w) => w.walletId == schedule.walletId,
-                            orElse: () => Wallet(
-                              walletId: '', userId: '', walletName: 'Ví',
-                              balance: 0, type: 'cash', createdAt: DateTime.now(),
-                            ),
-                          );
-                          await _notificationService.scheduleRemindersForSchedule(
-                            schedule: schedule.copyWith(isActive: true),
-                            walletName: w.walletName,
-                          );
-                        } else {
-                          await _notificationService.cancelRemindersForSchedule(
-                              schedule.scheduleId);
-                        }
-                      },
                     ),
-                    PopupMenuButton<String>(
-                      icon: const Icon(Icons.more_vert, size: 20),
-                      onSelected: (val) {
-                        if (val == 'edit') {
-                          _showFormDialog(schedule: schedule);
-                        } else if (val == 'delete') {
-                          _confirmDelete(schedule);
-                        }
-                      },
-                      itemBuilder: (context) => [
-                        const PopupMenuItem(
-                          value: 'edit',
-                          child: Row(
-                            children: [
-                              Icon(Icons.edit_outlined, size: 18),
-                              SizedBox(width: 8),
-                              Text('Chỉnh sửa'),
-                            ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Divider(height: 1),
+                  // Footer Row (Active switch)
+                  Padding(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          schedule.isActive
+                              ? 'Đang kích hoạt'
+                              : 'Đang tạm dừng',
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w500,
+                            color: schedule.isActive
+                                ? AppColors.income
+                                : context.appTextSecondary,
                           ),
                         ),
-                        const PopupMenuItem(
-                          value: 'delete',
-                          child: Row(
-                            children: [
-                              Icon(Icons.delete_outline,
-                                  size: 18, color: AppColors.expense),
-                              SizedBox(width: 8),
-                              Text('Xóa lịch',
-                                  style: TextStyle(color: AppColors.expense)),
-                            ],
+                        Transform.scale(
+                          scale: 0.85,
+                          child: Switch(
+                            value: schedule.isActive,
+                            activeThumbColor: AppColors.primary,
+                            onChanged: (val) async {
+                              await _firestoreService
+                                  .setRecurringTransactionActive(
+                                      schedule.scheduleId, val);
+                              if (val) {
+                                final w = wallets.firstWhere(
+                                  (w) => w.walletId == schedule.walletId,
+                                  orElse: () => Wallet(
+                                    walletId: '',
+                                    userId: '',
+                                    walletName: 'Ví',
+                                    balance: 0,
+                                    type: 'cash',
+                                    createdAt: DateTime.now(),
+                                  ),
+                                );
+                                await _notificationService
+                                    .scheduleRemindersForSchedule(
+                                  schedule: schedule.copyWith(isActive: true),
+                                  walletName: w.walletName,
+                                );
+                              } else {
+                                await _notificationService
+                                    .cancelRemindersForSchedule(
+                                        schedule.scheduleId);
+                              }
+                            },
                           ),
                         ),
                       ],
                     ),
-                  ],
-                ),
+                  ),
+                ],
               ),
             );
           }),
@@ -1107,8 +1579,8 @@ class _RecurringTransactionScreenState
           FilledButton(
             onPressed: () async {
               Navigator.of(context).pop();
-              await _notificationService.cancelRemindersForSchedule(
-                  schedule.scheduleId);
+              await _notificationService
+                  .cancelRemindersForSchedule(schedule.scheduleId);
               await _firestoreService
                   .deleteRecurringTransaction(schedule.scheduleId);
               if (mounted) {
@@ -1130,7 +1602,7 @@ class _RecurringTransactionScreenState
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: AppColors.card,
+      backgroundColor: context.appCard,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
@@ -1345,7 +1817,7 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
                         ? 'Thêm lịch định kỳ mới'
                         : 'Chỉnh sửa lịch định kỳ',
                     style: const TextStyle(
-                        fontSize: 18, fontWeight: FontWeight.bold),
+                        fontSize: 18, fontWeight: FontWeight.w600),
                   ),
                   IconButton(
                     icon: const Icon(Icons.close),
@@ -1410,7 +1882,7 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
                   }
 
                   return DropdownButtonFormField<String>(
-                    value: _selectedWalletId,
+                    initialValue: _selectedWalletId,
                     decoration: const InputDecoration(
                       labelText: 'Ví thực hiện *',
                       prefixIcon: Icon(Icons.account_balance_wallet_outlined),
@@ -1441,7 +1913,7 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
                     }
 
                     return DropdownButtonFormField<String>(
-                      value: _selectedCategoryId,
+                      initialValue: _selectedCategoryId,
                       decoration: const InputDecoration(
                         labelText: 'Danh mục chi tiêu *',
                         prefixIcon: Icon(Icons.category_outlined),
@@ -1474,7 +1946,7 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
 
               // Dropdown Tần suất
               DropdownButtonFormField<String>(
-                value: _frequency,
+                initialValue: _frequency,
                 decoration: const InputDecoration(
                   labelText: 'Tần suất lặp *',
                   prefixIcon: Icon(Icons.repeat_rounded),
@@ -1495,12 +1967,12 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
               // Selection: Cách ghi nhận giao dịch
               const Text(
                 'Cách ghi nhận giao dịch',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 13),
               ),
               const SizedBox(height: 6),
               Container(
                 decoration: BoxDecoration(
-                  border: Border.all(color: Colors.grey.withOpacity(0.4)),
+                  border: Border.all(color: Colors.grey.withValues(alpha: 0.4)),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Column(
@@ -1567,7 +2039,7 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
 
               // Dropdown Nhắc nhở trước hạn
               DropdownButtonFormField<int>(
-                value: _reminderDaysBefore,
+                initialValue: _reminderDaysBefore,
                 decoration: const InputDecoration(
                   labelText: 'Nhắc nhở trước hạn',
                   prefixIcon: Icon(Icons.notifications_active_outlined),

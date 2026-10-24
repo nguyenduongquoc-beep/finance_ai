@@ -29,5 +29,13 @@ void main() {
       expect(AppFormatters.parseCurrencyInput('  1.200.000 '), equals(1200000.0));
       expect(AppFormatters.parseCurrencyInput('abc'), equals(0.0));
     });
+
+    test('compactCurrency formatting for large amounts', () {
+      expect(AppFormatters.compactCurrency(500000), equals('500.000 ₫'));
+      expect(AppFormatters.compactCurrency(1500000000), equals('1,5 tỷ ₫'));
+      expect(AppFormatters.compactCurrency(1000000000000), equals('1.000 tỷ ₫'));
+      expect(AppFormatters.compactCurrency(-1000000000000), equals('-1.000 tỷ ₫'));
+      expect(AppFormatters.compactCurrency(2500000000000), equals('2.500 tỷ ₫'));
+    });
   });
 }

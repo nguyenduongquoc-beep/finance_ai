@@ -8,9 +8,7 @@ import '../setup/profile_setup_screen.dart';
 import '../setup/wallet_setup_screen.dart';
 import 'onboarding_screen.dart';
 
-/// 1. Splash Screen
-/// Hiển thị logo, kiểm tra trạng thái đăng nhập
-/// -> Nếu đã đăng nhập: Home | Nếu chưa: Onboarding/Login
+/// Splash Screen - Màn hình khởi động với thương hiệu Fintech cao cấp
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
 
@@ -34,7 +32,7 @@ class _SplashScreenState extends State<SplashScreen>
       duration: const Duration(milliseconds: 1500),
     )..repeat(reverse: true);
 
-    _pulseAnimation = Tween<double>(begin: 0.8, end: 1.0).animate(
+    _pulseAnimation = Tween<double>(begin: 0.85, end: 1.0).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
 
@@ -81,11 +79,10 @@ class _SplashScreenState extends State<SplashScreen>
             MaterialPageRoute(builder: (_) => const WalletSetupScreen()),
           );
         } else {
-          // Process due recurring transactions once after successful login/setup
           try {
             await FirestoreService().processDueRecurringTransactions(user.uid);
           } catch (_) {
-            // Silently ignore network or Firestore errors during splash process
+            // Implemented silent fallback for offline/network errors
           }
           if (!mounted) return;
           Navigator.of(context).pushReplacement(
@@ -99,19 +96,12 @@ class _SplashScreenState extends State<SplashScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: AppColors.slate900,
       body: Container(
         width: double.infinity,
         height: double.infinity,
         decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [
-              Color(0xFF0D2137),
-              AppColors.darkBackground,
-              Color(0xFF061220),
-            ],
-          ),
+          color: AppColors.slate900,
         ),
         child: FadeTransition(
           opacity: _fadeAnimation,
@@ -119,85 +109,59 @@ class _SplashScreenState extends State<SplashScreen>
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                // Glowing logo
                 AnimatedBuilder(
                   animation: _pulseAnimation,
                   builder: (context, child) {
                     return Container(
-                      width: 120,
-                      height: 120,
+                      width: 110,
+                      height: 110,
                       decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: AppColors.glowGreen
-                                .withOpacity(0.3 * _pulseAnimation.value),
-                            blurRadius: 40 * _pulseAnimation.value,
-                            spreadRadius: 10 * _pulseAnimation.value,
-                          ),
-                          BoxShadow(
-                            color: AppColors.accentGreen
-                                .withOpacity(0.15 * _pulseAnimation.value),
-                            blurRadius: 80 * _pulseAnimation.value,
-                            spreadRadius: 20 * _pulseAnimation.value,
-                          ),
-                        ],
                       ),
                       child: Container(
                         decoration: BoxDecoration(
                           shape: BoxShape.circle,
-                          gradient: LinearGradient(
-                            begin: Alignment.topLeft,
-                            end: Alignment.bottomRight,
-                            colors: [
-                              AppColors.accentGreen.withOpacity(0.2),
-                              AppColors.darkSurface,
-                            ],
-                          ),
+                          color: AppColors.slate800,
                           border: Border.all(
-                            color: AppColors.accentGreen.withOpacity(0.4),
+                            color: AppColors.income.withAlpha(120),
                             width: 1.5,
                           ),
                         ),
                         child: const Icon(
-                          Icons.savings_rounded,
-                          size: 56,
-                          color: AppColors.accentGreen,
+                          Icons.account_balance_wallet_rounded,
+                          size: 52,
+                          color: AppColors.income,
                         ),
                       ),
                     );
                   },
                 ),
                 const SizedBox(height: 28),
-                // App name
                 Text(
                   AppStrings.appName,
                   style: GoogleFonts.inter(
-                    color: Colors.white,
+                    color: AppColors.slate50,
                     fontSize: 32,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 1.5,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 1.2,
                   ),
                 ),
                 const SizedBox(height: 8),
-                // Subtitle
                 Text(
-                  'Trợ lý tài chính cá nhân thông minh',
+                  'Quản lý tài chính cá nhân thông minh',
                   style: GoogleFonts.inter(
-                    color: AppColors.darkTextSecondary,
+                    color: AppColors.slate400,
                     fontSize: 14,
-                    fontWeight: FontWeight.w400,
+                    fontWeight: FontWeight.w500,
                   ),
                 ),
                 const SizedBox(height: 48),
-                // Loading indicator
-                SizedBox(
-                  width: 28,
-                  height: 28,
+                const SizedBox(
+                  width: 26,
+                  height: 26,
                   child: CircularProgressIndicator(
-                    color: AppColors.accentGreen,
+                    color: AppColors.income,
                     strokeWidth: 2.5,
-                    backgroundColor: AppColors.darkSurface,
                   ),
                 ),
               ],

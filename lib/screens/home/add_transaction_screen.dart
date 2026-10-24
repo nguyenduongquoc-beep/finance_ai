@@ -1,36 +1,49 @@
-import 'dart:typed_data';
 import 'dart:io';
 import 'dart:async';
-import '../../services/ai_service.dart';
-import '../../models/category_suggestion.dart';
-import '../../models/transaction_anomaly_result.dart';
-import '../../services/transaction_intelligence_service.dart';
 import 'package:flutter/foundation.dart'
     show kIsWeb, defaultTargetPlatform, debugPrint;
-import 'package:permission_handler/permission_handler.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
-import '../../models/wallet_model.dart';
+import 'package:permission_handler/permission_handler.dart';
+
 import '../../models/category_model.dart';
+import '../../models/category_suggestion.dart';
+import '../../models/quick_template.dart';
+import '../../models/transaction_anomaly_result.dart';
 import '../../models/transaction_model.dart';
+import '../../models/wallet_model.dart';
+import '../../services/ai_service.dart';
 import '../../services/firestore_service.dart';
 import '../../services/storage_service.dart';
 import '../../services/template_service.dart';
-import '../../services/theme_controller.dart';
+import '../../services/transaction_intelligence_service.dart';
+import '../../utils/category_utils.dart';
 import '../../utils/constants.dart';
-import '../../utils/validation_utils.dart';
 import '../../utils/formatters.dart';
-import '../../models/quick_template.dart';
-import '../../widgets/stream_error_widget.dart';
+import '../../utils/validation_utils.dart';
+import '../../widgets/app_button.dart';
+import '../../widgets/app_snackbar.dart';
 import '../../widgets/custom_numpad.dart';
 import '../../widgets/quick_template_chip.dart';
-import '../../widgets/app_snackbar.dart';
-import '../../utils/category_utils.dart';
+import '../../widgets/stream_error_widget.dart';
 
+/// Màn hình Thêm / Chỉnh sửa giao dịch phong cách Fintech hiện đại, trực quan
 class AddTransactionScreen extends StatefulWidget {
   final AppTransaction? transactionToEdit;
-  const AddTransactionScreen({super.key, this.transactionToEdit});
+  final String? initialType; // 'income' | 'expense' | 'transfer'
+  final bool? initialIsTransfer;
+  final bool? autoTriggerOcr;
+
+  const AddTransactionScreen({
+    super.key,
+    this.transactionToEdit,
+    this.initialType,
+    this.initialIsTransfer,
+    this.autoTriggerOcr,
+  });
 
   @override
   State<AddTransactionScreen> createState() => _AddTransactionScreenState();
@@ -49,10 +62,12 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
 
   String _type = 'expense';
   String? _selectedWalletId;
+  String? _selectedToWalletId;
   String? _selectedCategoryId;
   DateTime _selectedDate = DateTime.now();
   Uint8List? _receiptImageBytes;
   String? _existingImagePath;
+
   bool _isSaving = false;
   bool _walletBalanceExceeded = false;
   BudgetValidationStatus _budgetStatus = BudgetValidationStatus.ok;
@@ -60,7 +75,6 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
   bool _isParsing = false;
   bool _isValidating = false;
 
-  // Smart Transaction Assistant State
   bool _isCategoryManuallySelected = false;
   CategorySuggestion? _categorySuggestion;
   TransactionAnomalyResult _anomalyResult = TransactionAnomalyResult.normal();
@@ -70,20 +84,27 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
   String? _aiExplanation;
   bool _isLoadingAiExplanation = false;
 
-
   @override
   void initState() {
     super.initState();
     _noteController.addListener(_onNoteChanged);
+
+    if (widget.initialIsTransfer == true || widget.initialType == 'transfer') {
+      _type = 'transfer';
+    } else if (widget.initialType != null && widget.initialType!.isNotEmpty) {
+      _type = widget.initialType!;
+    }
 
     if (widget.transactionToEdit != null) {
       final tx = widget.transactionToEdit!;
       if (tx.type == 'goal_deposit' || tx.type == 'goal_withdraw') {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) {
-            AppSnackbar.show(context,
-                'Giao dịch nạp/rút mục tiêu không thể sửa. Vui lòng xóa và tạo lại giao dịch.',
-                isError: true);
+            AppSnackbar.show(
+              context,
+              'Giao dịch nạp/rút mục tiêu không thể sửa. Vui lòng xóa và tạo lại giao dịch.',
+              isError: true,
+            );
             Navigator.of(context).pop();
           }
         });
@@ -92,6 +113,7 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
       _type = tx.type;
       _amountController.text = AppFormatters.number(tx.amount);
       _selectedWalletId = tx.walletId.isNotEmpty ? tx.walletId : null;
+      _selectedToWalletId = tx.toWalletId;
       _selectedCategoryId = tx.categoryId.isNotEmpty ? tx.categoryId : null;
       if (tx.categoryId.isNotEmpty) {
         _isCategoryManuallySelected = true;
@@ -118,6 +140,10 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
           _runIntelligenceCheck();
         }
       }
+
+      if (widget.autoTriggerOcr == true) {
+        _pickImage();
+      }
     });
   }
 
@@ -140,11 +166,8 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
     });
   }
 
-
   void _runIntelligenceCheck({String? ocrMerchant}) {
-
-
-    if (!mounted) return;
+    if (!mounted || _type == 'transfer') return;
 
     final note = _noteController.text.trim();
     final suggestion = _intelligenceService.suggestCategory(
@@ -156,7 +179,6 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
     );
 
     String? newCategoryId = _selectedCategoryId;
-    // Tự động chọn danh mục NẾU chưa chọn danh mục thủ công VÀ confidence >= 80%
     if (!_isCategoryManuallySelected &&
         suggestion.confidence >= 80 &&
         suggestion.categoryId.isNotEmpty) {
@@ -184,7 +206,6 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
       userHistory: _userHistory,
       excludeTransactionId: widget.transactionToEdit?.transactionId,
     );
-
 
     setState(() {
       _categorySuggestion = suggestion;
@@ -215,7 +236,7 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
       if (mounted) {
         final msg = AiService.isNoNetworkException(e)
             ? 'Không có kết nối mạng để gọi AI giải thích.'
-            : 'Không thể tải giải thích AI lúc này. Bạn vẫn có thể xem số liệu cảnh báo từ hệ thống ở trên.';
+            : 'Không thể tải giải thích AI lúc này.';
         setState(() {
           _aiExplanation = msg;
         });
@@ -227,15 +248,14 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
     }
   }
 
-
   Future<void> _pickImage() async {
-    final ImageSource source = ImageSource.camera;
-// Request camera permission on mobile platforms
+    const ImageSource source = ImageSource.camera;
     if (!kIsWeb &&
         (defaultTargetPlatform == TargetPlatform.android ||
             defaultTargetPlatform == TargetPlatform.iOS)) {
       var status = await Permission.camera.request();
       if (!status.isGranted) {
+        if (!mounted) return;
         AppSnackbar.show(context, 'Quyền truy cập camera bị từ chối',
             isError: true);
         return;
@@ -244,41 +264,48 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
     final picked = await _picker.pickImage(source: source, imageQuality: 70);
     if (picked != null) {
       final bytes = await picked.readAsBytes();
+      if (!mounted) return;
       setState(() => _receiptImageBytes = bytes);
-      // After selecting image, automatically parse receipt
       await _parseReceipt();
     }
   }
 
-  // Parse receipt image using AI service and pre-fill fields
+  Future<void> _pickGalleryImage() async {
+    final picked =
+        await _picker.pickImage(source: ImageSource.gallery, imageQuality: 70);
+    if (picked != null) {
+      final bytes = await picked.readAsBytes();
+      if (!mounted) return;
+      setState(() => _receiptImageBytes = bytes);
+      await _parseReceipt();
+    }
+  }
+
   Future<void> _parseReceipt() async {
     if (_receiptImageBytes == null) return;
-    // Clear note and location before filling new data
     _noteController.clear();
     _locationController.clear();
     setState(() => _isParsing = true);
     final ai = AiService();
     try {
       final info = await ai.extractReceiptInfo(_receiptImageBytes!);
+      if (!mounted) return;
       if (info != null) {
-        // Fill controllers with extracted receipt info
         if (info.total > 0) {
           _amountController.text = AppFormatters.number(info.total);
         }
         if (info.date != null) {
           _selectedDate = info.date!;
         }
-        // Note: prioritize items, fall back to merchant name
         if (info.items != null && info.items!.isNotEmpty) {
           final itemLines = info.items!
               .map((it) =>
-                  '${it.description}: ${AppFormatters.number(it.amount)}đ')
+                  '${it.description}: ${AppFormatters.number(it.amount)}₫')
               .join('\n');
           _noteController.text = itemLines;
         } else if (info.merchant.isNotEmpty) {
           _noteController.text = info.merchant;
         }
-        // Location (address)
         if (info.address != null && info.address!.isNotEmpty) {
           _locationController.text = info.address!;
         }
@@ -288,6 +315,7 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
             isError: true);
       }
     } catch (e) {
+      if (!mounted) return;
       final msg = AiService.isNoNetworkException(e)
           ? 'Không có kết nối mạng. Vui lòng kiểm tra Internet và thử lại.'
           : 'Lỗi khi trích xuất hoá đơn: $e';
@@ -296,7 +324,8 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
     if (mounted) {
       setState(() => _isParsing = false);
       _runIntelligenceCheck(
-        ocrMerchant: (_noteController.text.isNotEmpty) ? _noteController.text : null,
+        ocrMerchant:
+            (_noteController.text.isNotEmpty) ? _noteController.text : null,
       );
       await _runValidation();
     }
@@ -312,11 +341,24 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
     if (picked != null) setState(() => _selectedDate = picked);
   }
 
+  void _setDatePreset(DateTime date) {
+    HapticFeedback.selectionClick();
+    setState(() => _selectedDate = date);
+  }
+
   Future<void> _showNumpad() async {
     final result = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
-      builder: (_) => CustomNumpad(initialValue: _amountController.text),
+      backgroundColor: Colors.transparent,
+      builder: (_) => CustomNumpad(
+        initialValue: _amountController.text,
+        title: _type == 'expense'
+            ? 'Nhập số tiền chi tiêu'
+            : (_type == 'income'
+                ? 'Nhập số tiền thu nhập'
+                : 'Nhập số tiền chuyển'),
+      ),
     );
     if (result != null) {
       setState(() => _amountController.text = result);
@@ -325,6 +367,25 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
     }
   }
 
+  void _addQuickAmount(double amount) async {
+    HapticFeedback.lightImpact();
+    final current = AppFormatters.parseCurrencyInput(_amountController.text);
+    final updated = current + amount;
+    setState(() {
+      _amountController.text = AppFormatters.number(updated);
+    });
+    _runIntelligenceCheck();
+    await _runValidation();
+  }
+
+  void _clearAmount() async {
+    HapticFeedback.lightImpact();
+    setState(() {
+      _amountController.clear();
+    });
+    _runIntelligenceCheck();
+    await _runValidation();
+  }
 
   Future<void> _runValidation() async {
     setState(() => _isValidating = true);
@@ -332,13 +393,28 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
       final amount = AppFormatters.parseCurrencyInput(_amountController.text);
       final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
 
-      // Nếu là thu nhập (income) thì không bao giờ bị vượt quá số dư ví hay ngân sách chi tiêu
       if (_type == 'income') {
         setState(() {
           _walletBalanceExceeded = false;
           _budgetStatus = BudgetValidationStatus.ok;
           _budgetProjectedPercent = 0;
         });
+        return;
+      }
+
+      if (_type == 'transfer') {
+        setState(() {
+          _budgetStatus = BudgetValidationStatus.ok;
+          _budgetProjectedPercent = 0;
+        });
+        if (_selectedWalletId != null) {
+          final exceed = await ValidationUtils.exceedsWalletBalance(
+            walletId: _selectedWalletId!,
+            amount: amount,
+            firestoreService: _firestoreService,
+          );
+          setState(() => _walletBalanceExceeded = exceed);
+        }
         return;
       }
 
@@ -381,18 +457,30 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Lưu mẫu giao dịch'),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: const Text('Lưu mẫu giao dịch',
+            style: TextStyle(fontWeight: FontWeight.w600)),
         content: TextField(
           controller: titleCtrl,
-          decoration: const InputDecoration(labelText: 'Tên mẫu'),
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Tên mẫu',
+            hintText: 'Ví dụ: Ăn trưa văn phòng, Tiền điện...',
+          ),
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Hủy')),
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Hủy'),
+          ),
           ElevatedButton(
-              onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Lưu')),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.primary,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Lưu'),
+          ),
         ],
       ),
     );
@@ -409,7 +497,9 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
         date: _selectedDate,
         imagePath: null,
       );
-      AppSnackbar.show(context, 'Đã lưu mẫu');
+      if (mounted) {
+        AppSnackbar.show(context, 'Đã lưu mẫu giao dịch thành công');
+      }
     }
   }
 
@@ -417,20 +507,36 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
     final uid = FirebaseAuth.instance.currentUser?.uid;
     final amount = AppFormatters.parseCurrencyInput(_amountController.text);
 
-    if (uid == null ||
-        amount <= 0 ||
-        _selectedWalletId == null ||
-        _selectedCategoryId == null) {
-      AppSnackbar.show(context, 'Vui lòng nhập đầy đủ số tiền, ví và danh mục',
+    if (uid == null || amount <= 0 || _selectedWalletId == null) {
+      AppSnackbar.show(context, 'Vui lòng nhập đầy đủ số tiền và chọn ví',
           isError: true);
       return;
     }
+
+    if (_type == 'transfer') {
+      if (_selectedToWalletId == null) {
+        AppSnackbar.show(context, 'Vui lòng chọn ví nhận tiền', isError: true);
+        return;
+      }
+      if (_selectedToWalletId == _selectedWalletId) {
+        AppSnackbar.show(context, 'Ví nguồn và ví đích không được trùng nhau',
+            isError: true);
+        return;
+      }
+    } else if (_selectedCategoryId == null) {
+      AppSnackbar.show(context, 'Vui lòng chọn danh mục giao dịch',
+          isError: true);
+      return;
+    }
+
     if (_walletBalanceExceeded) {
-      AppSnackbar.show(context, 'Số dư ví không đủ để thực hiện giao dịch này.',
+      AppSnackbar.show(
+          context, 'Số dư ví nguồn không đủ để thực hiện giao dịch này.',
           isError: true);
       return;
     }
-    if (_budgetStatus == BudgetValidationStatus.exceeded) {
+    if (_type != 'transfer' &&
+        _budgetStatus == BudgetValidationStatus.exceeded) {
       AppSnackbar.show(context, 'Giao dịch sẽ vượt quá ngân sách danh mục',
           isError: true);
       return;
@@ -439,29 +545,29 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
     setState(() => _isSaving = true);
     try {
       String? imageUrl;
-      if (_receiptImageBytes != null) {
+      if (_type != 'transfer' && _receiptImageBytes != null) {
         try {
           imageUrl = await _storageService.uploadReceiptImage(
               uid, _receiptImageBytes!);
         } catch (e) {
           debugPrint(
-              '⚠️ Upload ảnh hóa đơn thất bại, vẫn tiếp tục lưu giao dịch không kèm ảnh: $e');
-          if (mounted) {
-            AppSnackbar.show(context,
-                'Không thể lưu ảnh hóa đơn (lỗi kết nối), đang tiếp tục lưu giao dịch...',
-                isError: true);
-          }
+              '⚠️ Upload ảnh hóa đơn thất bại, tiếp tục lưu giao dịch: $e');
         }
       }
+
+      final categoryIdToSave =
+          _type == 'transfer' ? '' : (_selectedCategoryId ?? '');
+      final toWalletIdToSave = _type == 'transfer' ? _selectedToWalletId : null;
 
       if (widget.transactionToEdit != null) {
         final newTx = AppTransaction(
           transactionId: widget.transactionToEdit!.transactionId,
           userId: uid,
           walletId: _selectedWalletId!,
-          categoryId: _selectedCategoryId!,
+          categoryId: categoryIdToSave,
           amount: amount,
           type: _type,
+          toWalletId: toWalletIdToSave,
           note: _noteController.text.trim(),
           image: imageUrl ?? _existingImagePath,
           location: _locationController.text.trim(),
@@ -476,9 +582,10 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
           transactionId: '',
           userId: uid,
           walletId: _selectedWalletId!,
-          categoryId: _selectedCategoryId!,
+          categoryId: categoryIdToSave,
           amount: amount,
           type: _type,
+          toWalletId: toWalletIdToSave,
           note: _noteController.text.trim(),
           image: imageUrl,
           location: _locationController.text.trim(),
@@ -499,778 +606,188 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
     }
   }
 
+  IconData _getCategoryIcon(String? iconName) {
+    switch (iconName) {
+      case 'work':
+        return Icons.work_outline_rounded;
+      case 'card_giftcard':
+        return Icons.card_giftcard_rounded;
+      case 'storefront':
+        return Icons.storefront_rounded;
+      case 'restaurant':
+        return Icons.restaurant_rounded;
+      case 'shopping_bag':
+        return Icons.shopping_bag_outlined;
+      case 'local_gas_station':
+        return Icons.local_gas_station_rounded;
+      case 'school':
+        return Icons.school_outlined;
+      case 'movie':
+        return Icons.movie_outlined;
+      case 'flight':
+        return Icons.flight_takeoff_rounded;
+      case 'local_hospital':
+        return Icons.local_hospital_outlined;
+      default:
+        return Icons.category_outlined;
+    }
+  }
+
+  bool _isSameDay(DateTime a, DateTime b) {
+    return a.year == b.year && a.month == b.month && a.day == b.day;
+  }
+
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<ThemeMode>(
-      valueListenable: ThemeController.mode,
-      builder: (context, _, __) {
-        final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-        final accentColor =
-            _type == 'income' ? AppColors.income : AppColors.expense;
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final accentColor = _type == 'transfer'
+        ? AppColors.info
+        : (_type == 'income' ? AppColors.income : AppColors.expense);
 
-        return Scaffold(
-          backgroundColor: AppColors.background,
-          appBar: AppBar(
-            title: Text(widget.transactionToEdit != null
-                ? 'Sửa giao dịch'
-                : 'Thêm giao dịch'),
-            actions: [
-              if (widget.transactionToEdit == null)
-                IconButton(
-                    icon: const Icon(Icons.save),
-                    tooltip: 'Lưu mẫu',
-                    onPressed: _saveAsTemplate),
-            ],
-          ),
-          body: SingleChildScrollView(
-            padding: const EdgeInsets.all(20),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                        child: _typeToggleButton(
-                            'Chi tiêu', 'expense', AppColors.expense)),
-                    const SizedBox(width: 12),
-                    Expanded(
-                        child: _typeToggleButton(
-                            'Thu nhập', 'income', AppColors.income)),
-                  ],
-                ),
-                const SizedBox(height: 20),
-                if (widget.transactionToEdit == null) ...[
-                  StreamBuilder<List<QuickTemplate>>(
-                    stream: _templateService.streamUserTemplates(),
-                    builder: (context, snapshot) {
-                      if (snapshot.hasError)
-                        return StreamErrorWidget(
-                            error: snapshot.error.toString());
-                      final templates = snapshot.data ?? [];
-                      if (templates.isEmpty) return const SizedBox.shrink();
-                      return SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: Row(
-                          children: templates
-                              .map((t) => Padding(
-                                    padding: const EdgeInsets.only(right: 8),
-                                    child: QuickTemplateChip(
-                                      template: t,
-                                      onSelect: (tmpl) async {
-                                        setState(() {
-                                          _type = tmpl.type;
-                                          _amountController.text =
-                                              AppFormatters.number(tmpl.amount);
-                                          _selectedWalletId =
-                                              tmpl.walletId.isNotEmpty
-                                                  ? tmpl.walletId
-                                                  : null;
-                                          _selectedCategoryId =
-                                              tmpl.categoryId.isNotEmpty
-                                                  ? tmpl.categoryId
-                                                  : null;
-                                          if (tmpl.categoryId.isNotEmpty) {
-                                            _isCategoryManuallySelected = true;
-                                          }
-                                          _noteController.text = tmpl.note;
-                                          _locationController.text =
-                                              tmpl.location;
-                                        });
-                                        _runIntelligenceCheck();
-                                        await _runValidation();
-                                      },
+    final amountNum = AppFormatters.parseCurrencyInput(_amountController.text);
+    final hasAmount = amountNum > 0;
+    final now = DateTime.now();
+    final yesterday = now.subtract(const Duration(days: 1));
 
-                                    ),
-                                  ))
-                              .toList(),
-                        ),
-                      );
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                ],
-                TextField(
-                  controller: _amountController,
-                  readOnly: true,
-                  onTap: _showNumpad,
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      fontSize: 32,
-                      fontWeight: FontWeight.bold,
-                      color: accentColor),
-                  decoration: InputDecoration(
-                    labelText: 'Số tiền',
-                    labelStyle: TextStyle(color: AppColors.textSecondary),
-                    floatingLabelBehavior: FloatingLabelBehavior.always,
-                    prefixText: _type == 'expense' ? '- ' : '+ ',
-                    prefixStyle: TextStyle(
-                        fontSize: 32,
-                        fontWeight: FontWeight.bold,
-                        color: accentColor),
-                    suffixText: ' VNĐ',
-                    suffixStyle: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.normal,
-                        color: AppColors.textSecondary),
-                    filled: true,
-                    fillColor: AppColors.card,
-                    contentPadding: const EdgeInsets.symmetric(
-                        vertical: 16, horizontal: 16),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(16),
-                      borderSide:
-                          BorderSide(color: Colors.grey.shade200, width: 1),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(16),
-                      borderSide: const BorderSide(
-                          color: AppColors.primary, width: 1.5),
-                    ),
-                  ),
-                ),
-                if (_walletBalanceExceeded)
-                  Container(
-                    margin: const EdgeInsets.only(top: 8),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: AppColors.expense.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
-                      border:
-                          Border.all(color: AppColors.expense.withOpacity(0.3)),
-                    ),
-                    child: const Row(
-                      children: [
-                        Icon(Icons.warning_amber_rounded,
-                            color: AppColors.expense, size: 18),
-                        SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Số tiền vượt quá số dư ví',
-                            style: TextStyle(
-                                color: AppColors.expense,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                const SizedBox(height: 20),
-                StreamBuilder<List<Wallet>>(
-                  stream: _firestoreService.streamWallets(uid),
-                  builder: (context, snap) {
-                    if (snap.hasError)
-                      return StreamErrorWidget(error: snap.error.toString());
-                    final wallets = snap.data ?? [];
-
-                    if (snap.hasData &&
-                        _selectedWalletId != null &&
-                        !wallets.any((w) => w.walletId == _selectedWalletId)) {
-                      _selectedWalletId = null;
-                    }
-
-                    return DropdownButtonFormField<String>(
-                      value: _selectedWalletId,
-                      decoration: InputDecoration(
-                        labelText: 'Ví thanh toán',
-                        labelStyle: TextStyle(color: AppColors.textSecondary),
-                        prefixIcon: const Icon(
-                            Icons.account_balance_wallet_outlined,
-                            color: AppColors.primary),
-                        filled: true,
-                        fillColor: AppColors.card,
-                        contentPadding: const EdgeInsets.symmetric(
-                            vertical: 12, horizontal: 16),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide(color: Colors.grey.shade200),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(
-                              color: AppColors.primary, width: 1.5),
-                        ),
-                      ),
-                      items: wallets
-                          .map((w) => DropdownMenuItem(
-                              value: w.walletId, child: Text(w.walletName)))
-                          .toList(),
-                      onChanged: (v) async {
-                        setState(() => _selectedWalletId = v);
-                        await _runValidation();
-                      },
-                    );
-                  },
-                ),
-                const SizedBox(height: 16),
-                StreamBuilder<List<Category>>(
-                  stream: _firestoreService.streamCategories(uid),
-                  builder: (context, snap) {
-                    if (snap.hasError)
-                      return StreamErrorWidget(error: snap.error.toString());
-                    final allCategories = snap.data ?? [];
-                    if (!areCategoryListsEqual(_allCategories, allCategories)) {
-                      _allCategories = allCategories;
-                      WidgetsBinding.instance.addPostFrameCallback((_) {
-                        if (mounted) _runIntelligenceCheck();
-                      });
-                    }
-                    final categories =
-                        allCategories.where((c) => c.type == _type).toList();
-
-
-                    if (snap.hasData &&
-                        _selectedCategoryId != null &&
-                        !allCategories
-                            .any((c) => c.categoryId == _selectedCategoryId)) {
-                      _selectedCategoryId = null;
-                    }
-
-                    return DropdownButtonFormField<String>(
-                      value: categories
-                              .any((c) => c.categoryId == _selectedCategoryId)
-                          ? _selectedCategoryId
-                          : null,
-                      decoration: InputDecoration(
-                        labelText: 'Danh mục',
-                        labelStyle: TextStyle(color: AppColors.textSecondary),
-                        prefixIcon: const Icon(Icons.category_outlined,
-                            color: AppColors.primary),
-                        filled: true,
-                        fillColor: AppColors.card,
-                        contentPadding: const EdgeInsets.symmetric(
-                            vertical: 12, horizontal: 16),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: BorderSide(color: Colors.grey.shade200),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(12),
-                          borderSide: const BorderSide(
-                              color: AppColors.primary, width: 1.5),
-                        ),
-                      ),
-                      items: categories
-                          .map((c) => DropdownMenuItem(
-                              value: c.categoryId, child: Text(c.name)))
-                          .toList(),
-                      onChanged: (v) async {
-                        setState(() {
-                          _selectedCategoryId = v;
-                          _isCategoryManuallySelected = true;
-                        });
-                        _runIntelligenceCheck();
-                        await _runValidation();
-                      },
-                    );
-                  },
-                ),
-                if (_categorySuggestion != null &&
-                    _categorySuggestion!.confidence > 0 &&
-                    _categorySuggestion!.categoryId.isNotEmpty) ...[
-                  const SizedBox(height: 8),
-                  InkWell(
-                    onTap: () async {
-                      setState(() {
-                        _selectedCategoryId = _categorySuggestion!.categoryId;
-                        _isCategoryManuallySelected = true;
-                      });
-                      _runIntelligenceCheck();
-                      await _runValidation();
-                    },
-                    borderRadius: BorderRadius.circular(10),
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 12, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: AppColors.primary.withOpacity(0.08),
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(
-                            color: AppColors.primary.withOpacity(0.25)),
-                      ),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.auto_awesome,
-                              color: AppColors.primary, size: 16),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              'Gợi ý: ${_categorySuggestion!.categoryName} (${_categorySuggestion!.confidence}% tin cậy) — ${_categorySuggestion!.reason}',
-                              style: const TextStyle(
-                                fontSize: 12,
-                                color: AppColors.primary,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                          if (_selectedCategoryId !=
-                              _categorySuggestion!.categoryId) ...[
-                            const SizedBox(width: 4),
-                            const Text(
-                              'Áp dụng',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: AppColors.primary,
-                                fontWeight: FontWeight.bold,
-                                decoration: TextDecoration.underline,
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    ),
-                  ),
-                ],
-                if (_budgetStatus == BudgetValidationStatus.nearLimit)
-                  Container(
-                    margin: const EdgeInsets.only(top: 8),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: AppColors.warning.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
-                      border:
-                          Border.all(color: AppColors.warning.withOpacity(0.3)),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.warning_amber_rounded,
-                            color: AppColors.warning, size: 18),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Giao dịch này sẽ khiến bạn đạt $_budgetProjectedPercent% ngân sách danh mục',
-                            style: const TextStyle(
-                                color: AppColors.warning,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                if (_budgetStatus == BudgetValidationStatus.exceeded)
-                  Container(
-                    margin: const EdgeInsets.only(top: 8),
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    decoration: BoxDecoration(
-                      color: AppColors.expense.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(8),
-                      border:
-                          Border.all(color: AppColors.expense.withOpacity(0.3)),
-                    ),
-                    child: const Row(
-                      children: [
-                        Icon(Icons.warning_amber_rounded,
-                            color: AppColors.expense, size: 18),
-                        SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            'Giao dịch sẽ vượt quá ngân sách danh mục',
-                            style: TextStyle(
-                                color: AppColors.expense,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                if (_anomalyResult.isAnomalous) ...[
-                  const SizedBox(height: 8),
-                  Container(
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: _anomalyResult.severity == 'critical'
-                          ? AppColors.expense.withOpacity(0.1)
-                          : AppColors.warning.withOpacity(0.1),
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: _anomalyResult.severity == 'critical'
-                            ? AppColors.expense.withOpacity(0.4)
-                            : AppColors.warning.withOpacity(0.4),
-                      ),
-                    ),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Icon(
-                              _anomalyResult.severity == 'critical'
-                                  ? Icons.error_outline_rounded
-                                  : Icons.warning_amber_rounded,
-                              color: _anomalyResult.severity == 'critical'
-                                  ? AppColors.expense
-                                  : AppColors.warning,
-                              size: 20,
-                            ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                'Cảnh báo khoản chi bất thường (${_anomalyResult.severity == 'critical' ? 'Mức độ nghiêm trọng' : 'Mức độ cảnh báo'})',
-                                style: TextStyle(
-                                  color: _anomalyResult.severity == 'critical'
-                                      ? AppColors.expense
-                                      : AppColors.warning,
-                                  fontSize: 14,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 6),
-                        Text(
-                          _anomalyResult.reason,
-                          style: TextStyle(
-                            color: AppColors.textPrimary,
-                            fontSize: 13,
-                            height: 1.3,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          'Bạn vẫn có thể lưu nếu đây là giao dịch đúng.',
-                          style: TextStyle(
-                            color: AppColors.textSecondary,
-                            fontSize: 12,
-                            fontStyle: FontStyle.italic,
-                          ),
-                        ),
-                        const SizedBox(height: 8),
-                        Align(
-                          alignment: Alignment.centerRight,
-                          child: OutlinedButton.icon(
-                            style: OutlinedButton.styleFrom(
-                              foregroundColor: AppColors.primary,
-                              side: BorderSide(
-                                  color: AppColors.primary.withOpacity(0.5)),
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 12, vertical: 6),
-                              minimumSize: Size.zero,
-                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8),
-                              ),
-                            ),
-                            onPressed: _isLoadingAiExplanation
-                                ? null
-                                : _explainAnomalyWithAi,
-                            icon: _isLoadingAiExplanation
-                                ? const SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                        strokeWidth: 2))
-                                : const Icon(Icons.auto_awesome, size: 14),
-                            label: Text(
-                              _isLoadingAiExplanation
-                                  ? 'Đang phân tích...'
-                                  : 'Giải thích cảnh báo',
-                              style: const TextStyle(
-                                  fontSize: 12, fontWeight: FontWeight.bold),
-                            ),
-                          ),
-                        ),
-                        if (_aiExplanation != null) ...[
-                          const SizedBox(height: 8),
-                          Container(
-                            width: double.infinity,
-                            padding: const EdgeInsets.all(10),
-                            decoration: BoxDecoration(
-                              color: AppColors.card,
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(
-                                  color: AppColors.primary.withOpacity(0.2)),
-                            ),
-                            child: Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                const Icon(Icons.psychology_outlined,
-                                    color: AppColors.primary, size: 18),
-                                const SizedBox(width: 8),
-                                Expanded(
-                                  child: Text(
-                                    _aiExplanation!,
-                                    style: TextStyle(
-                                      fontSize: 12.5,
-                                      color: AppColors.textPrimary,
-                                      height: 1.35,
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-
-                      ],
-                    ),
-                  ),
-                ],
-
-                const SizedBox(height: 16),
-                TextField(
-                  controller: _noteController,
-                  maxLines: null,
-                  minLines: 1,
-                  decoration: InputDecoration(
-                    labelText: 'Ghi chú',
-                    labelStyle: TextStyle(color: AppColors.textSecondary),
-                    prefixIcon: const Icon(Icons.notes_outlined,
-                        color: AppColors.primary),
-                    filled: true,
-                    fillColor: AppColors.card,
-                    contentPadding: const EdgeInsets.symmetric(
-                        vertical: 12, horizontal: 16),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.grey.shade200),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(
-                          color: AppColors.primary, width: 1.5),
-                    ),
-                    alignLabelWithHint: true,
-                  ),
-                ),
-                const SizedBox(height: 16),
-                TextField(
-                  controller: _locationController,
-                  decoration: InputDecoration(
-                    labelText: 'Địa điểm (tùy chọn)',
-                    labelStyle: TextStyle(color: AppColors.textSecondary),
-                    prefixIcon: const Icon(Icons.location_on_outlined,
-                        color: AppColors.primary),
-                    filled: true,
-                    fillColor: AppColors.card,
-                    contentPadding: const EdgeInsets.symmetric(
-                        vertical: 12, horizontal: 16),
-                    enabledBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide(color: Colors.grey.shade200),
-                    ),
-                    focusedBorder: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: const BorderSide(
-                          color: AppColors.primary, width: 1.5),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Container(
-                  decoration: BoxDecoration(
-                    color: AppColors.card,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.grey.shade200),
-                  ),
-                  child: ListTile(
-                    leading: const Icon(Icons.calendar_today_outlined,
-                        color: AppColors.primary),
-                    title: Text(AppFormatters.date(_selectedDate),
-                        style: const TextStyle(fontWeight: FontWeight.w500)),
-                    trailing: TextButton(
-                      onPressed: _pickDate,
-                      child: const Text('Đổi ngày',
-                          style: TextStyle(
-                              color: AppColors.primary,
-                              fontWeight: FontWeight.bold)),
-                    ),
-                  ),
-                ),
-                const Divider(),
-                const SizedBox(height: 16),
-                Text('Ảnh hóa đơn',
-                    style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: AppColors.textPrimary)),
-                const SizedBox(height: 8),
-                Container(
-                  width: double.infinity,
-                  height: 120,
-                  decoration: BoxDecoration(
-                    color: AppColors.card,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: Colors.grey.shade200),
-                  ),
-                  child: _receiptImageBytes != null
-                      ? Stack(
-                          children: [
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(12),
-                              child: Image.memory(
-                                _receiptImageBytes!,
-                                width: double.infinity,
-                                height: 120,
-                                fit: BoxFit.cover,
-                              ),
-                            ),
-                            if (_isParsing)
-                              Container(
-                                color: Colors.black54,
-                                child: const Center(
-                                  child: Column(
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      CircularProgressIndicator(
-                                          color: Colors.white),
-                                      SizedBox(height: 8),
-                                      Text('Đang trích xuất hóa đơn...',
-                                          style: TextStyle(
-                                              color: Colors.white,
-                                              fontSize: 12)),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                            Positioned(
-                              right: 8,
-                              top: 8,
-                              child: CircleAvatar(
-                                backgroundColor: Colors.black54,
-                                radius: 16,
-                                child: IconButton(
-                                  padding: EdgeInsets.zero,
-                                  icon: const Icon(Icons.close,
-                                      color: Colors.white, size: 16),
-                                  onPressed: () =>
-                                      setState(() => _receiptImageBytes = null),
-                                ),
-                              ),
-                            ),
-                          ],
-                        )
-                      : _existingImagePath != null
-                          ? Stack(
-                              children: [
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(12),
-                                  child: Image.file(
-                                    File(_existingImagePath!),
-                                    width: double.infinity,
-                                    height: 120,
-                                    fit: BoxFit.cover,
-                                    errorBuilder:
-                                        (context, error, stackTrace) =>
-                                            Container(
-                                      color: Colors.grey.shade100,
-                                      child: const Center(
-                                        child: Icon(Icons.broken_image_outlined,
-                                            color: Colors.grey),
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                Positioned(
-                                  right: 8,
-                                  top: 8,
-                                  child: CircleAvatar(
-                                    backgroundColor: Colors.black54,
-                                    radius: 16,
-                                    child: IconButton(
-                                      padding: EdgeInsets.zero,
-                                      icon: const Icon(Icons.close,
-                                          color: Colors.white, size: 16),
-                                      onPressed: () => setState(
-                                          () => _existingImagePath = null),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            )
-                          : Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                              children: [
-                                TextButton.icon(
-                                  onPressed: _pickImage,
-                                  icon: const Icon(Icons.camera_alt_outlined,
-                                      color: AppColors.primary),
-                                  label: const Text('Chụp ảnh',
-                                      style: TextStyle(
-                                          color: AppColors.primary,
-                                          fontWeight: FontWeight.bold)),
-                                ),
-                                const VerticalDivider(
-                                    width: 1, indent: 30, endIndent: 30),
-                                TextButton.icon(
-                                  onPressed: () async {
-                                    final picked = await _picker.pickImage(
-                                        source: ImageSource.gallery,
-                                        imageQuality: 70);
-                                    if (picked != null) {
-                                      final bytes = await picked.readAsBytes();
-                                      setState(
-                                          () => _receiptImageBytes = bytes);
-                                      await _parseReceipt();
-                                    }
-                                  },
-                                  icon: const Icon(Icons.photo_library_outlined,
-                                      color: AppColors.primary),
-                                  label: const Text('Thư viện',
-                                      style: TextStyle(
-                                          color: AppColors.primary,
-                                          fontWeight: FontWeight.bold)),
-                                ),
-                              ],
-                            ),
-                ),
-                const SizedBox(height: 32),
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton(
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppColors.primary,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
-                      shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12)),
-                      elevation: 0,
-                    ),
-                    onPressed: (_isSaving ||
-                            _isParsing ||
-                            _isValidating ||
-                            _budgetStatus == BudgetValidationStatus.exceeded ||
-                            _walletBalanceExceeded)
-                        ? null
-                        : _handleSave,
-                    child: _isSaving
-                        ? const SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                                color: Colors.white, strokeWidth: 2))
-                        : Text(
-                            widget.transactionToEdit != null
-                                ? 'Cập nhật giao dịch'
-                                : 'Lưu giao dịch',
-                            style: const TextStyle(
-                                fontSize: 16, fontWeight: FontWeight.bold),
-                          ),
-                  ),
-                ),
-              ],
+    return Scaffold(
+      backgroundColor: context.appBackground,
+      appBar: AppBar(
+        title: Text(
+          widget.transactionToEdit != null ? 'Sửa giao dịch' : 'Thêm giao dịch',
+          style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w600),
+        ),
+        actions: [
+          if (widget.transactionToEdit == null && _type != 'transfer')
+            IconButton(
+              icon: const Icon(Icons.bookmark_add_outlined),
+              tooltip: 'Lưu thành mẫu giao dịch',
+              onPressed: _saveAsTemplate,
             ),
+        ],
+      ),
+      bottomNavigationBar: Container(
+        decoration: BoxDecoration(
+          color: context.appCard,
+          border: Border(top: BorderSide(color: context.appBorder)),
+        ),
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+        child: SafeArea(
+          child: AppButton(
+            text: widget.transactionToEdit != null
+                ? 'Cập nhật giao dịch'
+                : 'Lưu giao dịch',
+            isLoading: _isSaving,
+            backgroundColor: accentColor,
+            onPressed: (_isSaving ||
+                    _isParsing ||
+                    _isValidating ||
+                    !hasAmount ||
+                    _selectedWalletId == null ||
+                    (_type == 'transfer' &&
+                        (_selectedToWalletId == null ||
+                            _selectedToWalletId == _selectedWalletId)) ||
+                    (_type != 'transfer' && _selectedCategoryId == null) ||
+                    (_type != 'transfer' &&
+                        _budgetStatus == BudgetValidationStatus.exceeded) ||
+                    _walletBalanceExceeded)
+                ? null
+                : _handleSave,
           ),
-        );
-      },
+        ),
+      ),
+      body: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 1. Phân loại giao dịch (Segmented Type Selector)
+            _buildTypeSelector(),
+            const SizedBox(height: 14),
+
+            // Quick Template Chips (Chỉ hiển thị cho Expense / Income)
+            if (widget.transactionToEdit == null && _type != 'transfer') ...[
+              _buildTemplateBar(),
+              const SizedBox(height: 12),
+            ],
+
+            // 2. HERO MONEY INPUT CARD (Tâm điểm thị giác cao cấp)
+            _buildHeroMoneyCard(accentColor, amountNum, hasAmount),
+            const SizedBox(height: 16),
+
+            // Cảnh báo số dư ví nguồn vượt mức
+            if (_walletBalanceExceeded) ...[
+              _buildWalletBalanceWarning(),
+              const SizedBox(height: 14),
+            ],
+
+            // 3. VÍ NGUỒN & VÍ ĐÍCH
+            _buildWalletSection(uid),
+            const SizedBox(height: 14),
+
+            // 4. DANH MỤC & GỢI Ý AI (Chỉ cho Thu nhập / Chi tiêu)
+            if (_type != 'transfer') ...[
+              _buildCategorySection(uid),
+              const SizedBox(height: 14),
+            ],
+
+            // 5. CẢNH BÁO NGÂN SÁCH & BẤT THƯỜNG
+            _buildAnomalyAndBudgetWarnings(),
+
+            // 6. NGÀY & THỜI GIAN GIAO DỊCH
+            _buildDateSection(now, yesterday),
+            const SizedBox(height: 14),
+
+            // 7. GHI CHÚ & ĐỊA ĐIỂM
+            _buildNotesAndLocationSection(),
+            const SizedBox(height: 14),
+
+            // 8. ẢNH HÓA ĐƠN & OCR
+            if (_type != 'transfer') ...[
+              _buildReceiptOcrSection(),
+              const SizedBox(height: 20),
+            ],
+          ],
+        ),
+      ),
     );
   }
 
-  Widget _typeToggleButton(String label, String type, Color color) {
+  /// Segmented 3-Way Selector
+  Widget _buildTypeSelector() {
+    return Container(
+      padding: const EdgeInsets.all(4),
+      decoration: BoxDecoration(
+        color: context.appInputFill,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: context.appBorder, width: 1),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+              child: _typeToggleButton('Chi tiêu', 'expense', AppColors.expense,
+                  Icons.arrow_outward_rounded)),
+          const SizedBox(width: 4),
+          Expanded(
+              child: _typeToggleButton('Thu nhập', 'income', AppColors.income,
+                  Icons.arrow_downward_rounded)),
+          const SizedBox(width: 4),
+          Expanded(
+              child: _typeToggleButton('Chuyển tiền', 'transfer',
+                  AppColors.info, Icons.sync_alt_rounded)),
+        ],
+      ),
+    );
+  }
+
+  Widget _typeToggleButton(
+      String label, String type, Color activeColor, IconData icon) {
     final selected = _type == type;
-    return ElevatedButton(
-      onPressed: () async {
-        if (widget.transactionToEdit != null && _type == type) {
-          // Màn Sửa: chạm vào nút đang active -> không làm gì, giữ nguyên dữ liệu 100%
-          return;
-        }
+    return GestureDetector(
+      onTap: () async {
+        if (widget.transactionToEdit != null && _type == type) return;
+        HapticFeedback.selectionClick();
         setState(() {
           if (widget.transactionToEdit == null) {
-            // Màn Thêm mới: giữ nguyên hành vi cũ (ticket 007)
             _type = type;
             _selectedCategoryId = null;
             _isCategoryManuallySelected = false;
@@ -1278,6 +795,7 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
             _anomalyResult = TransactionAnomalyResult.normal();
             _aiExplanation = null;
             _selectedWalletId = null;
+            _selectedToWalletId = null;
             _amountController.clear();
             _noteController.clear();
             _locationController.clear();
@@ -1290,9 +808,9 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
             _isParsing = false;
             _isValidating = false;
           } else {
-            // Màn Sửa: chỉ đổi loại + reset danh mục, giữ nguyên toàn bộ dữ liệu còn lại
             _type = type;
             _selectedCategoryId = null;
+            _selectedToWalletId = null;
             _isCategoryManuallySelected = false;
             _categorySuggestion = null;
             _anomalyResult = TransactionAnomalyResult.normal();
@@ -1302,17 +820,1226 @@ class _AddTransactionScreenState extends State<AddTransactionScreen> {
         _runIntelligenceCheck();
         await _runValidation();
       },
-
-      style: ElevatedButton.styleFrom(
-        backgroundColor: selected ? color : AppColors.card,
-        foregroundColor: selected ? Colors.white : AppColors.textSecondary,
-        elevation: 0,
-        side: BorderSide(
-            color: selected ? color : Colors.grey.shade300, width: 1),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
-        padding: const EdgeInsets.symmetric(vertical: 12),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        decoration: BoxDecoration(
+          color: selected ? activeColor : Colors.transparent,
+          borderRadius: BorderRadius.circular(10),
+          boxShadow: selected
+              ? [
+                  BoxShadow(
+                    color: activeColor.withAlpha(50),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ]
+              : null,
+        ),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              icon,
+              size: 15,
+              color: selected ? Colors.white : context.appTextSecondary,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+                color: selected ? Colors.white : context.appTextSecondary,
+              ),
+            ),
+          ],
+        ),
       ),
-      child: Text(label, style: const TextStyle(fontWeight: FontWeight.bold)),
+    );
+  }
+
+  /// Template Bar
+  Widget _buildTemplateBar() {
+    return StreamBuilder<List<QuickTemplate>>(
+      stream: _templateService.streamUserTemplates(),
+      builder: (context, snapshot) {
+        if (snapshot.hasError)
+          return StreamErrorWidget(error: snapshot.error.toString());
+        final templates = snapshot.data ?? [];
+        if (templates.isEmpty) return const SizedBox.shrink();
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(left: 2, bottom: 6),
+              child: Text(
+                'MẪU NHANH',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.6,
+                  color: context.appTextSecondary,
+                ),
+              ),
+            ),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: templates
+                    .map((t) => Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: QuickTemplateChip(
+                            template: t,
+                            onSelect: (tmpl) async {
+                              HapticFeedback.selectionClick();
+                              setState(() {
+                                _type = tmpl.type;
+                                _amountController.text =
+                                    AppFormatters.number(tmpl.amount);
+                                _selectedWalletId = tmpl.walletId.isNotEmpty
+                                    ? tmpl.walletId
+                                    : null;
+                                _selectedCategoryId = tmpl.categoryId.isNotEmpty
+                                    ? tmpl.categoryId
+                                    : null;
+                                if (tmpl.categoryId.isNotEmpty) {
+                                  _isCategoryManuallySelected = true;
+                                }
+                                _noteController.text = tmpl.note;
+                                _locationController.text = tmpl.location;
+                              });
+                              _runIntelligenceCheck();
+                              await _runValidation();
+                            },
+                          ),
+                        ))
+                    .toList(),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// HERO MONEY CARD
+  Widget _buildHeroMoneyCard(
+      Color accentColor, double amountNum, bool hasAmount) {
+    final prefix = _type == 'expense' ? '- ' : (_type == 'income' ? '+ ' : '');
+    final displayAmount =
+        _amountController.text.isEmpty ? '0' : _amountController.text;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
+      decoration: BoxDecoration(
+        color: context.appCard,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+          color: hasAmount ? accentColor.withAlpha(60) : context.appBorder,
+          width: 1.4,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withAlpha(6),
+            blurRadius: 10,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'SỐ TIỀN GIAO DỊCH',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.8,
+                  color: context.appTextSecondary,
+                ),
+              ),
+              if (hasAmount)
+                GestureDetector(
+                  onTap: _clearAmount,
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: AppColors.expenseBackground,
+                      borderRadius: BorderRadius.circular(6),
+                    ),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(Icons.clear_rounded,
+                            size: 13, color: AppColors.expense),
+                        SizedBox(width: 3),
+                        Text(
+                          'Xóa (C)',
+                          style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              color: AppColors.expense),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+
+          // Tap to enter amount
+          InkWell(
+            onTap: _showNumpad,
+            borderRadius: BorderRadius.circular(12),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.center,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.baseline,
+                        textBaseline: TextBaseline.alphabetic,
+                        children: [
+                          Text(
+                            prefix,
+                            style: TextStyle(
+                              fontSize: 34,
+                              fontWeight: FontWeight.w700,
+                              color: accentColor,
+                            ),
+                          ),
+                          Text(
+                            displayAmount,
+                            style: GoogleFonts.outfit(
+                              fontSize: 40,
+                              fontWeight: FontWeight.w700,
+                              color: accentColor,
+                              letterSpacing: -0.5,
+                            ),
+                          ),
+                          Text(
+                            ' ₫',
+                            style: TextStyle(
+                              fontSize: 22,
+                              fontWeight: FontWeight.w600,
+                              color: context.appTextSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+
+          // Hiển thị đọc số thông minh (tránh nhầm số 0 khi số tiền lớn)
+          if (amountNum >= 1e6) ...[
+            const SizedBox(height: 4),
+            Text(
+              '≈ ${AppFormatters.compactCurrency(amountNum)}',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: accentColor,
+              ),
+            ),
+          ],
+
+          const SizedBox(height: 12),
+          // Hàng phím tắt cộng dồn tiền nhanh
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                _buildQuickAddButton('+50k', 50000),
+                const SizedBox(width: 8),
+                _buildQuickAddButton('+100k', 100000),
+                const SizedBox(width: 8),
+                _buildQuickAddButton('+200k', 200000),
+                const SizedBox(width: 8),
+                _buildQuickAddButton('+500k', 500000),
+                const SizedBox(width: 8),
+                _buildQuickAddButton('+1Tr', 1000000),
+                const SizedBox(width: 8),
+                InkWell(
+                  onTap: _showNumpad,
+                  borderRadius: BorderRadius.circular(16),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: AppColors.primaryLight.withAlpha(25),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                          color: AppColors.primaryLight.withAlpha(50)),
+                    ),
+                    child: const Row(
+                      children: [
+                        Icon(Icons.dialpad_rounded,
+                            size: 14, color: AppColors.primaryLight),
+                        SizedBox(width: 4),
+                        Text(
+                          'Bàn phím số',
+                          style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: AppColors.primaryLight),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQuickAddButton(String label, double amount) {
+    return InkWell(
+      onTap: () => _addQuickAmount(amount),
+      borderRadius: BorderRadius.circular(16),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        decoration: BoxDecoration(
+          color: context.appInputFill,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(color: context.appBorder),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: context.appTextPrimary,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// Cảnh báo số dư ví
+  Widget _buildWalletBalanceWarning() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: AppColors.expenseBackground,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: AppColors.expense.withAlpha(90)),
+      ),
+      child: const Row(
+        children: [
+          Icon(Icons.warning_amber_rounded, color: AppColors.expense, size: 20),
+          SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              'Số tiền vượt quá số dư khả dụng trong ví nguồn',
+              style: TextStyle(
+                  color: AppColors.expense,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// VÍ NGUỒN & VÍ ĐÍCH
+  Widget _buildWalletSection(String uid) {
+    return StreamBuilder<List<Wallet>>(
+      stream: _firestoreService.streamWallets(uid),
+      builder: (context, snap) {
+        if (snap.hasError)
+          return StreamErrorWidget(error: snap.error.toString());
+        final wallets = snap.data ?? [];
+
+        if (snap.hasData &&
+            _selectedWalletId != null &&
+            !wallets.any((w) => w.walletId == _selectedWalletId)) {
+          _selectedWalletId = null;
+        }
+
+        return Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: context.appCard,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: context.appBorder),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.account_balance_wallet_rounded,
+                      size: 18, color: AppColors.primaryLight),
+                  const SizedBox(width: 8),
+                  Text(
+                    _type == 'transfer'
+                        ? 'CHỌN VÍ CHUYỂN & NHẬN'
+                        : 'VÍ THANH TOÁN',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.6,
+                      color: context.appTextSecondary,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+
+              // Dropdown ví nguồn
+              DropdownButtonFormField<String>(
+                value: _selectedWalletId,
+                isExpanded: true,
+                decoration: InputDecoration(
+                  labelText:
+                      _type == 'transfer' ? 'Từ ví nguồn' : 'Ví thanh toán',
+                  prefixIcon: const Icon(Icons.wallet_rounded,
+                      color: AppColors.primaryLight, size: 20),
+                  contentPadding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                ),
+                items: wallets.map((w) {
+                  return DropdownMenuItem(
+                    value: w.walletId,
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Flexible(
+                          child: Text(
+                            w.walletName,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontWeight: FontWeight.w500),
+                          ),
+                        ),
+                        Text(
+                          AppFormatters.compactCurrency(w.balance),
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: w.balance < 0
+                                ? AppColors.expense
+                                : context.appTextSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
+                onChanged: (v) async {
+                  setState(() => _selectedWalletId = v);
+                  await _runValidation();
+                },
+              ),
+
+              if (_type == 'transfer') ...[
+                const SizedBox(height: 10),
+                Center(
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: context.appInputFill,
+                      shape: BoxShape.circle,
+                    ),
+                    child: const Icon(Icons.arrow_downward_rounded,
+                        size: 16, color: AppColors.info),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                DropdownButtonFormField<String>(
+                  value: _selectedToWalletId,
+                  isExpanded: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Đến ví nhận tiền',
+                    prefixIcon: Icon(Icons.input_rounded,
+                        color: AppColors.info, size: 20),
+                    contentPadding:
+                        EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                  ),
+                  items: wallets
+                      .where((w) => w.walletId != _selectedWalletId)
+                      .map((w) => DropdownMenuItem(
+                            value: w.walletId,
+                            child: Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                Flexible(
+                                  child: Text(
+                                    w.walletName,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                        fontWeight: FontWeight.w500),
+                                  ),
+                                ),
+                                Text(
+                                  AppFormatters.compactCurrency(w.balance),
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: context.appTextSecondary,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ))
+                      .toList(),
+                  onChanged: (v) async {
+                    setState(() => _selectedToWalletId = v);
+                    await _runValidation();
+                  },
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// DANH MỤC & GỢI Ý AI
+  Widget _buildCategorySection(String uid) {
+    return StreamBuilder<List<Category>>(
+      stream: _firestoreService.streamCategories(uid),
+      builder: (context, snap) {
+        if (snap.hasError)
+          return StreamErrorWidget(error: snap.error.toString());
+        final allCategories = snap.data ?? [];
+        if (!areCategoryListsEqual(_allCategories, allCategories)) {
+          _allCategories = allCategories;
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _runIntelligenceCheck();
+          });
+        }
+        final categories = allCategories.where((c) => c.type == _type).toList();
+
+        if (snap.hasData &&
+            _selectedCategoryId != null &&
+            !allCategories.any((c) => c.categoryId == _selectedCategoryId)) {
+          _selectedCategoryId = null;
+        }
+
+        return Container(
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: context.appCard,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: context.appBorder),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.category_rounded,
+                      size: 18, color: AppColors.primaryLight),
+                  const SizedBox(width: 8),
+                  Text(
+                    'DANH MỤC GIAO DỊCH',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.6,
+                      color: context.appTextSecondary,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+
+              // Dropdown danh mục
+              DropdownButtonFormField<String>(
+                value:
+                    categories.any((c) => c.categoryId == _selectedCategoryId)
+                        ? _selectedCategoryId
+                        : null,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  labelText: 'Chọn danh mục',
+                  prefixIcon: Icon(Icons.grid_view_rounded,
+                      color: AppColors.primaryLight, size: 20),
+                  contentPadding:
+                      EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+                ),
+                items: categories.map((c) {
+                  return DropdownMenuItem(
+                    value: c.categoryId,
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 28,
+                          height: 28,
+                          decoration: BoxDecoration(
+                            color: Color(c.color).withAlpha(40),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Icon(_getCategoryIcon(c.icon),
+                              size: 16, color: Color(c.color)),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            c.name,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontWeight: FontWeight.w500),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }).toList(),
+                onChanged: (v) async {
+                  setState(() {
+                    _selectedCategoryId = v;
+                    _isCategoryManuallySelected = true;
+                  });
+                  _runIntelligenceCheck();
+                  await _runValidation();
+                },
+              ),
+
+              // Chip gợi ý AI
+              if (_categorySuggestion != null &&
+                  _categorySuggestion!.confidence > 0 &&
+                  _categorySuggestion!.categoryId.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                InkWell(
+                  onTap: () async {
+                    HapticFeedback.lightImpact();
+                    setState(() {
+                      _selectedCategoryId = _categorySuggestion!.categoryId;
+                      _isCategoryManuallySelected = true;
+                    });
+                    _runIntelligenceCheck();
+                    await _runValidation();
+                  },
+                  borderRadius: BorderRadius.circular(10),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                    decoration: BoxDecoration(
+                      color: AppColors.primaryLight.withAlpha(22),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                          color: AppColors.primaryLight.withAlpha(80)),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.auto_awesome_rounded,
+                            color: AppColors.primaryLight, size: 16),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            'AI gợi ý: ${_categorySuggestion!.categoryName} (${_categorySuggestion!.confidence}% tin cậy)',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: AppColors.primaryLight,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                        const Icon(Icons.touch_app_rounded,
+                            color: AppColors.primaryLight, size: 16),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// Cảnh báo ngân sách và bất thường
+  Widget _buildAnomalyAndBudgetWarnings() {
+    if (_type == 'transfer') return const SizedBox.shrink();
+
+    final List<Widget> items = [];
+
+    if (_budgetStatus == BudgetValidationStatus.nearLimit) {
+      items.add(
+        Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: AppColors.warningBackground,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.warning.withAlpha(90)),
+          ),
+          child: Row(
+            children: [
+              const Icon(Icons.warning_amber_rounded,
+                  color: AppColors.warning, size: 20),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Giao dịch này sẽ đạt $_budgetProjectedPercent% ngân sách danh mục của bạn',
+                  style: const TextStyle(
+                      color: AppColors.warning,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    } else if (_budgetStatus == BudgetValidationStatus.exceeded) {
+      items.add(
+        Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: AppColors.expenseBackground,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppColors.expense.withAlpha(90)),
+          ),
+          child: const Row(
+            children: [
+              Icon(Icons.error_outline_rounded,
+                  color: AppColors.expense, size: 20),
+              SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  'Giao dịch sẽ vượt quá hạn mức ngân sách đã đặt',
+                  style: TextStyle(
+                      color: AppColors.expense,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (_anomalyResult.isAnomalous) {
+      final isCritical = _anomalyResult.severity == 'critical';
+      items.add(
+        Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: isCritical
+                ? AppColors.expenseBackground
+                : AppColors.warningBackground,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(
+              color: isCritical
+                  ? AppColors.expense.withAlpha(90)
+                  : AppColors.warning.withAlpha(90),
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Icon(
+                    isCritical
+                        ? Icons.error_outline_rounded
+                        : Icons.warning_amber_rounded,
+                    color: isCritical ? AppColors.expense : AppColors.warning,
+                    size: 20,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Phát hiện khoản chi bất thường',
+                      style: TextStyle(
+                        color:
+                            isCritical ? AppColors.expense : AppColors.warning,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 6),
+              Text(
+                _anomalyResult.reason,
+                style: TextStyle(
+                    color: context.appTextPrimary, fontSize: 13, height: 1.3),
+              ),
+              const SizedBox(height: 10),
+              Align(
+                alignment: Alignment.centerRight,
+                child: OutlinedButton.icon(
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.primaryLight,
+                    side: const BorderSide(color: AppColors.primaryLight),
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
+                  ),
+                  onPressed:
+                      _isLoadingAiExplanation ? null : _explainAnomalyWithAi,
+                  icon: _isLoadingAiExplanation
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.auto_awesome_rounded, size: 14),
+                  label: Text(
+                    _isLoadingAiExplanation
+                        ? 'Đang phân tích...'
+                        : 'Giải thích với AI',
+                    style: const TextStyle(
+                        fontSize: 12, fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+              if (_aiExplanation != null) ...[
+                const SizedBox(height: 10),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: context.appCard,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: context.appBorder),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.psychology_rounded,
+                          color: AppColors.primaryLight, size: 18),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          _aiExplanation!,
+                          style: TextStyle(
+                              fontSize: 12,
+                              color: context.appTextPrimary,
+                              height: 1.35),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      );
+    }
+
+    if (items.isEmpty) return const SizedBox.shrink();
+    return Column(children: items);
+  }
+
+  /// NGÀY GIAO DỊCH
+  Widget _buildDateSection(DateTime now, DateTime yesterday) {
+    final isToday = _isSameDay(_selectedDate, now);
+    final isYesterday = _isSameDay(_selectedDate, yesterday);
+
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: context.appCard,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.calendar_today_rounded,
+                      size: 18, color: AppColors.primaryLight),
+                  const SizedBox(width: 8),
+                  Text(
+                    'NGÀY GIAO DỊCH',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.6,
+                      color: context.appTextSecondary,
+                    ),
+                  ),
+                ],
+              ),
+              InkWell(
+                onTap: _pickDate,
+                borderRadius: BorderRadius.circular(6),
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                  child: Text(
+                    'Chọn lịch',
+                    style: TextStyle(
+                        color: AppColors.primaryLight,
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              _buildDatePresetChip(
+                  'Hôm nay', isToday, () => _setDatePreset(now)),
+              const SizedBox(width: 8),
+              _buildDatePresetChip(
+                  'Hôm qua', isYesterday, () => _setDatePreset(yesterday)),
+              const SizedBox(width: 12),
+              Expanded(
+                child: InkWell(
+                  onTap: _pickDate,
+                  borderRadius: BorderRadius.circular(10),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: context.appInputFill,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: context.appBorder),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Text(
+                          AppFormatters.date(_selectedDate),
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: context.appTextPrimary,
+                          ),
+                        ),
+                        Icon(Icons.edit_calendar_outlined,
+                            size: 16, color: context.appTextSecondary),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDatePresetChip(
+      String label, bool isSelected, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(10),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        decoration: BoxDecoration(
+          color: isSelected ? AppColors.primary : context.appInputFill,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(
+              color: isSelected ? AppColors.primary : context.appBorder),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w600,
+            color: isSelected ? Colors.white : context.appTextSecondary,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// GHI CHÚ & ĐỊA ĐIỂM
+  Widget _buildNotesAndLocationSection() {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: context.appCard,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.edit_note_rounded,
+                  size: 18, color: AppColors.primaryLight),
+              const SizedBox(width: 8),
+              Text(
+                'CHI TIẾT BỔ SUNG',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.6,
+                  color: context.appTextSecondary,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _noteController,
+            maxLines: 2,
+            decoration: const InputDecoration(
+              labelText: 'Ghi chú',
+              hintText: 'Ví dụ: Cơm trưa với bạn, Mua đồ siêu thị...',
+              prefixIcon: Icon(Icons.notes_rounded,
+                  size: 20, color: AppColors.primaryLight),
+              contentPadding:
+                  EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _locationController,
+            decoration: const InputDecoration(
+              labelText: 'Địa điểm (tùy chọn)',
+              hintText: 'Nhà hàng, quán cà phê, siêu thị...',
+              prefixIcon: Icon(Icons.location_on_outlined,
+                  size: 20, color: AppColors.primaryLight),
+              contentPadding:
+                  EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// ẢNH HÓA ĐƠN & OCR
+  Widget _buildReceiptOcrSection() {
+    final hasImage = _receiptImageBytes != null || _existingImagePath != null;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: context.appCard,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: context.appBorder),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.document_scanner_rounded,
+                      size: 18, color: AppColors.primaryLight),
+                  const SizedBox(width: 8),
+                  Text(
+                    'HÓA ĐƠN & TRÍCH XUẤT OCR',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.6,
+                      color: context.appTextSecondary,
+                    ),
+                  ),
+                ],
+              ),
+              if (_isParsing)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: AppColors.primaryLight.withAlpha(25),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: const Row(
+                    children: [
+                      SizedBox(
+                          width: 10,
+                          height: 10,
+                          child: CircularProgressIndicator(strokeWidth: 2)),
+                      SizedBox(width: 6),
+                      Text('AI đang đọc...',
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: AppColors.primaryLight,
+                              fontWeight: FontWeight.w600)),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          if (!hasImage) ...[
+            // Trạng thái chưa có ảnh: Card nút tinh gọn, thanh lịch
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              decoration: BoxDecoration(
+                color: context.appInputFill,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(
+                    color: context.appBorder, style: BorderStyle.solid),
+              ),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Đính kèm ảnh biên lai / hóa đơn',
+                          style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: context.appTextPrimary),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          'AI sẽ tự động nhận diện số tiền, ngày và ghi chú',
+                          style: TextStyle(
+                              fontSize: 11, color: context.appTextSecondary),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  IconButton(
+                    tooltip: 'Chụp ảnh',
+                    icon: const Icon(Icons.camera_alt_rounded,
+                        color: AppColors.primaryLight),
+                    onPressed: _pickImage,
+                  ),
+                  IconButton(
+                    tooltip: 'Chọn từ thư viện',
+                    icon: const Icon(Icons.photo_library_rounded,
+                        color: AppColors.primaryLight),
+                    onPressed: _pickGalleryImage,
+                  ),
+                ],
+              ),
+            ),
+          ] else ...[
+            // Trạng thái đã có ảnh: Preview sắc nét kèm các nút thao tác
+            Container(
+              height: 140,
+              width: double.infinity,
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: context.appBorder),
+              ),
+              child: Stack(
+                children: [
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: _receiptImageBytes != null
+                        ? Image.memory(
+                            _receiptImageBytes!,
+                            width: double.infinity,
+                            height: 140,
+                            fit: BoxFit.cover,
+                          )
+                        : Image.file(
+                            File(_existingImagePath!),
+                            width: double.infinity,
+                            height: 140,
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) => Container(
+                              color: context.appInputFill,
+                              child: const Center(
+                                child: Icon(Icons.broken_image_outlined,
+                                    color: Colors.grey),
+                              ),
+                            ),
+                          ),
+                  ),
+                  if (_isParsing)
+                    Container(
+                      decoration: BoxDecoration(
+                        color: Colors.black.withAlpha(160),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            CircularProgressIndicator(
+                                color: Colors.white, strokeWidth: 3),
+                            SizedBox(height: 8),
+                            Text(
+                              'Đang trích xuất hóa đơn bằng AI...',
+                              style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w600),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  // Nút thao tác góc phải
+                  Positioned(
+                    right: 8,
+                    top: 8,
+                    child: Row(
+                      children: [
+                        CircleAvatar(
+                          backgroundColor: Colors.black.withAlpha(150),
+                          radius: 15,
+                          child: IconButton(
+                            padding: EdgeInsets.zero,
+                            tooltip: 'Chụp lại',
+                            icon: const Icon(Icons.camera_alt_rounded,
+                                color: Colors.white, size: 16),
+                            onPressed: _pickImage,
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        CircleAvatar(
+                          backgroundColor: Colors.black.withAlpha(150),
+                          radius: 15,
+                          child: IconButton(
+                            padding: EdgeInsets.zero,
+                            tooltip: 'Xóa ảnh',
+                            icon: const Icon(Icons.close_rounded,
+                                color: Colors.white, size: 16),
+                            onPressed: () {
+                              HapticFeedback.lightImpact();
+                              setState(() {
+                                _receiptImageBytes = null;
+                                _existingImagePath = null;
+                              });
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }
