@@ -320,7 +320,7 @@ exports.resetPasswordWithOtp = functions.https.onRequest(async (req, res) => {
 function applyAdminCors(req, res) {
   res.set("Access-Control-Allow-Origin", "*");
   res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.set("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Firebase-AppCheck");
   if (req.method === "OPTIONS") {
     res.status(204).send("");
     return true;
@@ -328,7 +328,40 @@ function applyAdminCors(req, res) {
   return false;
 }
 
+/**
+ * Kiểm tra Firebase App Check có điều kiện:
+ * - Khi `process.env.ENFORCE_APP_CHECK === "true"` (môi trường Production), bắt buộc có
+ *   X-Firebase-AppCheck token hợp lệ.
+ * - Khi ở môi trường phát triển (mặc định), nếu có gửi header thì kiểm tra và ghi cảnh báo
+ *   nhưng không làm gián đoạn luồng dev/emulator.
+ */
+async function verifyOptionalAppCheck(req) {
+  const enforce = process.env.ENFORCE_APP_CHECK === "true";
+  const appCheckToken = req.headers["x-firebase-appcheck"] || "";
+
+  if (!appCheckToken) {
+    if (enforce) {
+      const err = new Error("Thiếu Firebase App Check token xác thực thiết bị.");
+      err.statusCode = 401;
+      throw err;
+    }
+    return;
+  }
+
+  try {
+    await admin.appCheck().verifyToken(appCheckToken);
+  } catch (e) {
+    if (enforce) {
+      const err = new Error("Firebase App Check token không hợp lệ.");
+      err.statusCode = 401;
+      throw err;
+    }
+    functions.logger.warn("App Check token không hợp lệ trong môi trường dev:", e.message);
+  }
+}
+
 async function verifyAdminCaller(req) {
+  await verifyOptionalAppCheck(req);
   const authHeader = req.headers.authorization || "";
   if (!authHeader.startsWith("Bearer ")) {
     const err = new Error("Thiếu Firebase ID Token xác thực.");
@@ -621,18 +654,53 @@ exports.adminGetDashboardStats = functions.https.onRequest(async (req, res) => {
 });
 
 // ======================================================================
-// GIAI ĐOẠN 1: QUẢN TRỊ CẤU HÌNH AI, SANDBOX HASH, PUBLISH/ROLLBACK & AI FEEDBACK
+// GIAI ĐOẠN 1 & 2: QUẢN TRỊ CẤU HÌNH AI, SANDBOX HASH, PUBLISH/ROLLBACK & AI FEEDBACK
 // ======================================================================
 
-const SANDBOX_SECRET =
-  process.env.SANDBOX_HMAC_SECRET ||
-  functions.config().security?.sandbox_secret ||
-  "FINANCE_AI_SANDBOX_HMAC_SECRET_2026";
+const _secretMemoryCache = {};
 
-const FEEDBACK_SECRET =
-  process.env.FEEDBACK_HMAC_SECRET ||
-  functions.config().security?.feedback_secret ||
-  "FINANCE_AI_FEEDBACK_PSEUDONYM_SECRET_2026";
+/**
+ * Quản lý khóa bí mật HMAC phía Server an toàn:
+ * 1. Ưu tiên đọc từ biến môi trường / Google Cloud Secret Manager (`process.env[envVarName]`).
+ * 2. Hoặc đọc từ `functions.config().security?.[configProp]`.
+ * 3. Nếu chưa cấu hình trên môi trường dev, tự động sinh khóa ngẫu nhiên 256-bit
+ *    (`crypto.randomBytes(32).toString("hex")`) và lưu tại collection nội bộ
+ *    `_server_secrets/{secretId}` (đã khóa `allow read, write: if false` trong Firestore Rules).
+ * Tuyệt đối không dùng chuỗi khóa cố định hardcode trong mã nguồn.
+ */
+async function getOrCreateServerSecret(secretId, envVarName, configProp) {
+  const fromEnv = process.env[envVarName];
+  if (fromEnv && String(fromEnv).trim().length >= 16) {
+    return String(fromEnv).trim();
+  }
+
+  const fromConfig = functions.config().security?.[configProp];
+  if (fromConfig && String(fromConfig).trim().length >= 16) {
+    return String(fromConfig).trim();
+  }
+
+  if (_secretMemoryCache[secretId]) {
+    return _secretMemoryCache[secretId];
+  }
+
+  const secretRef = db.collection("_server_secrets").doc(secretId);
+  const generatedSecret = await db.runTransaction(async (tx) => {
+    const snap = await tx.get(secretRef);
+    if (snap.exists && snap.data().secretValue && String(snap.data().secretValue).length >= 32) {
+      return String(snap.data().secretValue);
+    }
+    const fresh = crypto.randomBytes(32).toString("hex");
+    tx.set(secretRef, {
+      secretId: secretId,
+      secretValue: fresh,
+      createdAt: new Date().toISOString(),
+    });
+    return fresh;
+  });
+
+  _secretMemoryCache[secretId] = generatedSecret;
+  return generatedSecret;
+}
 
 const ALLOWED_CONFIG_TYPES = [
   "ai_runtime",
@@ -640,15 +708,56 @@ const ALLOWED_CONFIG_TYPES = [
   "transaction_rules",
 ];
 
+// Danh mục Model ID hợp lệ theo tài liệu Gemini API chính thức:
+// - Stable: gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash, gemini-3.5-flash-lite
+// - Preview: gemini-3-flash-preview
+// - Legacy (tùy tài khoản): gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.5-pro
+// - Mutable Alias (không được dùng làm fallback duy nhất): gemini-flash-latest
 const SUPPORTED_GEMINI_MODELS = [
+  "gemini-3.8-flash",
+  "gemini-3.7-flash",
+  "gemini-3.6-flash",
   "gemini-3.5-flash",
   "gemini-3.5-flash-lite",
-  "gemini-3.6-flash",
+  "gemini-3-flash-preview",
   "gemini-2.5-flash",
   "gemini-2.5-flash-lite",
   "gemini-2.5-pro",
   "gemini-flash-latest",
 ];
+
+const MUTABLE_ALIAS_GEMINI_MODELS = [
+  "gemini-flash-latest",
+];
+
+const FORBIDDEN_SECRET_KEYS = [
+  "apikey",
+  "geminiapikey",
+  "gemini_api_key",
+  "api_key",
+  "secret",
+  "privatekey",
+  "private_key",
+  "secretsalt",
+  "accesstoken",
+];
+
+function containsForbiddenSecretField(obj) {
+  if (!obj || typeof obj !== "object") return false;
+  if (Array.isArray(obj)) {
+    return obj.some(containsForbiddenSecretField);
+  }
+  for (const key of Object.keys(obj)) {
+    const lower = key.toLowerCase();
+    if (FORBIDDEN_SECRET_KEYS.includes(lower)) {
+      return true;
+    }
+    if (containsForbiddenSecretField(obj[key])) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Chuẩn hóa JSON đệ quy khớp 100% với hàm `canonicalizeJsonValue` trong Dart
@@ -681,16 +790,26 @@ function computeCanonicalConfigHash(payload) {
   return crypto.createHash("sha256").update(canonicalJson, "utf8").digest("hex");
 }
 
-function computeSandboxSignature(configType, canonicalHash) {
+async function computeSandboxSignature(configType, canonicalHash) {
+  const secret = await getOrCreateServerSecret(
+    "sandbox_hmac_v1",
+    "SANDBOX_HMAC_SECRET",
+    "sandbox_secret"
+  );
   return crypto
-    .createHmac("sha256", SANDBOX_SECRET)
+    .createHmac("sha256", secret)
     .update(`${configType}:${canonicalHash}`, "utf8")
     .digest("hex");
 }
 
-function computePseudonymousReporterHash(uid) {
+async function computePseudonymousReporterHash(uid) {
+  const secret = await getOrCreateServerSecret(
+    "feedback_pseudonym_v1",
+    "FEEDBACK_HMAC_SECRET",
+    "feedback_secret"
+  );
   return crypto
-    .createHmac("sha256", FEEDBACK_SECRET)
+    .createHmac("sha256", secret)
     .update(`reporter:${uid}`, "utf8")
     .digest("hex");
 }
@@ -701,17 +820,35 @@ function validateConfigPayloadServerSide(configType, payload) {
   }
   const errors = [];
 
+  if (containsForbiddenSecretField(payload)) {
+    errors.push("Tuyệt đối không được đưa API Key hoặc khóa bí mật vào cấu hình động.");
+  }
+
   if (configType === "ai_runtime") {
     const primary = String(payload.primaryModel || "").trim();
     if (!SUPPORTED_GEMINI_MODELS.includes(primary)) {
       errors.push(`Model chính "${primary}" không nằm trong danh sách Whitelist hỗ trợ.`);
     }
+    if (MUTABLE_ALIAS_GEMINI_MODELS.includes(primary)) {
+      errors.push(`Không được chọn alias động "${primary}" làm model chính.`);
+    }
     if (Array.isArray(payload.fallbackModels)) {
+      const cleanFallbacks = [];
       for (const fb of payload.fallbackModels) {
         const fbStr = String(fb || "").trim();
         if (!SUPPORTED_GEMINI_MODELS.includes(fbStr)) {
           errors.push(`Model dự phòng "${fbStr}" không nằm trong danh sách Whitelist.`);
+        } else {
+          cleanFallbacks.push(fbStr);
         }
+      }
+      const nonAliasFallbacks = cleanFallbacks.filter(
+        (m) => !MUTABLE_ALIAS_GEMINI_MODELS.includes(m)
+      );
+      if (cleanFallbacks.length > 0 && nonAliasFallbacks.length === 0) {
+        errors.push(
+          "Không được chỉ sử dụng alias động (gemini-flash-latest) làm cơ chế fallback duy nhất."
+        );
       }
     }
     const temp = Number(payload.temperature ?? 0.35);
@@ -744,6 +881,7 @@ function validateConfigPayloadServerSide(configType, payload) {
 }
 
 async function verifyActiveUserCaller(req) {
+  await verifyOptionalAppCheck(req);
   const authHeader = req.headers.authorization || "";
   if (!authHeader.startsWith("Bearer ")) {
     const err = new Error("Thiếu Firebase ID Token xác thực.");
@@ -810,7 +948,7 @@ exports.adminVerifyDraftInSandbox = functions.https.onRequest(async (req, res) =
     }
 
     const canonicalHash = computeCanonicalConfigHash(draftPayload);
-    const signature = computeSandboxSignature(configType, canonicalHash);
+    const signature = await computeSandboxSignature(configType, canonicalHash);
     const nowIso = new Date().toISOString();
 
     await db.collection("_sandbox_verifications").doc(configType).set({
@@ -875,6 +1013,7 @@ exports.adminPublishConfig = functions.https.onRequest(async (req, res) => {
 
     const cleanNote = String(changeNote || "Xuất bản cấu hình mới").trim().substring(0, 300);
     const nowIso = new Date().toISOString();
+    await getOrCreateServerSecret("sandbox_hmac_v1", "SANDBOX_HMAC_SECRET", "sandbox_secret");
 
     const result = await db.runTransaction(async (tx) => {
       const draftRef = db.collection("draft_configs").doc(configType);
@@ -902,7 +1041,7 @@ exports.adminPublishConfig = functions.https.onRequest(async (req, res) => {
       }
 
       const currentCanonicalHash = computeCanonicalConfigHash(draftPayload);
-      const expectedSignature = computeSandboxSignature(configType, currentCanonicalHash);
+      const expectedSignature = await computeSandboxSignature(configType, currentCanonicalHash);
 
       if (
         !sandboxSnap.exists ||
@@ -1005,6 +1144,7 @@ exports.adminRollbackConfig = functions.https.onRequest(async (req, res) => {
 
     const nowIso = new Date().toISOString();
     const targetVersionId = `${configType}_v${targetVer}`;
+    await getOrCreateServerSecret("sandbox_hmac_v1", "SANDBOX_HMAC_SECRET", "sandbox_secret");
 
     const result = await db.runTransaction(async (tx) => {
       const targetVerRef = db.collection("config_versions").doc(targetVersionId);
@@ -1025,7 +1165,7 @@ exports.adminRollbackConfig = functions.https.onRequest(async (req, res) => {
 
       const restoredPayload = targetVerSnap.data().payloadSnapshot;
       const restoredHash = computeCanonicalConfigHash(restoredPayload);
-      const signature = computeSandboxSignature(configType, restoredHash);
+      const signature = await computeSandboxSignature(configType, restoredHash);
 
       const currentVersion = pubSnap.exists ? Number(pubSnap.data().version || 0) : 0;
       const nextVersion = currentVersion + 1;
@@ -1178,7 +1318,7 @@ exports.submitAiFeedback = functions.https.onRequest(async (req, res) => {
 
     const batch = db.batch();
     if (feedbackMode === "pseudonymous") {
-      reportDoc.reporterHash = computePseudonymousReporterHash(caller.uid);
+      reportDoc.reporterHash = await computePseudonymousReporterHash(caller.uid);
       const linkRef = db.collection("_feedback_notification_links").doc(reportId);
       batch.set(linkRef, {
         reportId: reportId,

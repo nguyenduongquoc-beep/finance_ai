@@ -241,74 +241,21 @@ service cloud.firestore {
     }
 
     // 6. Phản hồi chất lượng AI từ Người dùng (AI Feedback Reports)
-    // - Ưu tiên tiếp nhận qua Cloud Function `submitAiFeedback`.
-    // - Bảo vệ đa lớp (Defense-in-Depth) tại Rules bằng kết hợp `hasAll()` + `hasOnly()` khi tạo mới
-    //   và `diff().affectedKeys().hasOnly()` khi Admin cập nhật trạng thái xử lý.
+    // - Thống nhất cổng tiếp nhận duy nhất qua Cloud Function `submitAiFeedback`
+    //   và cổng xử lý duy nhất qua Cloud Function `adminResolveAiFeedback`.
+    // - Chặn Client trực tiếp tạo mới hoặc cập nhật để bảo đảm 100% tính nhất quán
+    //   giữa chế độ anonymous / pseudonymous, ghi nhật ký `admin_logs` và gửi thông báo.
     match /ai_feedback_reports/{reportId} {
       allow read: if isAdmin();
-
-      allow create: if isActiveUser()
-        && request.resource.data.keys().hasAll([
-          'reportId',
-          'targetFeature',
-          'rating',
-          'reasonCode',
-          'aiConfigVersion',
-          'heuristicsVersion',
-          'modelUsed',
-          'dataTier',
-          'feedbackMode',
-          'status',
-          'createdAt'
-        ])
-        && request.resource.data.keys().hasOnly([
-          'reportId',
-          'targetFeature',
-          'rating',
-          'reasonCode',
-          'userNote',
-          'suggestedKeywordOrMerchant',
-          'aiConfigVersion',
-          'heuristicsVersion',
-          'modelUsed',
-          'dataTier',
-          'feedbackMode',
-          'reporterHash',
-          'status',
-          'createdAt'
-        ])
-        && request.resource.data.reportId == reportId
-        && request.resource.data.targetFeature in [
-          'ai_chat',
-          'monthly_plan',
-          'ocr_suggestion',
-          'anomaly_alert'
-        ]
-        && request.resource.data.rating in ['positive', 'negative']
-        && request.resource.data.feedbackMode in ['anonymous', 'pseudonymous']
-        && request.resource.data.status == 'open'
-        && (!('userNote' in request.resource.data) ||
-            (request.resource.data.userNote is string &&
-             request.resource.data.userNote.size() <= 250))
-        && (!('suggestedKeywordOrMerchant' in request.resource.data) ||
-            (request.resource.data.suggestedKeywordOrMerchant is string &&
-             request.resource.data.suggestedKeywordOrMerchant.size() <= 80));
-
-      allow update: if isAdmin()
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-          'status',
-          'adminResolutionNote',
-          'resolvedAt',
-          'resolvedBy',
-          'appliedAction'
-        ])
-        && request.resource.data.status in ['open', 'resolved', 'ignored'];
-
-      allow delete: if false;
+      allow create, update, delete: if false;
     }
 
-    // 7. Bảng ánh xạ giả danh nội bộ phục vụ thông báo phản hồi (Chỉ Cloud Function truy cập)
+    // 7. Bảng ánh xạ giả danh nội bộ & Kho bí mật nội bộ phía Server (Chỉ Cloud Function Admin SDK truy cập)
     match /_feedback_notification_links/{reportId} {
+      allow read, write: if false;
+    }
+
+    match /_server_secrets/{secretId} {
       allow read, write: if false;
     }
   }

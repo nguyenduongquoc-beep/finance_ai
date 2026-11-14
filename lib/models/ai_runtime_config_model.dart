@@ -19,12 +19,25 @@ import 'wallet_model.dart';
 /// 3. Mọi cấu hình Draft và Published được tách riêng ở tầng Firestore Collection.
 /// ============================================================================
 
+/// Phân loại kênh phát hành của Model theo tài liệu Gemini API chính thức:
+/// - `stable`: Model ổn định chính thức (GA), khuyến nghị dùng cho Production.
+/// - `preview`: Model thử nghiệm thế hệ mới (Preview).
+/// - `legacy`: Model thế hệ cũ (ví dụ dòng 2.5), không mặc định khả dụng cho mọi tài khoản mới.
+/// - `mutableAlias`: Bí danh tự động thay đổi đích trỏ theo thời gian (không dùng làm fallback duy nhất).
+enum GeminiModelReleaseChannel {
+  stable,
+  preview,
+  legacy,
+  mutableAlias,
+}
+
 /// Mô tả thông tin một Model Gemini nằm trong Whitelist được phép sử dụng
 class GeminiModelDescriptor {
   final String modelId;
   final String displayName;
   final String roleBadge;
   final String description;
+  final GeminiModelReleaseChannel releaseChannel;
   final bool supportsStreaming;
   final bool supportsMultimodalOcr;
   final bool supportsStructuredJson;
@@ -35,104 +48,201 @@ class GeminiModelDescriptor {
     required this.displayName,
     required this.roleBadge,
     required this.description,
+    this.releaseChannel = GeminiModelReleaseChannel.stable,
     this.supportsStreaming = true,
     this.supportsMultimodalOcr = true,
     this.supportsStructuredJson = true,
     this.isRecommendedPrimary = false,
   });
+
+  bool get isStable => releaseChannel == GeminiModelReleaseChannel.stable;
+  bool get isLegacy => releaseChannel == GeminiModelReleaseChannel.legacy;
+  bool get isMutableAlias =>
+      releaseChannel == GeminiModelReleaseChannel.mutableAlias;
 }
 
-/// Danh sách Whitelist các Model ID hợp lệ theo tài liệu Gemini Developer API hiện hành.
-/// Admin chỉ được chọn từ danh sách này, không được nhập chuỗi tự do.
+/// Danh sách Whitelist các Model ID hợp lệ đối chiếu theo tài liệu Gemini Developer API chính thức.
+/// - Giữ nguyên `gemini-3.5-flash` làm model mặc định đã kiểm chứng tương thích với `AiService`.
+/// - Bổ sung các model ổn định mới (`gemini-3.8-flash`, `gemini-3.7-flash`) và `gemini-3-flash-preview`.
+/// - Phân loại rõ nhóm `legacy` (dòng 2.5 — tùy tài khoản) và `mutableAlias` (`gemini-flash-latest`).
 const List<GeminiModelDescriptor> kSupportedGeminiModels = [
   GeminiModelDescriptor(
     modelId: 'gemini-3.5-flash',
     displayName: 'Gemini 3.5 Flash',
-    roleBadge: 'Khuyên dùng (Mặc định)',
+    roleBadge: 'Mặc định (Đã kiểm chứng)',
     description:
-        'Cân bằng tối ưu giữa tốc độ phản hồi, lập luận tài chính cá nhân và đọc hóa đơn đa phương thức.',
+        'Model chính mặc định của hệ thống, cân bằng tối ưu giữa tốc độ phản hồi, tư vấn tài chính và OCR hóa đơn.',
+    releaseChannel: GeminiModelReleaseChannel.stable,
     isRecommendedPrimary: true,
   ),
   GeminiModelDescriptor(
     modelId: 'gemini-3.5-flash-lite',
     displayName: 'Gemini 3.5 Flash-Lite',
-    roleBadge: 'Tốc độ cao / Fallback #1',
+    roleBadge: 'Ổn định / Fallback #1',
     description:
-        'Độ trễ cực thấp, thông lượng cao, phù hợp làm model dự phòng ưu tiên hoặc bóc tách dữ liệu nhanh.',
+        'Model ổn định chính thức (GA) độ trễ cực thấp, thông lượng cao, ưu tiên làm fallback số 1.',
+    releaseChannel: GeminiModelReleaseChannel.stable,
   ),
   GeminiModelDescriptor(
     modelId: 'gemini-3.6-flash',
     displayName: 'Gemini 3.6 Flash',
-    roleBadge: 'Thế hệ mới',
+    roleBadge: 'Ổn định / Fallback #2',
     description:
-        'Phiên bản Flash thế hệ mới hỗ trợ tốt ngữ cảnh dài và phân tích kế hoạch tài chính.',
+        'Phiên bản Flash ổn định hỗ trợ tốt ngữ cảnh dài và lập kế hoạch tài chính có cấu trúc.',
+    releaseChannel: GeminiModelReleaseChannel.stable,
     isRecommendedPrimary: true,
+  ),
+  GeminiModelDescriptor(
+    modelId: 'gemini-3.7-flash',
+    displayName: 'Gemini 3.7 Flash',
+    roleBadge: 'Ổn định (Thế hệ mới)',
+    description:
+        'Nâng cấp khả năng suy luận đa bước và độ chính xác khi tuân thủ ràng buộc số liệu.',
+    releaseChannel: GeminiModelReleaseChannel.stable,
+    isRecommendedPrimary: true,
+  ),
+  GeminiModelDescriptor(
+    modelId: 'gemini-3.8-flash',
+    displayName: 'Gemini 3.8 Flash',
+    roleBadge: 'Ổn định (Mới nhất)',
+    description:
+        'Phiên bản Flash mới nhất theo tài liệu Gemini API hiện hành, mạnh về tác vụ định lượng và JSON.',
+    releaseChannel: GeminiModelReleaseChannel.stable,
+    isRecommendedPrimary: true,
+  ),
+  GeminiModelDescriptor(
+    modelId: 'gemini-3-flash-preview',
+    displayName: 'Gemini 3 Flash Preview',
+    roleBadge: 'Preview',
+    description:
+        'Bản xem trước (Preview) dòng Gemini 3 Flash, dùng để thử nghiệm trên AI Sandbox.',
+    releaseChannel: GeminiModelReleaseChannel.preview,
+    isRecommendedPrimary: false,
   ),
   GeminiModelDescriptor(
     modelId: 'gemini-2.5-flash',
-    displayName: 'Gemini 2.5 Flash (LTS)',
-    roleBadge: 'Ổn định dài hạn',
+    displayName: 'Gemini 2.5 Flash (Legacy)',
+    roleBadge: 'Legacy (Tùy tài khoản)',
     description:
-        'Phiên bản ổn định rộng rãi (GA), tương thích cao với mọi tác vụ tư vấn và trích xuất JSON.',
-    isRecommendedPrimary: true,
+        'Thế hệ 2.5 cũ — chỉ khả dụng trên một số dự án/tài khoản đã kích hoạt từ trước, không mặc định dùng.',
+    releaseChannel: GeminiModelReleaseChannel.legacy,
+    isRecommendedPrimary: false,
   ),
   GeminiModelDescriptor(
     modelId: 'gemini-2.5-flash-lite',
-    displayName: 'Gemini 2.5 Flash-Lite',
-    roleBadge: 'Tiết kiệm Quota',
-    description: 'Phiên bản nhẹ của dòng 2.5, tối ưu hạn mức gọi API.',
+    displayName: 'Gemini 2.5 Flash-Lite (Legacy)',
+    roleBadge: 'Legacy (Tùy tài khoản)',
+    description:
+        'Phiên bản nhẹ dòng 2.5 cũ — không mặc định khả dụng cho mọi tài khoản mới.',
+    releaseChannel: GeminiModelReleaseChannel.legacy,
+    isRecommendedPrimary: false,
   ),
   GeminiModelDescriptor(
     modelId: 'gemini-2.5-pro',
-    displayName: 'Gemini 2.5 Pro',
-    roleBadge: 'Phân tích chuyên sâu',
+    displayName: 'Gemini 2.5 Pro (Legacy)',
+    roleBadge: 'Legacy (Tùy tài khoản)',
     description:
-        'Khả năng suy luận phức tạp cao nhất, nhưng độ trễ lớn hơn và hạn mức (RPM) thấp hơn dòng Flash.',
+        'Phiên bản Pro dòng 2.5 cũ — độ trễ cao và phụ thuộc quyền truy cập từng tài khoản.',
+    releaseChannel: GeminiModelReleaseChannel.legacy,
+    isRecommendedPrimary: false,
   ),
   GeminiModelDescriptor(
     modelId: 'gemini-flash-latest',
     displayName: 'Gemini Flash Latest (Auto-Alias)',
-    roleBadge: 'Dự phòng cuối',
+    roleBadge: 'Alias động (Dự phòng cuối)',
     description:
-        'Bí danh tự động trỏ tới phiên bản Flash ổn định mới nhất của Google Gemini API.',
+        'Bí danh tự động thay đổi theo thời gian; chỉ được phép đứng sau ít nhất một model ổn định trong chuỗi fallback.',
+    releaseChannel: GeminiModelReleaseChannel.mutableAlias,
+    isRecommendedPrimary: false,
   ),
 ];
 
-/// Kiểm tra một mã model có nằm trong danh sách Whitelist được phép hay không
-bool isSupportedGeminiModelId(String? modelId) {
-  if (modelId == null || modelId.trim().isEmpty) return false;
+/// Tra cứu thông tin Descriptor của một Model ID trong Whitelist
+GeminiModelDescriptor? findGeminiModelDescriptor(String? modelId) {
+  if (modelId == null || modelId.trim().isEmpty) return null;
   final trimmed = modelId.trim();
-  return kSupportedGeminiModels.any((m) => m.modelId == trimmed);
+  for (final m in kSupportedGeminiModels) {
+    if (m.modelId == trimmed) return m;
+  }
+  return null;
 }
 
-/// Làm sạch và khử trùng lặp chuỗi model (luôn đảm bảo có ít nhất chuỗi mặc định an toàn)
+/// Kiểm tra một mã model có nằm trong danh sách Whitelist được phép hay không
+bool isSupportedGeminiModelId(String? modelId) {
+  return findGeminiModelDescriptor(modelId) != null;
+}
+
+/// Kiểm tra một mã model có phải là bí danh thay đổi theo thời gian (Mutable Alias) hay không
+bool isMutableAliasGeminiModelId(String? modelId) {
+  final desc = findGeminiModelDescriptor(modelId);
+  return desc != null && desc.isMutableAlias;
+}
+
+/// Làm sạch và khử trùng lặp chuỗi model:
+/// - Không cho phép dùng Mutable Alias (`gemini-flash-latest`) làm model chính.
+/// - Không bao giờ để Mutable Alias hoặc model Legacy làm cơ chế fallback duy nhất:
+///   luôn đảm bảo có ít nhất các model ổn định (`gemini-3.5-flash-lite`, `gemini-3.6-flash`)
+///   đứng trước alias động trong chuỗi dự phòng.
 List<String> sanitizeGeminiModelChain({
   required String primaryModel,
   required List<String> fallbackModels,
 }) {
   const defaultPrimary = 'gemini-3.5-flash';
-  const defaultFallbacks = <String>[
+  const defaultStableFallbacks = <String>[
     'gemini-3.5-flash-lite',
     'gemini-3.6-flash',
-    'gemini-flash-latest',
   ];
+  const defaultFinalAlias = 'gemini-flash-latest';
 
-  final validPrimary = isSupportedGeminiModelId(primaryModel)
-      ? primaryModel.trim()
+  final primaryDesc = findGeminiModelDescriptor(primaryModel);
+  final validPrimary = (primaryDesc != null && !primaryDesc.isMutableAlias)
+      ? primaryDesc.modelId
       : defaultPrimary;
 
-  final result = <String>[validPrimary];
+  final nonAliasFallbacks = <String>[];
+  final aliasFallbacks = <String>[];
+
   for (final fb in fallbackModels) {
-    final trimmed = fb.trim();
-    if (isSupportedGeminiModelId(trimmed) && !result.contains(trimmed)) {
-      result.add(trimmed);
+    final desc = findGeminiModelDescriptor(fb);
+    if (desc == null || desc.modelId == validPrimary) continue;
+    if (desc.isMutableAlias) {
+      if (!aliasFallbacks.contains(desc.modelId)) {
+        aliasFallbacks.add(desc.modelId);
+      }
+    } else {
+      if (!nonAliasFallbacks.contains(desc.modelId)) {
+        nonAliasFallbacks.add(desc.modelId);
+      }
     }
   }
 
-  for (final def in defaultFallbacks) {
-    if (!result.contains(def)) {
-      result.add(def);
+  // Đảm bảo có ít nhất 1 model thuộc kênh `stable` trong danh sách fallback trước khi đến alias
+  final hasStableFallback = nonAliasFallbacks.any((id) {
+    final d = findGeminiModelDescriptor(id);
+    return d != null && d.isStable;
+  });
+
+  if (!hasStableFallback) {
+    for (final stableId in defaultStableFallbacks) {
+      if (stableId != validPrimary && !nonAliasFallbacks.contains(stableId)) {
+        nonAliasFallbacks.add(stableId);
+      }
     }
+  } else {
+    for (final stableId in defaultStableFallbacks) {
+      if (stableId != validPrimary && !nonAliasFallbacks.contains(stableId)) {
+        nonAliasFallbacks.add(stableId);
+      }
+    }
+  }
+
+  final result = <String>[
+    validPrimary,
+    ...nonAliasFallbacks,
+    ...aliasFallbacks,
+  ];
+  if (!result.contains(defaultFinalAlias)) {
+    result.add(defaultFinalAlias);
   }
 
   return List<String>.unmodifiable(result);
@@ -399,9 +509,11 @@ LƯU Ý: Tuyệt đối không kết luận gian lận, không tư vấn đầu 
         : map;
 
     final rawPrimary = (payload['primaryModel'] as String?)?.trim() ?? '';
-    final safePrimary = isSupportedGeminiModelId(rawPrimary)
-        ? rawPrimary
-        : 'gemini-3.5-flash';
+    final primaryDesc = findGeminiModelDescriptor(rawPrimary);
+    final safePrimary =
+        (primaryDesc != null && !primaryDesc.isMutableAlias)
+            ? primaryDesc.modelId
+            : 'gemini-3.5-flash';
 
     final rawFallbacks = (payload['fallbackModels'] as List<dynamic>?)
             ?.map((e) => e.toString().trim())
@@ -521,21 +633,73 @@ LƯU Ý: Tuyệt đối không kết luận gian lận, không tư vấn đầu 
 
   String get canonicalHash => computeCanonicalConfigHash(toPayloadMap());
 
+  static const Set<String> _forbiddenSecretKeys = {
+    'apikey',
+    'geminiapikey',
+    'gemini_api_key',
+    'api_key',
+    'secret',
+    'privatekey',
+    'private_key',
+    'secretsalt',
+    'accesstoken',
+  };
+
+  static bool _containsForbiddenSecretField(Object? value) {
+    if (value is Map) {
+      for (final entry in value.entries) {
+        final keyLower = entry.key.toString().toLowerCase().trim();
+        if (_forbiddenSecretKeys.contains(keyLower)) {
+          return true;
+        }
+        if (_containsForbiddenSecretField(entry.value)) {
+          return true;
+        }
+      }
+    } else if (value is List) {
+      for (final item in value) {
+        if (_containsForbiddenSecretField(item)) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
   /// Kiểm tra hợp lệ một Map cấu hình thô trước khi lưu nháp hoặc Publish
   static List<String> validateRawInput(Map<String, dynamic> raw) {
     final errors = <String>[];
+    if (_containsForbiddenSecretField(raw)) {
+      errors.add(
+        'Tuyệt đối không được đưa API Key hoặc khóa bí mật vào cấu hình động.',
+      );
+    }
+
     final primary = (raw['primaryModel'] as String?)?.trim() ?? '';
     if (!isSupportedGeminiModelId(primary)) {
       errors.add('Model chính "$primary" không nằm trong danh sách Whitelist hỗ trợ.');
+    } else if (isMutableAliasGeminiModelId(primary)) {
+      errors.add('Không được chọn alias động "$primary" làm model chính.');
     }
 
     final fallbacks = raw['fallbackModels'];
     if (fallbacks is List) {
+      final validFallbacks = <String>[];
       for (final fb in fallbacks) {
         final fbStr = fb.toString().trim();
         if (!isSupportedGeminiModelId(fbStr)) {
           errors.add('Model dự phòng "$fbStr" không nằm trong danh sách Whitelist.');
+        } else {
+          validFallbacks.add(fbStr);
         }
+      }
+      final nonAliasFallbacks = validFallbacks
+          .where((id) => !isMutableAliasGeminiModelId(id))
+          .toList();
+      if (validFallbacks.isNotEmpty && nonAliasFallbacks.isEmpty) {
+        errors.add(
+          'Không được chỉ sử dụng alias động (gemini-flash-latest) làm cơ chế fallback duy nhất.',
+        );
       }
     }
 
@@ -1709,10 +1873,72 @@ class AiFeedbackReport {
     return cleaned.length <= 80 ? cleaned : cleaned.substring(0, 80);
   }
 
-  /// Tạo Map đúng chuẩn Schema `hasAll` & `hasOnly` của Firestore Security Rules
+  /// Sinh mã băm giả danh một chiều (One-way Pseudonymous Hash) cho chế độ `pseudonymous`.
+  /// Đảm bảo không thể dịch ngược về UID gốc và không bao giờ xuất hiện ở chế độ `anonymous`.
+  static String computePseudonymousReporterHash(
+    String uid, {
+    String salt = 'finance_ai_feedback_pseudonym_v1',
+  }) {
+    final cleanUid = uid.trim();
+    if (cleanUid.isEmpty) return '';
+    return sha256HexFromString('$salt:reporter:$cleanUid');
+  }
+
+  /// Khởi tạo đối tượng báo cáo chuẩn bị gửi qua Cloud Function `submitAiFeedback`,
+  /// bảo đảm tính nhất quán tuyệt đối giữa chế độ `anonymous` và `pseudonymous`.
+  factory AiFeedbackReport.createForSubmission({
+    required String reportId,
+    required String targetFeature,
+    required String rating,
+    required String reasonCode,
+    required String feedbackMode,
+    String? callerUid,
+    String? userNote,
+    String? suggestedKeywordOrMerchant,
+    int aiConfigVersion = 1,
+    int heuristicsVersion = 1,
+    String modelUsed = 'gemini-3.5-flash',
+    String dataTier = 'unknown',
+    DateTime? createdAt,
+  }) {
+    final safeMode =
+        allowedModes.contains(feedbackMode) ? feedbackMode : 'anonymous';
+    final String? hash = (safeMode == 'pseudonymous' &&
+            callerUid != null &&
+            callerUid.trim().isNotEmpty)
+        ? computePseudonymousReporterHash(callerUid)
+        : null;
+
+    return AiFeedbackReport(
+      reportId: reportId,
+      targetFeature: allowedTargetFeatures.contains(targetFeature)
+          ? targetFeature
+          : 'ai_chat',
+      rating: allowedRatings.contains(rating) ? rating : 'positive',
+      reasonCode: reasonCode.trim().isEmpty ? 'general' : reasonCode.trim(),
+      userNote: sanitizeUserNote(userNote),
+      suggestedKeywordOrMerchant:
+          sanitizeSuggestedKeyword(suggestedKeywordOrMerchant),
+      aiConfigVersion: aiConfigVersion,
+      heuristicsVersion: heuristicsVersion,
+      modelUsed: modelUsed,
+      dataTier: dataTier,
+      feedbackMode: safeMode,
+      reporterHash: hash,
+      status: 'open',
+      createdAt: createdAt ?? DateTime.now(),
+    );
+  }
+
+  /// Tạo Map đúng chuẩn Schema để lưu trữ/kiểm thử
   Map<String, dynamic> toCreateMap() {
     final cleanNote = sanitizeUserNote(userNote);
     final cleanKeyword = sanitizeSuggestedKeyword(suggestedKeywordOrMerchant);
+    final safeMode =
+        allowedModes.contains(feedbackMode) ? feedbackMode : 'anonymous';
+    final includeHash = safeMode == 'pseudonymous' &&
+        reporterHash != null &&
+        reporterHash!.isNotEmpty;
 
     return {
       'reportId': reportId,
@@ -1727,10 +1953,8 @@ class AiFeedbackReport {
       'heuristicsVersion': heuristicsVersion,
       'modelUsed': modelUsed,
       'dataTier': dataTier,
-      'feedbackMode':
-          allowedModes.contains(feedbackMode) ? feedbackMode : 'anonymous',
-      if (reporterHash != null && reporterHash!.isNotEmpty)
-        'reporterHash': reporterHash,
+      'feedbackMode': safeMode,
+      if (includeHash) 'reporterHash': reporterHash,
       'status': 'open',
       'createdAt': createdAt.toIso8601String(),
     };

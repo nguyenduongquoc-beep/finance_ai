@@ -5,12 +5,39 @@ import 'package:finance_ai_app/services/ai_config_sync_service.dart';
 
 void main() {
   group('Giai đoạn 1.1: Gemini Model Whitelist & AiRuntimeConfig', () {
-    test('1. Chỉ chấp nhận các Model ID trong Whitelist và tự động fallback an toàn', () {
+    test('1. Chỉ chấp nhận các Model ID trong Whitelist, phân loại kênh phát hành và không dùng alias động làm fallback duy nhất', () {
       expect(isSupportedGeminiModelId('gemini-3.5-flash'), isTrue);
       expect(isSupportedGeminiModelId('gemini-3.5-flash-lite'), isTrue);
+      expect(isSupportedGeminiModelId('gemini-3.6-flash'), isTrue);
+      expect(isSupportedGeminiModelId('gemini-3.7-flash'), isTrue);
+      expect(isSupportedGeminiModelId('gemini-3.8-flash'), isTrue);
+      expect(isSupportedGeminiModelId('gemini-3-flash-preview'), isTrue);
       expect(isSupportedGeminiModelId('gemini-2.5-flash'), isTrue);
       expect(isSupportedGeminiModelId('gemini-1.0-pro-legacy'), isFalse);
       expect(isSupportedGeminiModelId('custom-unverified-model'), isFalse);
+
+      // Phân loại rõ Stable / Preview / Legacy / Mutable Alias
+      expect(findGeminiModelDescriptor('gemini-3.5-flash')?.isStable, isTrue);
+      expect(findGeminiModelDescriptor('gemini-3.8-flash')?.isStable, isTrue);
+      expect(findGeminiModelDescriptor('gemini-2.5-flash')?.isLegacy, isTrue);
+      expect(
+        findGeminiModelDescriptor('gemini-2.5-flash')?.isRecommendedPrimary,
+        isFalse,
+      );
+      expect(
+        findGeminiModelDescriptor('gemini-flash-latest')?.isMutableAlias,
+        isTrue,
+      );
+
+      // Không cho phép dùng alias động làm model chính hoặc làm fallback duy nhất
+      final chainWithOnlyAlias = sanitizeGeminiModelChain(
+        primaryModel: 'gemini-flash-latest',
+        fallbackModels: const ['gemini-flash-latest'],
+      );
+      expect(chainWithOnlyAlias.first, 'gemini-3.5-flash');
+      // Phải tự động chèn model ổn định đứng trước gemini-flash-latest
+      expect(chainWithOnlyAlias[1], 'gemini-3.5-flash-lite');
+      expect(chainWithOnlyAlias.last, 'gemini-flash-latest');
 
       final chain = sanitizeGeminiModelChain(
         primaryModel: 'invalid-model-id',
@@ -22,7 +49,7 @@ void main() {
       expect(chain.contains('invalid-2'), isFalse);
     });
 
-    test('2. AiRuntimeConfig clamp temperature, maxChatHistoryMessages và báo lỗi raw input sai', () {
+    test('2. AiRuntimeConfig clamp temperature, maxChatHistoryMessages, chặn API Key/Secret và báo lỗi raw input sai', () {
       final clamped = AiRuntimeConfig.fromMap(const {
         'version': 3,
         'primaryModel': 'unknown-model',
@@ -37,11 +64,21 @@ void main() {
 
       final errors = AiRuntimeConfig.validateRawInput(const {
         'primaryModel': 'arbitrary-model',
+        'fallbackModels': ['gemini-flash-latest'], // Chỉ có alias động
         'temperature': 0.95,
         'maxChatHistoryMessages': 2,
+        'apiKey': 'AIzaSySecretKeyShouldBeRejected',
         'prompts': {'chatSystemInstruction': ''},
       });
-      expect(errors.length, greaterThanOrEqualTo(4));
+      expect(errors.length, greaterThanOrEqualTo(5));
+      expect(
+        errors.any((e) => e.contains('API Key') || e.contains('bí mật')),
+        isTrue,
+      );
+      expect(
+        errors.any((e) => e.contains('alias động')),
+        isTrue,
+      );
     });
   });
 
@@ -261,31 +298,60 @@ void main() {
       }
     });
 
-    test('9. AiFeedbackReport ẩn danh hóa chuỗi số nhạy cảm và tuân thủ đúng tập khóa hasAll/hasOnly', () {
-      final report = AiFeedbackReport(
-        reportId: 'rep_001',
+    test('9. AiFeedbackReport ẩn danh hóa chuỗi số nhạy cảm và kiểm thử đầy đủ cả chế độ anonymous & pseudonymous', () {
+      // 9a. Chế độ anonymous: tuyệt đối không lưu reporterHash hay định danh người dùng
+      final anonReport = AiFeedbackReport.createForSubmission(
+        reportId: 'rep_anon_001',
         targetFeature: 'ocr_suggestion',
         rating: 'negative',
         reasonCode: 'ocr_missed_merchant',
-        userNote: 'Quét hóa đơn số TK 19034567890123 số tiền 15.000.000 chưa nhận diện đúng',
-        suggestedKeywordOrMerchant: 'Katinat Saigon Kafe',
         feedbackMode: 'anonymous',
+        callerUid: 'user_secret_uid_999',
+        userNote:
+            'Quét hóa đơn số TK 19034567890123 số tiền 15.000.000 chưa nhận diện đúng',
+        suggestedKeywordOrMerchant: 'Katinat Saigon Kafe',
         createdAt: DateTime(2026, 11, 14),
       );
 
-      final createMap = report.toCreateMap();
-      // Kiểm tra mọi khóa bắt buộc đều có mặt (hasAll)
+      final anonMap = anonReport.toCreateMap();
       for (final reqKey in AiFeedbackReport.requiredCreateKeys) {
-        expect(createMap.containsKey(reqKey), isTrue, reason: 'Thiếu khóa $reqKey');
+        expect(anonMap.containsKey(reqKey), isTrue, reason: 'Thiếu khóa $reqKey');
       }
-      // Kiểm tra không có bất kỳ khóa lạ nào ngoài danh sách cho phép (hasOnly)
-      for (final k in createMap.keys) {
+      for (final k in anonMap.keys) {
         expect(AiFeedbackReport.allowedCreateKeys.contains(k), isTrue);
       }
-      expect(createMap['status'], 'open');
-      // Số tài khoản và số tiền dài đã bị che tự động
-      expect(createMap['userNote'], contains('[SỐ_ẨN_DANH]'));
-      expect(createMap['userNote'], isNot(contains('19034567890123')));
+      expect(anonMap['feedbackMode'], 'anonymous');
+      expect(anonMap.containsKey('reporterHash'), isFalse);
+      expect(anonMap['status'], 'open');
+      expect(anonMap['userNote'], contains('[SỐ_ẨN_DANH]'));
+      expect(anonMap['userNote'], isNot(contains('19034567890123')));
+
+      // 9b. Chế độ pseudonymous: sinh mã băm một chiều reporterHash 64 ký tự hex, không lộ UID gốc
+      final pseudoReport = AiFeedbackReport.createForSubmission(
+        reportId: 'rep_pseudo_002',
+        targetFeature: 'ai_chat',
+        rating: 'negative',
+        reasonCode: 'wrong_calculation',
+        feedbackMode: 'pseudonymous',
+        callerUid: 'user_secret_uid_999',
+        userNote: 'Số điện thoại 0987654321 không nên hiện',
+        createdAt: DateTime(2026, 11, 14),
+      );
+
+      final pseudoMap = pseudoReport.toCreateMap();
+      expect(pseudoMap['feedbackMode'], 'pseudonymous');
+      expect(pseudoMap.containsKey('reporterHash'), isTrue);
+      final hash = pseudoMap['reporterHash'] as String;
+      expect(hash.length, 64);
+      expect(hash, isNot(contains('user_secret_uid_999')));
+      expect(
+        hash,
+        equals(
+          AiFeedbackReport.computePseudonymousReporterHash('user_secret_uid_999'),
+        ),
+      );
+      expect(pseudoMap['userNote'], contains('[SỐ_ẨN_DANH]'));
+      expect(pseudoMap['userNote'], isNot(contains('0987654321')));
     });
   });
 }
