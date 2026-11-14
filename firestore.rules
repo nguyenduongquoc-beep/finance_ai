@@ -3,107 +3,313 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
+    // Helper: Kiểm tra đã đăng nhập
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // Helper: Đọc document hồ sơ người dùng hiện tại
+    function currentUserDoc() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid));
+    }
+
+    // Helper: Tài khoản không bị khóa (status != 'locked')
+    function isActiveUser() {
+      return isSignedIn() &&
+        (!exists(/databases/$(database)/documents/users/$(request.auth.uid)) ||
+         currentUserDoc().data.get('status', 'active') == 'active');
+    }
+
+    // Helper: Kiểm tra quyền Admin ở tầng Backend
+    function isAdmin() {
+      return isActiveUser() &&
+        (request.auth.token.admin == true ||
+         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+          currentUserDoc().data.get('role', 'user') == 'admin'));
+    }
+
+    // 1. Hồ sơ người dùng (users/{uid})
+    // - Chính chủ đọc được hồ sơ của mình; Admin đọc được danh sách tài khoản để quản trị.
+    // - Khi User tự tạo mới hoặc cập nhật: CẤM tự gán/thay đổi `role` hoặc `status`.
     match /users/{uid} {
-      allow read, write: if request.auth != null && request.auth.uid == uid;
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
+
+      allow create: if isSignedIn()
+        && request.auth.uid == uid
+        && request.resource.data.get('role', 'user') == 'user'
+        && request.resource.data.get('status', 'active') == 'active';
+
+      allow update: if (isActiveUser()
+        && request.auth.uid == uid
+        && request.resource.data.get('role', 'user') == resource.data.get('role', 'user')
+        && request.resource.data.get('status', 'active') == resource.data.get('status', 'active'))
+        || isAdmin();
+
+      allow delete: if isAdmin();
 
       match /quickTemplates/{templateId} {
-        allow read, write: if request.auth != null && request.auth.uid == uid;
+        allow read, write: if isActiveUser() && request.auth.uid == uid;
+      }
+
+      match /chat_sessions/{sessionId} {
+        allow read, write: if isActiveUser() && request.auth.uid == uid;
+      }
+
+      match /monthly_plans/{planId} {
+        allow read, write: if isActiveUser() && request.auth.uid == uid;
       }
     }
 
+    // 2. Các dữ liệu tài chính cá nhân: CHỈ chính chủ mới được đọc/ghi.
+    // Admin TUYỆT ĐỐI KHÔNG được phép đọc/ghi dữ liệu tài chính riêng tư của người dùng.
     match /wallets/{walletId} {
-      allow read, delete: if request.auth != null
+      allow read, delete: if isActiveUser()
         && request.auth.uid == resource.data.userId;
-      allow create: if request.auth != null
+      allow create: if isActiveUser()
         && request.auth.uid == request.resource.data.userId;
-      allow update: if request.auth != null
+      allow update: if isActiveUser()
         && request.auth.uid == resource.data.userId
         && request.resource.data.userId == resource.data.userId
         && request.resource.data.userId == request.auth.uid;
     }
 
     match /categories/{categoryId} {
-      allow read, delete: if request.auth != null
+      allow read, delete: if isActiveUser()
         && request.auth.uid == resource.data.userId;
-      allow create: if request.auth != null
+      allow create: if isActiveUser()
         && request.auth.uid == request.resource.data.userId;
-      allow update: if request.auth != null
+      allow update: if isActiveUser()
         && request.auth.uid == resource.data.userId
         && request.resource.data.userId == resource.data.userId
         && request.resource.data.userId == request.auth.uid;
     }
 
     match /transactions/{transactionId} {
-      allow read: if request.auth != null
+      allow read: if isActiveUser()
         && (resource == null || request.auth.uid == resource.data.userId);
-      allow delete: if request.auth != null
+      allow delete: if isActiveUser()
         && request.auth.uid == resource.data.userId;
-      allow create: if request.auth != null
+      allow create: if isActiveUser()
         && request.auth.uid == request.resource.data.userId;
-      allow update: if request.auth != null
+      allow update: if isActiveUser()
         && request.auth.uid == resource.data.userId
         && request.resource.data.userId == resource.data.userId
         && request.resource.data.userId == request.auth.uid;
     }
 
     match /budgets/{budgetId} {
-      allow read, delete: if request.auth != null
+      allow read: if isActiveUser()
+        && (resource == null || request.auth.uid == resource.data.userId);
+      allow delete: if isActiveUser()
         && request.auth.uid == resource.data.userId;
-      allow create: if request.auth != null
+      allow create: if isActiveUser()
         && request.auth.uid == request.resource.data.userId;
-      allow update: if request.auth != null
+      allow update: if isActiveUser()
         && request.auth.uid == resource.data.userId
         && request.resource.data.userId == resource.data.userId
         && request.resource.data.userId == request.auth.uid;
     }
 
     match /savingGoals/{goalId} {
-      allow read, delete: if request.auth != null
+      allow read, delete: if isActiveUser()
         && request.auth.uid == resource.data.userId;
-      allow create: if request.auth != null
+      allow create: if isActiveUser()
         && request.auth.uid == request.resource.data.userId;
-      allow update: if request.auth != null
+      allow update: if isActiveUser()
+        && request.auth.uid == resource.data.userId
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.userId == request.auth.uid;
+    }
+
+    match /monthly_plans/{planId} {
+      allow read: if isActiveUser()
+        && (resource == null || request.auth.uid == resource.data.userId);
+      allow delete: if isActiveUser()
+        && request.auth.uid == resource.data.userId;
+      allow create: if isActiveUser()
+        && request.auth.uid == request.resource.data.userId;
+      allow update: if isActiveUser()
         && request.auth.uid == resource.data.userId
         && request.resource.data.userId == resource.data.userId
         && request.resource.data.userId == request.auth.uid;
     }
 
     match /notifications/{notificationId} {
-      allow read, delete: if request.auth != null
+      allow read, delete: if isActiveUser()
         && request.auth.uid == resource.data.userId;
-      allow create: if request.auth != null
+      allow create: if isActiveUser()
         && request.auth.uid == request.resource.data.userId;
-      allow update: if request.auth != null
+      allow update: if isActiveUser()
         && request.auth.uid == resource.data.userId
         && request.resource.data.userId == resource.data.userId
         && request.resource.data.userId == request.auth.uid;
     }
 
     match /recurringTransactions/{scheduleId} {
-      allow read, delete: if request.auth != null
+      allow read, delete: if isActiveUser()
         && request.auth.uid == resource.data.userId;
-      allow create: if request.auth != null
+      allow create: if isActiveUser()
         && request.auth.uid == request.resource.data.userId;
-      allow update: if request.auth != null
+      allow update: if isActiveUser()
         && request.auth.uid == resource.data.userId
         && request.resource.data.userId == resource.data.userId
         && request.resource.data.userId == request.auth.uid;
     }
 
     match /recurringTransactionOccurrences/{occurrenceId} {
-      allow read: if request.auth != null
+      allow read: if isActiveUser()
         && (resource == null || request.auth.uid == resource.data.userId);
-
-      allow delete: if request.auth != null
+      allow delete: if isActiveUser()
         && request.auth.uid == resource.data.userId;
-
-      allow create: if request.auth != null
+      allow create: if isActiveUser()
         && request.auth.uid == request.resource.data.userId;
-
-      allow update: if request.auth != null
+      allow update: if isActiveUser()
         && request.auth.uid == resource.data.userId
         && request.resource.data.userId == resource.data.userId
         && request.resource.data.userId == request.auth.uid;
+    }
+
+    // 3. Cấu hình hệ thống dành cho Admin (Mọi người dùng đăng nhập được đọc, chỉ Admin được ghi)
+    match /system_categories/{catId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    match /system_announcements/{annId} {
+      allow read: if isSignedIn();
+      allow write: if isAdmin();
+    }
+
+    // 4. Nhật ký quản trị hệ thống (Immutable Server-Authenticated Audit Logs)
+    // Chỉ Admin được phép đọc; việc tạo bản ghi nhật ký quản trị quan trọng được thực hiện
+    // thông qua Backend Cloud Functions (Admin SDK) để chống giả mạo từ Client.
+    match /admin_logs/{logId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // 5. Cấu hình AI & Quy tắc Tài chính: Tách biệt nghiêm ngặt Draft và Published
+    // - Bản Published: Người dùng đã đăng nhập chỉ được đọc; chỉ Cloud Function (Admin SDK) được ghi.
+    match /published_configs/{configType} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    match /financial_knowledge_published/{articleId} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // - Bản Draft: Chỉ Admin mới được đọc/ghi; User hoàn toàn không đọc được nội dung nháp.
+    //   Giới hạn chặt các trường được phép lưu từ Client để ngăn tự ghi trạng thái xác minh Sandbox.
+    match /draft_configs/{configType} {
+      allow read: if isAdmin();
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasAll([
+          'configType',
+          'draftPayload',
+          'draftHash',
+          'updatedAt',
+          'updatedBy'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'configType',
+          'draftPayload',
+          'draftHash',
+          'updatedAt',
+          'updatedBy',
+          'changeNote'
+        ])
+        && request.resource.data.configType == configType;
+      allow delete: if isAdmin();
+    }
+
+    // - Kết quả xác minh AI Sandbox: Chỉ Admin được đọc; chỉ Cloud Function được ghi sau khi xác thực Hash.
+    match /_sandbox_verifications/{configType} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    match /financial_knowledge_drafts/{articleId} {
+      allow read, write: if isAdmin();
+    }
+
+    // - Lịch sử phiên bản cấu hình (Immutable Snapshots): Chỉ Admin được đọc; chỉ Cloud Function tạo mới.
+    match /config_versions/{versionId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // 6. Phản hồi chất lượng AI từ Người dùng (AI Feedback Reports)
+    // - Ưu tiên tiếp nhận qua Cloud Function `submitAiFeedback`.
+    // - Bảo vệ đa lớp (Defense-in-Depth) tại Rules bằng kết hợp `hasAll()` + `hasOnly()` khi tạo mới
+    //   và `diff().affectedKeys().hasOnly()` khi Admin cập nhật trạng thái xử lý.
+    match /ai_feedback_reports/{reportId} {
+      allow read: if isAdmin();
+
+      allow create: if isActiveUser()
+        && request.resource.data.keys().hasAll([
+          'reportId',
+          'targetFeature',
+          'rating',
+          'reasonCode',
+          'aiConfigVersion',
+          'heuristicsVersion',
+          'modelUsed',
+          'dataTier',
+          'feedbackMode',
+          'status',
+          'createdAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'reportId',
+          'targetFeature',
+          'rating',
+          'reasonCode',
+          'userNote',
+          'suggestedKeywordOrMerchant',
+          'aiConfigVersion',
+          'heuristicsVersion',
+          'modelUsed',
+          'dataTier',
+          'feedbackMode',
+          'reporterHash',
+          'status',
+          'createdAt'
+        ])
+        && request.resource.data.reportId == reportId
+        && request.resource.data.targetFeature in [
+          'ai_chat',
+          'monthly_plan',
+          'ocr_suggestion',
+          'anomaly_alert'
+        ]
+        && request.resource.data.rating in ['positive', 'negative']
+        && request.resource.data.feedbackMode in ['anonymous', 'pseudonymous']
+        && request.resource.data.status == 'open'
+        && (!('userNote' in request.resource.data) ||
+            (request.resource.data.userNote is string &&
+             request.resource.data.userNote.size() <= 250))
+        && (!('suggestedKeywordOrMerchant' in request.resource.data) ||
+            (request.resource.data.suggestedKeywordOrMerchant is string &&
+             request.resource.data.suggestedKeywordOrMerchant.size() <= 80));
+
+      allow update: if isAdmin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status',
+          'adminResolutionNote',
+          'resolvedAt',
+          'resolvedBy',
+          'appliedAction'
+        ])
+        && request.resource.data.status in ['open', 'resolved', 'ignored'];
+
+      allow delete: if false;
+    }
+
+    // 7. Bảng ánh xạ giả danh nội bộ phục vụ thông báo phản hồi (Chỉ Cloud Function truy cập)
+    match /_feedback_notification_links/{reportId} {
+      allow read, write: if false;
     }
   }
 }
