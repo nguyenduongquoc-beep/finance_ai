@@ -1,13 +1,10 @@
 import 'dart:convert';
-import 'package:flutter/foundation.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest_all.dart' as tz;
 import 'package:timezone/timezone.dart' as tz;
 import '../models/recurring_transaction_model.dart';
-import '../routes/app_routes.dart';
-import '../screens/management/recurring_transaction_screen.dart';
 import '../utils/formatters.dart';
 import 'recurring_transaction_service.dart';
 
@@ -47,7 +44,7 @@ class ScheduledNotificationItem {
 
 /// ============================================================
 /// LOCAL NOTIFICATION SERVICE
-/// Quản lý thông báo cục bộ cho Giao dịch định kỳ & Hóa đơn
+/// Quản lý thông báo cục bộ trên Android/iOS cho Giao dịch định kỳ & Hóa đơn
 /// ============================================================
 class LocalNotificationService {
   static final LocalNotificationService _instance =
@@ -56,11 +53,41 @@ class LocalNotificationService {
   LocalNotificationService._internal();
 
   static const String payloadPrefix = 'bill_reminder_v1:';
+  static const String channelId = 'recurring_bill_channel';
+
+  /// Callback điều hướng do ứng dụng người dùng đăng ký khi khởi động
+  /// để tránh service tầng dữ liệu phụ thuộc vào toàn bộ UI routes.
+  static void Function(String scheduleId)? onOpenRecurringSchedule;
+  static const String channelName = 'Nhắc nhở hóa đơn & Giao dịch định kỳ';
+  static const String channelDesc =
+      'Thông báo nhắc nhở khi sắp đến hạn hoặc đến hạn các khoản thu chi định kỳ';
 
   FlutterLocalNotificationsPlugin? _plugin;
   bool _isInitialized = false;
+  String? _pendingPayload;
 
-  /// Khởi tạo plugin & cấu hình Timezone thực tế từ thiết bị
+  static const AndroidNotificationDetails _androidDetails =
+      AndroidNotificationDetails(
+    channelId,
+    channelName,
+    channelDescription: channelDesc,
+    importance: Importance.max,
+    priority: Priority.high,
+    playSound: true,
+    enableVibration: true,
+    icon: '@mipmap/ic_launcher',
+  );
+
+  static const NotificationDetails _notificationDetails = NotificationDetails(
+    android: _androidDetails,
+    iOS: DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: true,
+      presentSound: true,
+    ),
+  );
+
+  /// Khởi tạo plugin, đăng ký Notification Channel Android & cấu hình Timezone thực tế
   Future<void> initialize({FlutterLocalNotificationsPlugin? plugin}) async {
     if (_isInitialized && plugin == null) return;
 
@@ -101,41 +128,131 @@ class LocalNotificationService {
       },
     );
 
+    // Đăng ký rõ ràng Android Notification Channel với mức ưu tiên cao để hiện trên thanh trạng thái
+    try {
+      final androidImpl = _plugin?.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      if (androidImpl != null) {
+        await androidImpl.createNotificationChannel(
+          const AndroidNotificationChannel(
+            channelId,
+            channelName,
+            description: channelDesc,
+            importance: Importance.max,
+            playSound: true,
+            enableVibration: true,
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('[NotificationService] Error creating Android channel: $e');
+    }
+
+    // Xử lý khi app mở từ trạng thái bị tắt hoàn toàn (terminated) thông qua thông báo
+    try {
+      final launchDetails = await _plugin?.getNotificationAppLaunchDetails();
+      if (launchDetails != null &&
+          launchDetails.didNotificationLaunchApp &&
+          launchDetails.notificationResponse?.payload != null) {
+        _pendingPayload = launchDetails.notificationResponse!.payload;
+        debugPrint(
+            '[NotificationService] Captured launch notification payload: $_pendingPayload');
+      }
+    } catch (e) {
+      debugPrint(
+          '[NotificationService] Error checking launch notification: $e');
+    }
+
     _isInitialized = true;
+  }
+
+  /// Tiêu thụ payload mở app (dùng khi UI chính đã sẵn sàng navigatorKey)
+  void consumePendingPayloadIfAny() {
+    if (_pendingPayload != null && _pendingPayload!.isNotEmpty) {
+      final payload = _pendingPayload!;
+      _pendingPayload = null;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        handleNotificationPayload(payload);
+      });
+    }
+  }
+
+  /// Kiểm tra quyền thông báo hiện tại trên thiết bị
+  Future<bool> areNotificationsEnabled() async {
+    if (_plugin == null || !_isInitialized) return false;
+    try {
+      final androidImpl = _plugin!.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      if (androidImpl != null) {
+        final enabled = await androidImpl.areNotificationsEnabled();
+        return enabled ?? true;
+      }
+    } catch (_) {}
+    return true;
   }
 
   /// Xin quyền Notification trên Android 13+ và iOS (chỉ xin nếu chưa được cấp)
   Future<bool> requestPermission() async {
     if (_plugin == null) return false;
 
-    final androidImplementation =
-        _plugin!.resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin>();
-    if (androidImplementation != null) {
-      final areEnabled = await androidImplementation.areNotificationsEnabled();
-      if (areEnabled == true) {
-        return true;
+    try {
+      final androidImplementation =
+          _plugin!.resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>();
+      if (androidImplementation != null) {
+        final areEnabled =
+            await androidImplementation.areNotificationsEnabled();
+        if (areEnabled == true) {
+          return true;
+        }
+        final granted =
+            await androidImplementation.requestNotificationsPermission();
+        return granted ?? false;
       }
-      final granted =
-          await androidImplementation.requestNotificationsPermission();
-      return granted ?? false;
-    }
 
-    final iosImplementation = _plugin!.resolvePlatformSpecificImplementation<
-        IOSFlutterLocalNotificationsPlugin>();
-    if (iosImplementation != null) {
-      final granted = await iosImplementation.requestPermissions(
-        alert: true,
-        badge: true,
-        sound: true,
-      );
-      return granted ?? false;
+      final iosImplementation = _plugin!.resolvePlatformSpecificImplementation<
+          IOSFlutterLocalNotificationsPlugin>();
+      if (iosImplementation != null) {
+        final granted = await iosImplementation.requestPermissions(
+          alert: true,
+          badge: true,
+          sound: true,
+        );
+        return granted ?? false;
+      }
+    } catch (e) {
+      debugPrint('[NotificationService] Error requesting permission: $e');
     }
 
     return true;
   }
 
-  /// Xử lý điều hướng khi bấm vào thông báo
+  /// Hiển thị thông báo ngay lập tức lên thanh trạng thái Android/iOS
+  Future<void> showImmediateNotification({
+    required int notificationId,
+    required String title,
+    required String body,
+    String? scheduleId,
+  }) async {
+    if (_plugin == null || !_isInitialized) return;
+    try {
+      final payload = scheduleId != null && scheduleId.isNotEmpty
+          ? '$payloadPrefix${jsonEncode({'scheduleId': scheduleId})}'
+          : null;
+      await _plugin!.show(
+        notificationId,
+        title,
+        body,
+        _notificationDetails,
+        payload: payload,
+      );
+    } catch (e) {
+      debugPrint(
+          '[NotificationService] Error showing immediate notification: $e');
+    }
+  }
+
+  /// Xử lý điều hướng khi bấm vào thông báo trên thanh trạng thái
   static void handleNotificationPayload(String rawPayload) {
     try {
       String payload = rawPayload;
@@ -148,13 +265,8 @@ class LocalNotificationService {
         scheduleId = map['scheduleId'] ?? payload;
       }
 
-      if (scheduleId.isNotEmpty && AppRoutes.navigatorKey.currentState != null) {
-        AppRoutes.navigatorKey.currentState!.push(
-          MaterialPageRoute(
-            builder: (_) =>
-                RecurringTransactionScreen(targetScheduleId: scheduleId),
-          ),
-        );
+      if (scheduleId.isNotEmpty) {
+        onOpenRecurringSchedule?.call(scheduleId);
       }
     } catch (e) {
       debugPrint('[NotificationService] Error handling payload: $e');
@@ -180,7 +292,7 @@ class LocalNotificationService {
     DateTime? referenceDate,
     int maxDaysAhead = 90,
   }) {
-    if (!schedule.isActive || schedule.reminderDaysBefore == 0) {
+    if (!schedule.isActive) {
       return [];
     }
 
@@ -195,18 +307,23 @@ class LocalNotificationService {
       daysAhead: maxDaysAhead,
     );
 
-    final String displayName = (schedule.note != null &&
-            schedule.note!.trim().isNotEmpty)
-        ? schedule.note!.trim()
-        : (schedule.type == 'income' ? 'Thu nhập định kỳ' : 'Hóa đơn định kỳ');
-    final String isTypeLabel = schedule.type == 'income' ? 'Thu nhập' : 'Chi tiêu';
+    final String displayName =
+        (schedule.note != null && schedule.note!.trim().isNotEmpty)
+            ? schedule.note!.trim()
+            : (schedule.type == 'income'
+                ? 'Thu nhập định kỳ'
+                : 'Hóa đơn định kỳ');
+    final String isTypeLabel =
+        schedule.type == 'income' ? 'Thu nhập' : 'Chi tiêu';
     final String walletText = walletName ?? 'Ví';
     final String formattedAmount = AppFormatters.number(schedule.amount);
-    final bool isManual = schedule.postingMode == RecurringTransactionSchedule.postingModeManual;
+    final bool isManual =
+        schedule.postingMode == RecurringTransactionSchedule.postingModeManual;
 
     for (final date in occurrences) {
       final occurrenceKey = RecurringTransactionService.getOccurrenceKey(date);
-      final payload = '$payloadPrefix${jsonEncode({'scheduleId': schedule.scheduleId})}';
+      final payload =
+          '$payloadPrefix${jsonEncode({'scheduleId': schedule.scheduleId})}';
 
       // 1. Thông báo trước hạn (nếu reminderDaysBefore > 0)
       if (schedule.reminderDaysBefore > 0) {
@@ -226,7 +343,9 @@ class LocalNotificationService {
             notificationId: advanceId,
             scheduleId: schedule.scheduleId,
             scheduledTime: advanceDate,
-            title: isManual ? 'Sắp đến hạn cần xác nhận: $displayName' : 'Sắp đến hạn: $displayName',
+            title: isManual
+                ? 'Sắp đến hạn cần xác nhận: $displayName'
+                : 'Sắp đến hạn: $displayName',
             body: isManual
                 ? '$isTypeLabel: $formattedAmountđ • Ví: $walletText • Còn ${schedule.reminderDaysBefore} ngày (Cần xác nhận)'
                 : '$isTypeLabel: $formattedAmountđ • Ví: $walletText • Còn ${schedule.reminderDaysBefore} ngày',
@@ -246,14 +365,15 @@ class LocalNotificationService {
       );
 
       if (dueDateNotificationTime.isAfter(now)) {
-        final dueId = generateNotificationId(
-            schedule.scheduleId, occurrenceKey,
+        final dueId = generateNotificationId(schedule.scheduleId, occurrenceKey,
             isOnDueDate: true);
         items.add(ScheduledNotificationItem(
           notificationId: dueId,
           scheduleId: schedule.scheduleId,
           scheduledTime: dueDateNotificationTime,
-          title: isManual ? 'Hôm nay cần xác nhận: $displayName' : 'Hôm nay đến hạn: $displayName',
+          title: isManual
+              ? 'Hôm nay cần xác nhận: $displayName'
+              : 'Hôm nay đến hạn: $displayName',
           body: isManual
               ? '$isTypeLabel: $formattedAmountđ • Ví: $walletText • Chờ bạn xác nhận'
               : '$isTypeLabel: $formattedAmountđ • Ví: $walletText',
@@ -275,9 +395,70 @@ class LocalNotificationService {
     if (_plugin == null || !_isInitialized) return;
 
     // Hủy các thông báo cũ trước khi lên lịch lại
-    await cancelRemindersForSchedule(schedule.scheduleId);
+    await cancelRemindersForSchedule(
+      schedule.scheduleId,
+      currentNextDueDate: schedule.nextDueDate,
+    );
 
-    if (!schedule.isActive || schedule.reminderDaysBefore == 0) return;
+    if (!schedule.isActive) return;
+
+    final now = referenceDate ?? DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final dueDay = DateTime(
+      schedule.nextDueDate.year,
+      schedule.nextDueDate.month,
+      schedule.nextDueDate.day,
+    );
+
+    final String displayName =
+        (schedule.note != null && schedule.note!.trim().isNotEmpty)
+            ? schedule.note!.trim()
+            : (schedule.type == 'income'
+                ? 'Thu nhập định kỳ'
+                : 'Hóa đơn định kỳ');
+    final String formattedAmount = AppFormatters.number(schedule.amount);
+    final String occurrenceKey =
+        RecurringTransactionService.getOccurrenceKey(schedule.nextDueDate);
+
+    // Nếu người dùng tạo/sửa lịch sau 09:00 sáng mà ngày nhắc trước hoặc ngày đến hạn rơi vào đúng hôm nay,
+    // hiển thị ngay thông báo trên thanh trạng thái Android để không bị bỏ lỡ khung 09:00 sáng đã qua.
+    final todayNineAm = DateTime(now.year, now.month, now.day, 9, 0);
+    if (now.isAfter(todayNineAm)) {
+      if (dueDay == today) {
+        final dueId = generateNotificationId(
+          schedule.scheduleId,
+          occurrenceKey,
+          isOnDueDate: true,
+        );
+        await showImmediateNotification(
+          notificationId: dueId,
+          title: 'Giao dịch định kỳ đến hạn hôm nay',
+          body: '$displayName — $formattedAmount VNĐ — Đến hạn hôm nay.',
+          scheduleId: schedule.scheduleId,
+        );
+      } else if (schedule.reminderDaysBefore > 0) {
+        final reminderDay = DateTime(
+          dueDay.year,
+          dueDay.month,
+          dueDay.day - schedule.reminderDaysBefore,
+        );
+        if (!today.isBefore(reminderDay) && today.isBefore(dueDay)) {
+          final daysLeft = dueDay.difference(today).inDays;
+          final advId = generateNotificationId(
+            schedule.scheduleId,
+            occurrenceKey,
+            isOnDueDate: false,
+          );
+          await showImmediateNotification(
+            notificationId: advId,
+            title: 'Giao dịch định kỳ sắp đến hạn',
+            body:
+                '$displayName — $formattedAmount VNĐ — Đến hạn sau $daysLeft ngày.',
+            scheduleId: schedule.scheduleId,
+          );
+        }
+      }
+    }
 
     final items = calculateScheduledNotifications(
       schedule: schedule,
@@ -285,26 +466,16 @@ class LocalNotificationService {
       referenceDate: referenceDate,
     );
 
-    const androidDetails = AndroidNotificationDetails(
-      'recurring_bill_channel',
-      'Nhắc nhở hóa đơn & Giao dịch định kỳ',
-      channelDescription:
-          'Thông báo nhắc nhở khi đến hạn các khoản thu chi định kỳ',
-      importance: Importance.high,
-      priority: Priority.high,
-    );
-    const notificationDetails =
-        NotificationDetails(android: androidDetails, iOS: DarwinNotificationDetails());
-
     for (final item in items) {
       try {
-        final tzScheduledTime = tz.TZDateTime.from(item.scheduledTime, tz.local);
+        final tzScheduledTime =
+            tz.TZDateTime.from(item.scheduledTime, tz.local);
         await _plugin!.zonedSchedule(
           item.notificationId,
           item.title,
           item.body,
           tzScheduledTime,
-          notificationDetails,
+          _notificationDetails,
           androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
           uiLocalNotificationDateInterpretation:
               UILocalNotificationDateInterpretation.absoluteTime,
@@ -317,17 +488,58 @@ class LocalNotificationService {
     }
   }
 
+  /// Hủy thông báo của 1 kỳ cụ thể (khi kỳ đó đã được xác nhận, bỏ qua hoặc hoãn)
+  Future<void> cancelNotificationForOccurrence(
+    String scheduleId,
+    String occurrenceKey,
+  ) async {
+    if (_plugin == null || !_isInitialized) return;
+    try {
+      final dueId = generateNotificationId(
+        scheduleId,
+        occurrenceKey,
+        isOnDueDate: true,
+      );
+      final advId = generateNotificationId(
+        scheduleId,
+        occurrenceKey,
+        isOnDueDate: false,
+      );
+      await _plugin!.cancel(dueId);
+      await _plugin!.cancel(advId);
+    } catch (e) {
+      debugPrint(
+          '[NotificationService] Error canceling occurrence notification: $e');
+    }
+  }
+
   /// Hủy các thông báo liên quan đến 1 scheduleId (chỉ hủy notification thuộc Bill Reminder)
-  Future<void> cancelRemindersForSchedule(String scheduleId) async {
+  Future<void> cancelRemindersForSchedule(
+    String scheduleId, {
+    DateTime? currentNextDueDate,
+  }) async {
     if (_plugin == null || !_isInitialized) return;
 
-    final pending = await _plugin!.pendingNotificationRequests();
-    for (final req in pending) {
-      if (req.payload != null &&
-          req.payload!.startsWith(payloadPrefix) &&
-          req.payload!.contains(scheduleId)) {
-        await _plugin!.cancel(req.id);
+    try {
+      if (currentNextDueDate != null) {
+        final key =
+            RecurringTransactionService.getOccurrenceKey(currentNextDueDate);
+        await cancelNotificationForOccurrence(scheduleId, key);
       }
+      final todayKey =
+          RecurringTransactionService.getOccurrenceKey(DateTime.now());
+      await cancelNotificationForOccurrence(scheduleId, todayKey);
+
+      final pending = await _plugin!.pendingNotificationRequests();
+      for (final req in pending) {
+        if (req.payload != null &&
+            req.payload!.startsWith(payloadPrefix) &&
+            req.payload!.contains(scheduleId)) {
+          await _plugin!.cancel(req.id);
+        }
+      }
+    } catch (e) {
+      debugPrint('[NotificationService] Error canceling reminders: $e');
     }
   }
 
@@ -339,62 +551,55 @@ class LocalNotificationService {
   }) async {
     if (_plugin == null || !_isInitialized) return;
 
-    // Hủy các thông báo lặp cũ của Bill Reminder (dựa vào payloadPrefix)
-    final pending = await _plugin!.pendingNotificationRequests();
-    for (final req in pending) {
-      if (req.payload != null && req.payload!.startsWith(payloadPrefix)) {
-        await _plugin!.cancel(req.id);
-      }
-    }
-
-    int scheduledCount = 0;
-    const int maxTotalNotifications = 50; // Giới hạn tổng số thông báo
-
-    for (final schedule in schedules) {
-      if (scheduledCount >= maxTotalNotifications) break;
-      if (!schedule.isActive || schedule.reminderDaysBefore == 0) continue;
-
-      final walletName = walletNamesMap[schedule.walletId];
-      final items = calculateScheduledNotifications(
-        schedule: schedule,
-        walletName: walletName,
-        referenceDate: referenceDate,
-      );
-
-      const androidDetails = AndroidNotificationDetails(
-        'recurring_bill_channel',
-        'Nhắc nhở hóa đơn & Giao dịch định kỳ',
-        channelDescription:
-            'Thông báo nhắc nhở khi đến hạn các khoản thu chi định kỳ',
-        importance: Importance.high,
-        priority: Priority.high,
-      );
-      const notificationDetails = NotificationDetails(
-          android: androidDetails, iOS: DarwinNotificationDetails());
-
-      for (final item in items) {
-        if (scheduledCount >= maxTotalNotifications) break;
-
-        try {
-          final tzScheduledTime =
-              tz.TZDateTime.from(item.scheduledTime, tz.local);
-          await _plugin!.zonedSchedule(
-            item.notificationId,
-            item.title,
-            item.body,
-            tzScheduledTime,
-            notificationDetails,
-            androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
-            uiLocalNotificationDateInterpretation:
-                UILocalNotificationDateInterpretation.absoluteTime,
-            payload: item.payload,
-          );
-          scheduledCount++;
-        } catch (e) {
-          debugPrint(
-              '[NotificationService] Error scheduling notification ${item.notificationId}: $e');
+    try {
+      // Hủy các thông báo lặp cũ của Bill Reminder (dựa vào payloadPrefix)
+      final pending = await _plugin!.pendingNotificationRequests();
+      for (final req in pending) {
+        if (req.payload != null && req.payload!.startsWith(payloadPrefix)) {
+          await _plugin!.cancel(req.id);
         }
       }
+
+      int scheduledCount = 0;
+      const int maxTotalNotifications = 50; // Giới hạn tổng số thông báo
+
+      for (final schedule in schedules) {
+        if (scheduledCount >= maxTotalNotifications) break;
+        if (!schedule.isActive) continue;
+
+        final walletName = walletNamesMap[schedule.walletId];
+        final items = calculateScheduledNotifications(
+          schedule: schedule,
+          walletName: walletName,
+          referenceDate: referenceDate,
+        );
+
+        for (final item in items) {
+          if (scheduledCount >= maxTotalNotifications) break;
+
+          try {
+            final tzScheduledTime =
+                tz.TZDateTime.from(item.scheduledTime, tz.local);
+            await _plugin!.zonedSchedule(
+              item.notificationId,
+              item.title,
+              item.body,
+              tzScheduledTime,
+              _notificationDetails,
+              androidScheduleMode: AndroidScheduleMode.inexactAllowWhileIdle,
+              uiLocalNotificationDateInterpretation:
+                  UILocalNotificationDateInterpretation.absoluteTime,
+              payload: item.payload,
+            );
+            scheduledCount++;
+          } catch (e) {
+            debugPrint(
+                '[NotificationService] Error scheduling notification ${item.notificationId}: $e');
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[NotificationService] Error syncing all reminders: $e');
     }
   }
 }

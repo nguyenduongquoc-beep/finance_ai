@@ -248,6 +248,40 @@ List<String> sanitizeGeminiModelChain({
   return List<String>.unmodifiable(result);
 }
 
+const Set<String> kForbiddenSecretFieldKeys = {
+  'apikey',
+  'geminiapikey',
+  'gemini_api_key',
+  'api_key',
+  'secret',
+  'privatekey',
+  'private_key',
+  'secretsalt',
+  'accesstoken',
+};
+
+/// Kiểm tra đệ quy xem payload có chứa key nhạy cảm (API Key, Secret, Private Key...) không.
+bool containsForbiddenSecretField(Object? value) {
+  if (value is Map) {
+    for (final entry in value.entries) {
+      final keyLower = entry.key.toString().toLowerCase().trim();
+      if (kForbiddenSecretFieldKeys.contains(keyLower)) {
+        return true;
+      }
+      if (containsForbiddenSecretField(entry.value)) {
+        return true;
+      }
+    }
+  } else if (value is List) {
+    for (final item in value) {
+      if (containsForbiddenSecretField(item)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 /// ============================================================================
 /// CANONICAL JSON & RFC-6234 SHA-256 IMPLEMENTATION (PURE DART)
 /// Đảm bảo mã băm cấu hình (Config Digest) tính trên Dart (Mobile / Admin Web)
@@ -466,12 +500,8 @@ LƯU Ý: Tuyệt đối không kết luận gian lận, không tư vấn đầu 
   const AiRuntimeConfig({
     this.version = 1,
     this.isEnabled = true,
-    this.primaryModel = 'gemini-3.5-flash',
-    this.fallbackModels = const [
-      'gemini-3.5-flash-lite',
-      'gemini-3.6-flash',
-      'gemini-flash-latest',
-    ],
+    this.primaryModel = kDefaultPrimaryModel,
+    this.fallbackModels = kDefaultFallbackModels,
     this.temperature = 0.35,
     this.maxChatHistoryMessages = 10,
     this.chatSystemInstruction = defaultChatSystemInstruction,
@@ -484,6 +514,13 @@ LƯU Ý: Tuyệt đối không kết luận gian lận, không tư vấn đầu 
     this.updatedBy,
     this.changeNote,
   });
+
+  static const String kDefaultPrimaryModel = 'gemini-3.5-flash';
+  static const List<String> kDefaultFallbackModels = [
+    'gemini-3.5-flash-lite',
+    'gemini-3.6-flash',
+    'gemini-flash-latest',
+  ];
 
   factory AiRuntimeConfig.defaults() => const AiRuntimeConfig();
 
@@ -633,43 +670,10 @@ LƯU Ý: Tuyệt đối không kết luận gian lận, không tư vấn đầu 
 
   String get canonicalHash => computeCanonicalConfigHash(toPayloadMap());
 
-  static const Set<String> _forbiddenSecretKeys = {
-    'apikey',
-    'geminiapikey',
-    'gemini_api_key',
-    'api_key',
-    'secret',
-    'privatekey',
-    'private_key',
-    'secretsalt',
-    'accesstoken',
-  };
-
-  static bool _containsForbiddenSecretField(Object? value) {
-    if (value is Map) {
-      for (final entry in value.entries) {
-        final keyLower = entry.key.toString().toLowerCase().trim();
-        if (_forbiddenSecretKeys.contains(keyLower)) {
-          return true;
-        }
-        if (_containsForbiddenSecretField(entry.value)) {
-          return true;
-        }
-      }
-    } else if (value is List) {
-      for (final item in value) {
-        if (_containsForbiddenSecretField(item)) {
-          return true;
-        }
-      }
-    }
-    return false;
-  }
-
   /// Kiểm tra hợp lệ một Map cấu hình thô trước khi lưu nháp hoặc Publish
   static List<String> validateRawInput(Map<String, dynamic> raw) {
     final errors = <String>[];
-    if (_containsForbiddenSecretField(raw)) {
+    if (containsForbiddenSecretField(raw)) {
       errors.add(
         'Tuyệt đối không được đưa API Key hoặc khóa bí mật vào cấu hình động.',
       );
@@ -1040,102 +1044,175 @@ class FinancialHeuristicsConfig {
 
   String get canonicalHash => computeCanonicalConfigHash(toPayloadMap());
 
-  /// Kiểm tra tính hợp lệ và tính nhất quán của dữ liệu thô do Admin nhập
+  /// Kiểm tra tính hợp lệ và tính nhất quán của dữ liệu thô do Admin nhập (khớp 1:1 với Server)
   static List<String> validateRawInput(Map<String, dynamic> raw) {
     final errors = <String>[];
+    if (containsForbiddenSecretField(raw)) {
+      errors.add(
+        'Tuyệt đối không được đưa API Key hoặc khóa bí mật vào cấu hình tham số định lượng.',
+      );
+    }
 
-    void checkRange(String key, String label, double min, double max) {
-      final v = (raw[key] as num?)?.toDouble();
-      if (v == null || v.isNaN || v < min || v > max) {
+    void checkDoubleRange(String key, String label, double min, double max) {
+      final rawVal = raw[key];
+      if (rawVal is! num) {
+        errors.add('$label phải là số trong khoảng $min đến $max.');
+        return;
+      }
+      final v = rawVal.toDouble();
+      if (v.isNaN || v.isInfinite || v < min || v > max) {
         errors.add('$label phải nằm trong khoảng $min đến $max.');
       }
     }
 
-    checkRange('categorySpikeRatio', 'Ngưỡng đột biến danh mục', 0.15, 0.60);
-    checkRange(
+    void checkIntRange(String key, String label, int min, int max) {
+      final rawVal = raw[key];
+      if (rawVal is! num) {
+        errors.add('$label phải là số nguyên trong khoảng $min đến $max.');
+        return;
+      }
+      final d = rawVal.toDouble();
+      if (d.isNaN || d.isInfinite || d != rawVal.toInt().toDouble()) {
+        errors.add('$label phải là số nguyên hợp lệ.');
+        return;
+      }
+      final iv = rawVal.toInt();
+      if (iv < min || iv > max) {
+        errors.add('$label phải nằm trong khoảng $min đến $max.');
+      }
+    }
+
+    checkDoubleRange('categorySpikeRatio', 'Ngưỡng đột biến danh mục', 0.15, 0.60);
+    checkDoubleRange(
       'categoryIncomeShareThreshold',
       'Ngưỡng tỷ trọng danh mục/thu nhập',
       0.15,
       0.50,
     );
-    checkRange(
+    checkDoubleRange(
       'minRecommendedSavingRate',
       'Tỷ lệ tiết kiệm khuyến nghị',
       0.05,
       0.40,
     );
-    checkRange(
+    checkDoubleRange(
+      'incomeDropWarningRatio',
+      'Ngưỡng cảnh báo sụt giảm thu nhập',
+      0.10,
+      0.40,
+    );
+    checkDoubleRange(
+      'incomeDropCriticalRatio',
+      'Ngưỡng nghiêm trọng sụt giảm thu nhập',
+      0.25,
+      0.70,
+    );
+    checkDoubleRange(
       'defaultSavingRateNoGoal',
       'Tỷ lệ tiết kiệm mặc định khi chưa có mục tiêu',
       0.05,
       0.35,
     );
-    checkRange(
+    checkDoubleRange(
       'flexibleSpendFloorRatio',
       'Ngưỡng sàn chi tiêu linh hoạt',
       0.50,
       0.85,
     );
-    checkRange(
+    checkDoubleRange(
       'planBudgetAdherenceWeight',
       'Trọng số điểm tuân thủ ngân sách',
       0.40,
       0.80,
     );
-    checkRange(
+    checkDoubleRange(
       'budgetNearLimitRatio',
       'Ngưỡng cảnh báo sắp vượt ngân sách',
       0.70,
       0.95,
     );
-    checkRange(
+    checkDoubleRange(
       'categoryForecastWarningRatio',
       'Ngưỡng cảnh báo dự báo danh mục tháng',
       1.15,
       1.60,
     );
-    checkRange(
+    checkDoubleRange(
       'categoryForecastCriticalRatio',
       'Ngưỡng nghiêm trọng dự báo danh mục tháng',
       1.40,
       2.50,
     );
-    checkRange(
+    checkDoubleRange(
+      'categoryForecastMinDiffVnd',
+      'Chênh lệch tối thiểu cảnh báo dự báo danh mục',
+      50000.0,
+      500000.0,
+    );
+    checkIntRange(
+      'healthNegativeBalancePenalty',
+      'Điểm trừ số dư dự báo âm',
+      10,
+      40,
+    );
+    checkIntRange(
+      'healthBudgetExceededPenalty',
+      'Điểm trừ ngân sách vượt hạn mức',
+      5,
+      25,
+    );
+    checkIntRange(
+      'healthBudgetAtRiskPenalty',
+      'Điểm trừ ngân sách có nguy cơ vượt',
+      5,
+      20,
+    );
+    checkDoubleRange(
+      'txAnomalyMinDiffVnd',
+      'Chênh lệch tối thiểu giao dịch bất thường',
+      50000.0,
+      500000.0,
+    );
+    checkDoubleRange(
       'txAnomalyWarningMultiplier',
       'Hệ số cảnh báo giao dịch lẻ bất thường',
       1.5,
       3.5,
     );
-    checkRange(
+    checkDoubleRange(
       'txAnomalyCriticalMultiplier',
       'Hệ số nghiêm trọng giao dịch lẻ bất thường',
       3.0,
       6.0,
     );
 
-    final minRec = (raw['minRecommendedSavingRate'] as num?)?.toDouble() ?? 0.20;
-    final defSav = (raw['defaultSavingRateNoGoal'] as num?)?.toDouble() ?? 0.15;
-    if (defSav > minRec) {
+    final minRec = (raw['minRecommendedSavingRate'] as num?)?.toDouble();
+    final defSav = (raw['defaultSavingRateNoGoal'] as num?)?.toDouble();
+    if (minRec != null && defSav != null && defSav > minRec + 1e-9) {
       errors.add(
         'Tỷ lệ tiết kiệm mặc định khi chưa có mục tiêu ($defSav) không được lớn hơn tỷ lệ tiết kiệm khuyến nghị chuẩn ($minRec).',
       );
     }
 
-    final catWarn =
-        (raw['categoryForecastWarningRatio'] as num?)?.toDouble() ?? 1.30;
-    final catCrit =
-        (raw['categoryForecastCriticalRatio'] as num?)?.toDouble() ?? 1.60;
-    if (catCrit < catWarn + 0.15) {
+    final incWarn = (raw['incomeDropWarningRatio'] as num?)?.toDouble();
+    final incCrit = (raw['incomeDropCriticalRatio'] as num?)?.toDouble();
+    if (incWarn != null && incCrit != null && incCrit + 1e-9 < incWarn + 0.10) {
+      errors.add(
+        'Ngưỡng sụt giảm thu nhập nghiêm trọng ($incCrit) phải lớn hơn ngưỡng cảnh báo ($incWarn) ít nhất 0.10.',
+      );
+    }
+
+    final catWarn = (raw['categoryForecastWarningRatio'] as num?)?.toDouble();
+    final catCrit = (raw['categoryForecastCriticalRatio'] as num?)?.toDouble();
+    if (catWarn != null && catCrit != null && catCrit + 1e-9 < catWarn + 0.15) {
       errors.add(
         'Ngưỡng dự báo nghiêm trọng ($catCrit) phải lớn hơn ngưỡng cảnh báo ($catWarn) ít nhất 0.15.',
       );
     }
 
-    final txWarn =
-        (raw['txAnomalyWarningMultiplier'] as num?)?.toDouble() ?? 2.0;
-    final txCrit =
-        (raw['txAnomalyCriticalMultiplier'] as num?)?.toDouble() ?? 4.0;
-    if (txCrit < txWarn + 1.0) {
+    final txWarn = (raw['txAnomalyWarningMultiplier'] as num?)?.toDouble();
+    final txCrit = (raw['txAnomalyCriticalMultiplier'] as num?)?.toDouble();
+    if (txWarn != null && txCrit != null && txCrit + 1e-9 < txWarn + 1.0) {
       errors.add(
         'Hệ số giao dịch bất thường nghiêm trọng (${txCrit}x) phải lớn hơn hệ số cảnh báo (${txWarn}x) ít nhất 1.0x.',
       );
@@ -1171,6 +1248,170 @@ const Map<String, String> kCanonicalIncomeGroupLabels = {
 /// 3 Loại ví chuẩn để ánh xạ với nhà cung cấp thanh toán trên hóa đơn
 const List<String> kCanonicalWalletTypes = ['cash', 'eWallet', 'bank'];
 
+/// Bộ từ khóa chi tiêu mặc định được bảo vệ (chỉ đọc, không thể bị vô hiệu hóa hoặc ghi đè).
+const Map<String, List<String>> kProtectedBuiltInExpenseKeywords = {
+  'di chuyen': [
+    'grab',
+    'be',
+    'xanh sm',
+    'gojek',
+    'taxi',
+    'xang',
+    'xe bus',
+    've xe',
+    'gui xe',
+    'bai xe',
+    'di chuyen',
+    'giao thong',
+  ],
+  'an uong': [
+    'highlands',
+    'starbucks',
+    'ca phe',
+    'pho',
+    'com',
+    'tra sua',
+    'kfc',
+    'mcdonalds',
+    'lotte',
+    'nha hang',
+    'an sang',
+    'an trua',
+    'an toi',
+    'banh mi',
+    'nuoc ep',
+    'tai xin',
+    'quan an',
+    'bun',
+    'lau',
+    'nuong',
+    'tra',
+    'banh',
+    'food',
+    'coffee',
+    'sua da',
+    'bac xiu',
+    'matcha',
+    'sinh to',
+  ],
+  'mua sam': [
+    'shopee',
+    'lazada',
+    'tiki',
+    'sieu thi',
+    'quan ao',
+    'giay',
+    'bach hoa xanh',
+    'winmart',
+    'circle k',
+    '7-eleven',
+    'mua sam',
+    'thoi trang',
+    'my pham',
+    'shopping',
+  ],
+  'hoa don': [
+    'dien',
+    'nuoc',
+    'internet',
+    'wifi',
+    'truyen hinh',
+    'tien dien',
+    'tien nuoc',
+    'tien nha',
+    'rac',
+    'hoa don',
+    'dich vu',
+    'bill',
+  ],
+  'suc khoe': [
+    'thuoc',
+    'nha thuoc',
+    'benh vien',
+    'phong kham',
+    'kham benh',
+    'pharmedic',
+    'pharmacity',
+    'long chau',
+    'y te',
+    'suc khoe',
+  ],
+  'giai tri': [
+    'xem phim',
+    'cgv',
+    'lotte cinema',
+    'du lich',
+    'game',
+    've xem phim',
+    'giai tri',
+    'cinema',
+    'movie',
+  ],
+  'giao duc': [
+    'hoc phi',
+    'sach',
+    'khoa hoc',
+    'giao duc',
+    'truong hoc',
+    'hoc tap',
+    'hoc tieng anh',
+  ],
+};
+
+/// Bộ từ khóa thu nhập mặc định được bảo vệ (chỉ đọc, không thể bị vô hiệu hóa hoặc ghi đè).
+const Map<String, List<String>> kProtectedBuiltInIncomeKeywords = {
+  'thuong': ['thuong', 'tien thuong', 'bonus', 'khen thuong', 'thuong tet'],
+  'luong': [
+    'luong',
+    'thuong',
+    'income',
+    'salary',
+    'tien luong',
+    'tien thuong',
+    'freelance',
+    'hoa hong',
+    'ban hang',
+    'doanh thu',
+    'thu nhap',
+    'bonus',
+  ],
+};
+
+/// Khóa nhà cung cấp thanh toán mặc định hệ thống được bảo vệ (không cho phép ghi đè).
+const List<String> kProtectedPaymentProviderKeys = [
+  'cash',
+  'momo',
+  'zalopay',
+  'shopeepay',
+  'vnpay',
+  'viettel_money',
+  'apple_pay',
+  'google_pay',
+  'samsung_pay',
+  'mbbank',
+  'vietcombank',
+  'techcombank',
+  'vietinbank',
+  'bidv',
+  'agribank',
+  'acb',
+  'tpbank',
+  'vpbank',
+  'sacombank',
+  'vib',
+  'hdbank',
+  'shb',
+  'msb',
+  'ocb',
+  'seabank',
+  'lpbank',
+  'eximbank',
+  'cake',
+  'timo',
+  'generic_bank',
+  'generic_ewallet',
+];
+
 /// Chuẩn hóa chuỗi tiếng Việt không dấu, chữ thường để đối chiếu từ khóa
 String normalizeVietnameseKeyword(String input) {
   var str = input.toLowerCase().trim();
@@ -1198,6 +1439,7 @@ class CustomPaymentProviderRule {
   final String walletType; // 'cash' | 'eWallet' | 'bank'
   final List<String> receiptKeywords;
   final List<String> walletNameAliases;
+  final bool isActive;
 
   const CustomPaymentProviderRule({
     required this.key,
@@ -1205,6 +1447,7 @@ class CustomPaymentProviderRule {
     required this.walletType,
     required this.receiptKeywords,
     required this.walletNameAliases,
+    this.isActive = true,
   });
 
   factory CustomPaymentProviderRule.fromMap(Map<String, dynamic> map) {
@@ -1232,6 +1475,7 @@ class CustomPaymentProviderRule {
       walletType: safeType,
       receiptKeywords: rawKeywords,
       walletNameAliases: rawAliases.isEmpty ? rawKeywords : rawAliases,
+      isActive: map['isActive'] != false,
     );
   }
 
@@ -1242,6 +1486,7 @@ class CustomPaymentProviderRule {
       'walletType': walletType,
       'receiptKeywords': receiptKeywords,
       'walletNameAliases': walletNameAliases,
+      'isActive': isActive,
     };
   }
 }
@@ -1269,6 +1514,7 @@ class TransactionIntelligenceConfig {
   final Map<String, List<String>> addedExpenseKeywords;
   final Map<String, List<String>> addedIncomeKeywords;
   final List<String> disabledBuiltInKeywords;
+  final List<String> disabledAdminKeywords;
   final List<CustomPaymentProviderRule> customPaymentProviders;
   final DateTime? updatedAt;
   final String? updatedBy;
@@ -1279,6 +1525,7 @@ class TransactionIntelligenceConfig {
     this.addedExpenseKeywords = const {},
     this.addedIncomeKeywords = const {},
     this.disabledBuiltInKeywords = const [],
+    this.disabledAdminKeywords = const [],
     this.customPaymentProviders = const [],
     this.updatedAt,
     this.updatedBy,
@@ -1337,6 +1584,13 @@ class TransactionIntelligenceConfig {
             .toList() ??
         const [];
 
+    final disabledAdminList = (p['disabledAdminKeywords'] as List<dynamic>?)
+            ?.map((e) => normalizeVietnameseKeyword(e.toString()))
+            .where((s) => s.length >= 2)
+            .toSet()
+            .toList() ??
+        const [];
+
     final providers = <CustomPaymentProviderRule>[];
     if (p['customPaymentProviders'] is List) {
       for (final item in (p['customPaymentProviders'] as List)) {
@@ -1358,6 +1612,7 @@ class TransactionIntelligenceConfig {
       addedExpenseKeywords: expMap,
       addedIncomeKeywords: incMap,
       disabledBuiltInKeywords: disabledList,
+      disabledAdminKeywords: disabledAdminList,
       customPaymentProviders: providers,
       updatedAt: map['updatedAt'] != null
           ? DateTime.tryParse(map['updatedAt'].toString())
@@ -1372,6 +1627,8 @@ class TransactionIntelligenceConfig {
       'addedExpenseKeywords': addedExpenseKeywords,
       'addedIncomeKeywords': addedIncomeKeywords,
       'disabledBuiltInKeywords': disabledBuiltInKeywords,
+      if (disabledAdminKeywords.isNotEmpty)
+        'disabledAdminKeywords': disabledAdminKeywords,
       'customPaymentProviders':
           customPaymentProviders.map((e) => e.toMap()).toList(),
     };
@@ -1426,13 +1683,10 @@ class TransactionIntelligenceConfig {
       );
     }
 
-    final disabledSet =
-        disabledBuiltInKeywords.map(normalizeVietnameseKeyword).toSet();
-
+    // Luôn kiểm tra TOÀN BỘ từ khóa built-in được bảo vệ (tuyệt đối không loại trừ qua disabledBuiltInKeywords)
     for (final groupKey in allowedKeys) {
       final builtIn = (builtInKeywordsByGroup[groupKey] ?? const [])
-          .map(normalizeVietnameseKeyword)
-          .where((k) => !disabledSet.contains(k));
+          .map(normalizeVietnameseKeyword);
       final added = (addedKeywordsByGroup[groupKey] ?? const [])
           .map(normalizeVietnameseKeyword);
       final combined = <String>{...builtIn, ...added};
@@ -1472,6 +1726,204 @@ class TransactionIntelligenceConfig {
       warningMessage: shortWarning,
     );
   }
+
+  /// Kiểm tra toàn diện payload `transaction_rules` khớp 1:1 với Server validation.
+  static List<String> validateRawInput(Map<String, dynamic> raw) {
+    final errors = <String>[];
+    if (containsForbiddenSecretField(raw)) {
+      errors.add(
+        'Tuyệt đối không được đưa API Key hoặc khóa bí mật vào cấu hình từ điển.',
+      );
+    }
+
+    // 1. Chặn vô hiệu hóa từ khóa built-in mặc định hệ thống
+    final rawDisabledBuiltIn = raw['disabledBuiltInKeywords'];
+    if (rawDisabledBuiltIn != null) {
+      if (rawDisabledBuiltIn is! List) {
+        errors.add('disabledBuiltInKeywords phải là danh sách.');
+      } else if (rawDisabledBuiltIn.isNotEmpty) {
+        errors.add(
+          'Không được phép vô hiệu hóa từ khóa mặc định hệ thống (Built-in Keywords là quy tắc lõi chỉ đọc).',
+        );
+      }
+    }
+
+    // 2. Kiểm tra danh sách disabledAdminKeywords (nếu có)
+    final rawDisabledAdmin = raw['disabledAdminKeywords'];
+    if (rawDisabledAdmin != null) {
+      if (rawDisabledAdmin is! List) {
+        errors.add('disabledAdminKeywords phải là danh sách chuỗi.');
+      } else {
+        for (final item in rawDisabledAdmin) {
+          final norm = normalizeVietnameseKeyword(item.toString());
+          if (item is! String || norm.length < 2 || norm.length > 60) {
+            errors.add(
+              'disabledAdminKeywords chứa phần tử không hợp lệ: "$item".',
+            );
+          }
+        }
+      }
+    }
+
+    void validateKeywordMap({
+      required Object? rawMap,
+      required String sectionLabel,
+      required Iterable<String> allowedGroups,
+      required Map<String, List<String>> builtInMap,
+    }) {
+      if (rawMap == null) return;
+      if (rawMap is! Map) {
+        errors.add('$sectionLabel phải là Map nhóm chuẩn -> danh sách từ khóa.');
+        return;
+      }
+
+      final builtInGroupsByKw = <String, Set<String>>{};
+      for (final g in allowedGroups) {
+        for (final kw in (builtInMap[g] ?? const <String>[])) {
+          final norm = normalizeVietnameseKeyword(kw);
+          if (norm.isEmpty) continue;
+          builtInGroupsByKw.putIfAbsent(norm, () => <String>{}).add(g);
+        }
+      }
+
+      final adminGroupByKw = <String, String>{};
+      for (final entry in rawMap.entries) {
+        final groupKey = normalizeVietnameseKeyword(entry.key.toString());
+        if (!allowedGroups.contains(groupKey)) {
+          errors.add(
+            'Nhóm ngữ nghĩa "${entry.key}" trong $sectionLabel không thuộc nhóm chuẩn hệ thống.',
+          );
+          continue;
+        }
+        if (entry.value is! List) {
+          errors.add('Danh sách từ khóa nhóm "$groupKey" phải là mảng.');
+          continue;
+        }
+        final seenInGroup = <String>{};
+        for (final item in (entry.value as List)) {
+          if (item is! String) {
+            errors.add('Từ khóa trong nhóm "$groupKey" phải là chuỗi.');
+            continue;
+          }
+          final normKw = normalizeVietnameseKeyword(item);
+          if (normKw.length < 2 || normKw.length > 60) {
+            errors.add(
+              'Từ khóa "$item" trong nhóm "$groupKey" phải dài từ 2 đến 60 ký tự.',
+            );
+            continue;
+          }
+          if (seenInGroup.contains(normKw)) {
+            errors.add(
+              'Từ khóa "$normKw" bị trùng lặp trong cùng nhóm "$groupKey".',
+            );
+            continue;
+          }
+          seenInGroup.add(normKw);
+
+          final builtInGroups = builtInGroupsByKw[normKw];
+          if (builtInGroups != null && builtInGroups.isNotEmpty) {
+            if (builtInGroups.contains(groupKey)) {
+              errors.add(
+                'Từ khóa "$normKw" đã tồn tại trong từ điển mặc định hệ thống của nhóm "$groupKey".',
+              );
+            } else {
+              errors.add(
+                'Xung đột với từ khóa mặc định được bảo vệ: "$normKw" đang thuộc nhóm "${builtInGroups.first}".',
+              );
+            }
+            continue;
+          }
+
+          final prevAdminGroup = adminGroupByKw[normKw];
+          if (prevAdminGroup != null && prevAdminGroup != groupKey) {
+            errors.add(
+              'Xung đột từ khóa bổ sung giữa hai nhóm "$prevAdminGroup" và "$groupKey" cho từ "$normKw".',
+            );
+            continue;
+          }
+          adminGroupByKw[normKw] = groupKey;
+        }
+      }
+    }
+
+    validateKeywordMap(
+      rawMap: raw['addedExpenseKeywords'],
+      sectionLabel: 'addedExpenseKeywords',
+      allowedGroups: kCanonicalExpenseGroupLabels.keys,
+      builtInMap: kProtectedBuiltInExpenseKeywords,
+    );
+    validateKeywordMap(
+      rawMap: raw['addedIncomeKeywords'],
+      sectionLabel: 'addedIncomeKeywords',
+      allowedGroups: kCanonicalIncomeGroupLabels.keys,
+      builtInMap: kProtectedBuiltInIncomeKeywords,
+    );
+
+    // 3. Kiểm tra danh sách nhà cung cấp thanh toán mở rộng
+    final rawProviders = raw['customPaymentProviders'];
+    if (rawProviders != null) {
+      if (rawProviders is! List) {
+        errors.add('customPaymentProviders phải là danh sách.');
+      } else {
+        final seenKeys = <String>{};
+        for (final item in rawProviders) {
+          if (item is! Map) {
+            errors.add('Mỗi mục trong customPaymentProviders phải là Map hợp lệ.');
+            continue;
+          }
+          final rawKey = (item['key'] ?? '').toString();
+          final normKey = normalizeVietnameseKeyword(rawKey).replaceAll(' ', '_');
+          if (!RegExp(r'^[a-z0-9_]{2,40}$').hasMatch(normKey)) {
+            errors.add(
+              'Mã nhà cung cấp thanh toán "$rawKey" phải gồm 2-40 ký tự a-z, 0-9 hoặc _.',
+            );
+          } else if (kProtectedPaymentProviderKeys.contains(normKey)) {
+            errors.add(
+              'Không được phép ghi đè nhà cung cấp thanh toán mặc định được bảo vệ: "$normKey".',
+            );
+          } else if (seenKeys.contains(normKey)) {
+            errors.add('Mã nhà cung cấp thanh toán "$normKey" bị trùng lặp.');
+          } else {
+            seenKeys.add(normKey);
+          }
+
+          final label = (item['displayLabel'] ?? '').toString().trim();
+          if (label.length < 2 || label.length > 60) {
+            errors.add(
+              'Tên hiển thị nhà cung cấp "${normKey.isEmpty ? rawKey : normKey}" phải từ 2 đến 60 ký tự.',
+            );
+          }
+
+          final walletType = item['walletType'];
+          if (!kCanonicalWalletTypes.contains(walletType)) {
+            errors.add(
+              'walletType "$walletType" không hợp lệ (chỉ nhận cash, eWallet, bank).',
+            );
+          }
+
+          if (item.containsKey('isActive') && item['isActive'] is! bool) {
+            errors.add('Trường isActive của nhà cung cấp phải là bool.');
+          }
+
+          final receiptKws = item['receiptKeywords'];
+          if (receiptKws is! List || receiptKws.isEmpty) {
+            errors.add(
+              'Nhà cung cấp "${normKey.isEmpty ? label : normKey}" phải có ít nhất 1 receiptKeywords.',
+            );
+          } else {
+            for (final kw in receiptKws) {
+              final normKw = normalizeVietnameseKeyword(kw.toString());
+              if (kw is! String || normKw.length < 2 || normKw.length > 60) {
+                errors.add('receiptKeywords chứa từ khóa không hợp lệ: "$kw".');
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return errors;
+  }
 }
 
 /// ============================================================================
@@ -1504,6 +1956,88 @@ class FinancialKnowledgeArticle {
   static const int kMaxSummaryLength = 250;
   static const int kMaxSnippetLength = 300;
   static const int kMaxInjectedSnippetsPerPrompt = 3;
+  static const List<String> kAllowedTopics = [
+    'budget_rule',
+    'saving_strategy',
+    'spending_control',
+    'crisis_recovery',
+  ];
+
+  static List<String> validateRawInput(Map<String, dynamic> raw) {
+    final errors = <String>[];
+    if (containsForbiddenSecretField(raw)) {
+      errors.add(
+        'Tuyệt đối không được chứa API Key hoặc khóa bí mật trong bài viết tri thức.',
+      );
+    }
+
+    final articleId = (raw['articleId'] ?? '').toString().trim();
+    if (!RegExp(r'^[a-zA-Z0-9_-]{3,80}$').hasMatch(articleId)) {
+      errors.add(
+        'articleId phải dài 3-80 ký tự và chỉ gồm chữ cái, số, "_" hoặc "-".',
+      );
+    }
+
+    final title = (raw['title'] ?? '').toString().trim();
+    if (title.length < 3 || title.length > 120) {
+      errors.add('Tiêu đề bài viết phải dài từ 3 đến 120 ký tự.');
+    }
+
+    final topic = (raw['topic'] ?? '').toString().trim();
+    if (!kAllowedTopics.contains(topic)) {
+      errors.add('Chủ đề (topic) "$topic" không hợp lệ.');
+    }
+
+    final triggerCode = (raw['triggerCondition'] ?? '').toString().trim();
+    final validTrigger = KnowledgeTriggerCondition.values
+        .any((e) => e.code == triggerCode);
+    if (!validTrigger) {
+      errors.add('Điều kiện kích hoạt (triggerCondition) "$triggerCode" không hợp lệ.');
+    }
+
+    final rawPriority = raw['priority'];
+    if (rawPriority is! num ||
+        rawPriority.toDouble() != rawPriority.toInt().toDouble() ||
+        rawPriority.toInt() < 1 ||
+        rawPriority.toInt() > 10) {
+      errors.add('Độ ưu tiên (priority) phải là số nguyên từ 1 đến 10.');
+    }
+
+    final summary = (raw['summaryForUser'] ?? '').toString().trim();
+    if (summary.isEmpty || summary.length > kMaxSummaryLength) {
+      errors.add(
+        'Tóm tắt cho người dùng bắt buộc nhập và tối đa $kMaxSummaryLength ký tự.',
+      );
+    }
+
+    final snippet = (raw['aiGroundingSnippet'] ?? '').toString().trim();
+    if (snippet.isEmpty || snippet.length > kMaxSnippetLength) {
+      errors.add(
+        'Đoạn tri thức tiêm vào AI bắt buộc nhập và tối đa $kMaxSnippetLength ký tự.',
+      );
+    }
+
+    final prompts = raw['suggestedPrompts'];
+    if (prompts != null) {
+      if (prompts is! List) {
+        errors.add('suggestedPrompts phải là danh sách chuỗi.');
+      } else if (prompts.length > 3) {
+        errors.add('suggestedPrompts tối đa chỉ được chứa 3 câu gợi ý.');
+      } else {
+        for (final p in prompts) {
+          if (p is! String || p.trim().isEmpty || p.trim().length > 120) {
+            errors.add('Mỗi câu gợi ý trong suggestedPrompts phải dài từ 1 đến 120 ký tự.');
+          }
+        }
+      }
+    }
+
+    if (raw.containsKey('isActive') && raw['isActive'] is! bool) {
+      errors.add('Trường isActive phải là bool.');
+    }
+
+    return errors;
+  }
 
   final String articleId;
   final String title;

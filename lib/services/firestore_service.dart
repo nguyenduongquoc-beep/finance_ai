@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart' hide Category;
 import 'package:intl/intl.dart';
@@ -10,9 +11,66 @@ import '../models/saving_goal_model.dart';
 import '../models/notification_model.dart';
 import '../models/recurring_transaction_model.dart';
 import '../models/recurring_transaction_occurrence_model.dart';
+import '../models/monthly_financial_plan.dart';
+import '../models/admin_audit_log_model.dart';
+import '../utils/formatters.dart';
+import 'financial_context_revision_tracker.dart';
+import 'local_notification_service.dart';
 import 'recurring_transaction_service.dart';
 import 'storage_service.dart';
 import '../utils/transaction_business_logic.dart';
+
+/// Exception chuyên biệt khi ví không đủ số dư để xác nhận giao dịch chi
+class InsufficientBalanceException implements Exception {
+  final String message;
+  final String walletName;
+  final double currentBalance;
+  final double requiredAmount;
+  final double shortfall;
+
+  InsufficientBalanceException({
+    required this.message,
+    required this.walletName,
+    required this.currentBalance,
+    required this.requiredAmount,
+    required this.shortfall,
+  });
+
+  @override
+  String toString() => message;
+}
+
+/// Exception khi truy vấn theo cửa sổ thời gian thiếu Composite Index trên Firestore.
+/// Tuyệt đối không cắt cụt dữ liệu âm thầm bằng .limit(400) mà thông báo tường minh.
+class FirestoreIndexRequiredException implements Exception {
+  final String message;
+  final String collection;
+
+  const FirestoreIndexRequiredException({
+    required this.message,
+    required this.collection,
+  });
+
+  @override
+  String toString() => message;
+}
+
+/// Exception khi phát hiện Ngân sách trên Firestore đã bị thay đổi trong lúc người dùng
+/// đang xem trước Kế hoạch (Optimistic Concurrency Conflict).
+class PlanBudgetConflictException implements Exception {
+  final String message;
+  final List<String> conflictingCategoryIds;
+  final Map<String, double?> latestBudgetsByCategory;
+
+  const PlanBudgetConflictException({
+    required this.message,
+    required this.conflictingCategoryIds,
+    required this.latestBudgetsByCategory,
+  });
+
+  @override
+  String toString() => message;
+}
 
 /// ============================================================
 /// FIRESTORE SERVICE
@@ -20,10 +78,10 @@ import '../utils/transaction_business_logic.dart';
 /// transactions, budgets, savingGoals, notifications
 /// ============================================================
 class FirestoreService {
-  final FirebaseFirestore _db;
+  final FirebaseFirestore? _customDb;
+  FirebaseFirestore get _db => _customDb ?? FirebaseFirestore.instance;
 
-  FirestoreService({FirebaseFirestore? firestore})
-      : _db = firestore ?? FirebaseFirestore.instance;
+  FirestoreService({FirebaseFirestore? firestore}) : _customDb = firestore;
 
   // ---------------- USERS ----------------
   Future<void> createUserProfile(AppUser user) {
@@ -101,6 +159,9 @@ class FirestoreService {
       throw Exception('Ví nguồn không tồn tại');
     }
     final oldBalance = (oldWalletDoc.data()!['balance'] as num).toDouble();
+    final newWalletDoc = await _db.collection('wallets').doc(newWalletId).get();
+    final newWalletName =
+        newWalletDoc.data()?['walletName']?.toString() ?? 'Ví thanh toán';
 
     // Giao dịch mà ví này là ví thực hiện (walletId)
     final txQuery = await _db
@@ -116,12 +177,63 @@ class FirestoreService {
         .where('toWalletId', isEqualTo: oldWalletId)
         .get();
 
+    // Cập nhật nguồn ví trong các mục tiêu tiết kiệm nếu có liên kết với ví cũ
+    final goalsQuery = await _db
+        .collection('savingGoals')
+        .where('userId', isEqualTo: userId)
+        .get();
+
     final batch = _db.batch();
     for (var doc in txQuery.docs) {
       batch.update(doc.reference, {'walletId': newWalletId});
     }
     for (var doc in transferToQuery.docs) {
       batch.update(doc.reference, {'toWalletId': newWalletId});
+    }
+    for (final goalDoc in goalsQuery.docs) {
+      try {
+        final goal = SavingGoal.fromMap(goalDoc.data(), goalDoc.id);
+        final hasOldInSources = goal.walletSources.containsKey(oldWalletId);
+        final hasOldInDeposits =
+            goal.deposits.any((d) => d.walletId == oldWalletId);
+        if (!hasOldInSources && !hasOldInDeposits) continue;
+
+        final updatedSources =
+            Map<String, GoalWalletSource>.from(goal.walletSources);
+        final oldSource = updatedSources.remove(oldWalletId);
+        if (oldSource != null) {
+          final existingNew = updatedSources[newWalletId];
+          updatedSources[newWalletId] = GoalWalletSource(
+            walletId: newWalletId,
+            walletName: newWalletName,
+            totalDeposited: (existingNew?.totalDeposited ?? 0.0) +
+                oldSource.totalDeposited,
+            withdrawableAmount: (existingNew?.withdrawableAmount ?? 0.0) +
+                oldSource.withdrawableAmount,
+            lastDepositedAt:
+                oldSource.lastDepositedAt ?? existingNew?.lastDepositedAt,
+          );
+        }
+
+        final updatedDeposits = goal.deposits
+            .map(
+              (d) => d.walletId == oldWalletId
+                  ? d.copyWith(
+                      walletId: newWalletId,
+                      walletName: newWalletName,
+                    )
+                  : d,
+            )
+            .toList();
+
+        batch.update(goalDoc.reference, {
+          'walletSources': {
+            for (final entry in updatedSources.entries)
+              entry.key: entry.value.toMap(),
+          },
+          'deposits': updatedDeposits.map((d) => d.toMap()).toList(),
+        });
+      } catch (_) {}
     }
 
     // QUAN TRỌNG: chuyển toàn bộ số dư ví cũ sang ví mới TRƯỚC khi xóa,
@@ -146,6 +258,7 @@ class FirestoreService {
   // ---------------- CATEGORIES ----------------
   Future<String> createCategory(Category category) async {
     final ref = await _db.collection('categories').add(category.toMap());
+    FinancialContextRevisionTracker.notifyDataMutated();
     return ref.id;
   }
 
@@ -163,12 +276,15 @@ class FirestoreService {
     });
   }
 
-  Future<void> updateCategory(String categoryId, Map<String, dynamic> data) {
-    return _db.collection('categories').doc(categoryId).update(data);
+  Future<void> updateCategory(String categoryId, Map<String, dynamic> data) async {
+    data['updatedAt'] = DateTime.now().toIso8601String();
+    await _db.collection('categories').doc(categoryId).update(data);
+    FinancialContextRevisionTracker.notifyDataMutated();
   }
 
-  Future<void> deleteCategory(String categoryId) {
-    return _db.collection('categories').doc(categoryId).delete();
+  Future<void> deleteCategory(String categoryId) async {
+    await _db.collection('categories').doc(categoryId).delete();
+    FinancialContextRevisionTracker.notifyDataMutated();
   }
 
   Future<bool> checkCategoryInUse(String userId, String categoryId) async {
@@ -236,6 +352,18 @@ class FirestoreService {
         throw Exception('Giao dịch mục tiêu tiết kiệm cần chỉ định mục tiêu.');
       }
       goalRef = _db.collection('savingGoals').doc(tx.goalId);
+      try {
+        final preGoalSnap = await goalRef.get();
+        if (preGoalSnap.exists && preGoalSnap.data() != null) {
+          final preGoal = SavingGoal.fromMap(
+            preGoalSnap.data() as Map<String, dynamic>,
+            preGoalSnap.id,
+          );
+          if (preGoal.needsSourceSync) {
+            await syncGoalWalletSourcesIfNeeded(preGoal);
+          }
+        }
+      } catch (_) {}
     }
 
     DocumentReference? budgetRef;
@@ -282,6 +410,7 @@ class FirestoreService {
         wallet: wallet,
         toWallet: toWallet,
         goal: goal,
+        transactionId: txRef.id,
       );
 
       transaction.set(txRef, tx.toMap());
@@ -293,8 +422,21 @@ class FirestoreService {
         transaction.update(toWalletRef, {'balance': effects.newTargetBalance});
       }
       if (effects.newGoalSavedAmount != null && goalRef != null) {
-        transaction
-            .update(goalRef, {'savedAmount': effects.newGoalSavedAmount});
+        final goalUpdates = <String, dynamic>{
+          'savedAmount': effects.newGoalSavedAmount,
+          'sourcesSynced': true,
+        };
+        if (effects.newGoalWalletSources != null) {
+          goalUpdates['walletSources'] = {
+            for (final entry in effects.newGoalWalletSources!.entries)
+              entry.key: entry.value.toMap(),
+          };
+        }
+        if (effects.newGoalDeposits != null) {
+          goalUpdates['deposits'] =
+              effects.newGoalDeposits!.map((d) => d.toMap()).toList();
+        }
+        transaction.update(goalRef, goalUpdates);
       }
     });
 
@@ -324,6 +466,7 @@ class FirestoreService {
       } catch (_) {}
     }
 
+    FinancialContextRevisionTracker.notifyDataMutated();
     return txRef.id;
   }
 
@@ -359,23 +502,41 @@ class FirestoreService {
     DateTime? from,
     DateTime? to,
   }) async {
-    Query<Map<String, dynamic>> query =
-        _db.collection('transactions').where('userId', isEqualTo: userId);
+    try {
+      Query<Map<String, dynamic>> query =
+          _db.collection('transactions').where('userId', isEqualTo: userId);
 
-    if (from != null) {
-      query =
-          query.where('date', isGreaterThanOrEqualTo: from.toIso8601String());
-    }
-    if (to != null) {
-      query = query.where('date', isLessThanOrEqualTo: to.toIso8601String());
-    }
+      if (from != null) {
+        query = query.where(
+          'date',
+          isGreaterThanOrEqualTo: from.toIso8601String(),
+        );
+      }
+      if (to != null) {
+        query = query.where('date', isLessThanOrEqualTo: to.toIso8601String());
+      }
+      if (from != null || to != null) {
+        // Bắt buộc chỉ định orderBy('date', descending: true) để khớp Composite Index (userId ASC, date DESC)
+        query = query.orderBy('date', descending: true);
+      }
 
-    final snap = await query.get();
-    final list = snap.docs
-        .map((d) => AppTransaction.fromMap(d.data(), d.id))
-        .toList();
-    list.sort((a, b) => b.date.compareTo(a.date));
-    return list;
+      final snap = await query.get();
+      final list = snap.docs
+          .map((d) => AppTransaction.fromMap(d.data(), d.id))
+          .toList();
+      list.sort((a, b) => b.date.compareTo(a.date));
+      return list;
+    } catch (e) {
+      debugPrint(
+        '[getUserTransactions] Fallback sang single-field query do lỗi index/truy vấn: $e',
+      );
+      final all = await getTransactionsSafely(userId);
+      return all.where((tx) {
+        if (from != null && tx.date.isBefore(from)) return false;
+        if (to != null && tx.date.isAfter(to)) return false;
+        return true;
+      }).toList();
+    }
   }
 
 
@@ -521,6 +682,21 @@ class FirestoreService {
             ? _db.collection('savingGoals').doc(tx.goalId!)
             : null;
 
+    if (goalRef != null) {
+      try {
+        final preGoalSnap = await goalRef.get();
+        if (preGoalSnap.exists && preGoalSnap.data() != null) {
+          final preGoal = SavingGoal.fromMap(
+            preGoalSnap.data() as Map<String, dynamic>,
+            preGoalSnap.id,
+          );
+          if (preGoal.needsSourceSync) {
+            await syncGoalWalletSourcesIfNeeded(preGoal);
+          }
+        }
+      } catch (_) {}
+    }
+
     await _db.runTransaction((transaction) async {
       final txSnap = await transaction.get(txRef);
       if (!txSnap.exists) return; // Giao dịch đã bị xóa trước đó
@@ -570,8 +746,20 @@ class FirestoreService {
       if (goalRef != null && effects.newGoalSavedAmount != null) {
         final gSnap = await transaction.get(goalRef);
         if (gSnap.exists) {
-          transaction
-              .update(goalRef, {'savedAmount': effects.newGoalSavedAmount});
+          final goalUpdates = <String, dynamic>{
+            'savedAmount': effects.newGoalSavedAmount,
+          };
+          if (effects.newGoalWalletSources != null) {
+            goalUpdates['walletSources'] = {
+              for (final entry in effects.newGoalWalletSources!.entries)
+                entry.key: entry.value.toMap(),
+            };
+          }
+          if (effects.newGoalDeposits != null) {
+            goalUpdates['deposits'] =
+                effects.newGoalDeposits!.map((d) => d.toMap()).toList();
+          }
+          transaction.update(goalRef, goalUpdates);
         }
       }
 
@@ -583,11 +771,13 @@ class FirestoreService {
         await StorageService().deleteImageByUrl(tx.image!);
       } catch (_) {}
     }
+    FinancialContextRevisionTracker.notifyDataMutated();
   }
 
   // ---------------- BUDGETS ----------------
   Future<String> createBudget(Budget budget) async {
     final ref = await _db.collection('budgets').add(budget.toMap());
+    FinancialContextRevisionTracker.notifyDataMutated();
     return ref.id;
   }
 
@@ -606,12 +796,14 @@ class FirestoreService {
     });
   }
 
-  Future<void> updateBudget(String budgetId, Map<String, dynamic> data) {
-    return _db.collection('budgets').doc(budgetId).update(data);
+  Future<void> updateBudget(String budgetId, Map<String, dynamic> data) async {
+    await _db.collection('budgets').doc(budgetId).update(data);
+    FinancialContextRevisionTracker.notifyDataMutated();
   }
 
-  Future<void> deleteBudget(String budgetId) {
-    return _db.collection('budgets').doc(budgetId).delete();
+  Future<void> deleteBudget(String budgetId) async {
+    await _db.collection('budgets').doc(budgetId).delete();
+    FinancialContextRevisionTracker.notifyDataMutated();
   }
 
   /// Tính tổng chi tiêu (expense) của 1 category trong 1 tháng cụ thể —
@@ -625,26 +817,41 @@ class FirestoreService {
     final monthStart = DateTime(target.year, target.month, 1);
     final monthEnd = DateTime(target.year, target.month + 1, 1)
         .subtract(const Duration(seconds: 1));
-    final txQuery = await _db
-        .collection('transactions')
-        .where('userId', isEqualTo: userId)
-        .where('date', isGreaterThanOrEqualTo: monthStart.toIso8601String())
-        .where('date', isLessThanOrEqualTo: monthEnd.toIso8601String())
-        .orderBy('date', descending: true)
-        .get();
-    double total = 0;
-    for (final doc in txQuery.docs) {
-      final data = doc.data();
-      if (data['type'] == 'expense' && data['categoryId'] == categoryId) {
-        total += (data['amount'] as num).toDouble();
+    try {
+      final txQuery = await _db
+          .collection('transactions')
+          .where('userId', isEqualTo: userId)
+          .where('date', isGreaterThanOrEqualTo: monthStart.toIso8601String())
+          .where('date', isLessThanOrEqualTo: monthEnd.toIso8601String())
+          .orderBy('date', descending: true)
+          .get();
+      double total = 0;
+      for (final doc in txQuery.docs) {
+        final data = doc.data();
+        if (data['type'] == 'expense' && data['categoryId'] == categoryId) {
+          total += (data['amount'] as num).toDouble();
+        }
       }
+      return total;
+    } catch (_) {
+      final allTx = await getTransactionsSafely(userId);
+      double total = 0;
+      for (final tx in allTx) {
+        if (tx.type == 'expense' &&
+            tx.categoryId == categoryId &&
+            !tx.date.isBefore(monthStart) &&
+            !tx.date.isAfter(monthEnd)) {
+          total += tx.amount;
+        }
+      }
+      return total;
     }
-    return total;
   }
 
   // ---------------- SAVING GOALS ----------------
   Future<String> createSavingGoal(SavingGoal goal) async {
     final ref = await _db.collection('savingGoals').add(goal.toMap());
+    FinancialContextRevisionTracker.notifyDataMutated();
     return ref.id;
   }
 
@@ -670,12 +877,65 @@ class FirestoreService {
     });
   }
 
-  Future<void> updateSavingGoal(String goalId, Map<String, dynamic> data) {
-    return _db.collection('savingGoals').doc(goalId).update(data);
+  Future<void> updateSavingGoal(String goalId, Map<String, dynamic> data) async {
+    await _db.collection('savingGoals').doc(goalId).update(data);
+    FinancialContextRevisionTracker.notifyDataMutated();
   }
 
-  Future<void> deleteSavingGoal(String goalId) {
-    return _db.collection('savingGoals').doc(goalId).delete();
+  Future<void> deleteSavingGoal(String goalId) async {
+    await _db.collection('savingGoals').doc(goalId).delete();
+    FinancialContextRevisionTracker.notifyDataMutated();
+  }
+
+  /// Đồng bộ nguồn ví (`walletSources` và `deposits`) từ lịch sử giao dịch thực tế
+  /// cho các mục tiêu tiết kiệm cũ chưa lưu trường `walletSources`.
+  Future<SavingGoal> syncGoalWalletSourcesIfNeeded(SavingGoal goal) async {
+    if (!goal.needsSourceSync || goal.userId.isEmpty) {
+      return goal;
+    }
+    try {
+      final walletsSnap = await _db
+          .collection('wallets')
+          .where('userId', isEqualTo: goal.userId)
+          .get();
+      final walletNamesById = <String, String>{};
+      for (final doc in walletsSnap.docs) {
+        final data = doc.data();
+        walletNamesById[doc.id] =
+            data['walletName']?.toString() ?? 'Ví thanh toán';
+      }
+
+      final allTx = await getTransactionsSafely(goal.userId);
+      final goalTransactions = allTx
+          .where(
+            (t) =>
+                t.goalId == goal.goalId &&
+                (t.type == 'goal_deposit' || t.type == 'goal_withdraw'),
+          )
+          .toList();
+
+      final syncedGoal = TransactionBusinessLogic.reconstructGoalSources(
+        goal: goal,
+        goalTransactions: goalTransactions,
+        walletNamesById: walletNamesById,
+      );
+
+      await _db.collection('savingGoals').doc(goal.goalId).update({
+        'walletSources': {
+          for (final entry in syncedGoal.walletSources.entries)
+            entry.key: entry.value.toMap(),
+        },
+        'deposits': syncedGoal.deposits.map((d) => d.toMap()).toList(),
+        'sourcesSynced': true,
+      });
+
+      return syncedGoal;
+    } catch (e) {
+      debugPrint(
+        '⚠️ Không thể đồng bộ nguồn ví cho mục tiêu ${goal.goalId}: $e',
+      );
+      return goal;
+    }
   }
 
   // ---------------- NOTIFICATIONS ----------------
@@ -730,6 +990,247 @@ class FirestoreService {
         .update({'status': 'read'});
   }
 
+  Future<void> markAllNotificationsRead(String userId) async {
+    final query = await _db
+        .collection('notifications')
+        .where('userId', isEqualTo: userId)
+        .get();
+    final batch = _db.batch();
+    for (final doc in query.docs) {
+      final data = doc.data();
+      if (data['status'] != 'read') {
+        batch.update(doc.reference, {'status': 'read'});
+      }
+    }
+    await batch.commit();
+  }
+
+  Future<void> clearAllNotifications(String userId) async {
+    final query = await _db
+        .collection('notifications')
+        .where('userId', isEqualTo: userId)
+        .get();
+    final batch = _db.batch();
+    for (final doc in query.docs) {
+      batch.delete(doc.reference);
+    }
+    await batch.commit();
+  }
+
+  Future<void> createRecurringNotificationIfNotExists({
+    required String userId,
+    required String title,
+    required String content,
+    required String type,
+    required String scheduleId,
+    required String occurrenceKey,
+    bool showLocalPush = true,
+  }) async {
+    try {
+      // Dùng single-field query theo userId để tránh lỗi thiếu composite index trên Firestore
+      final userNotificationsSnap = await _db
+          .collection('notifications')
+          .where('userId', isEqualTo: userId)
+          .get();
+
+      final alreadyExists = userNotificationsSnap.docs.any((doc) {
+        final data = doc.data();
+        return data['scheduleId'] == scheduleId &&
+            data['occurrenceKey'] == occurrenceKey &&
+            data['type'] == type;
+      });
+
+      if (!alreadyExists) {
+        await createNotification(AppNotification(
+          notificationId: '',
+          userId: userId,
+          title: title,
+          content: content,
+          status: 'unread',
+          type: type,
+          createdAt: DateTime.now(),
+          scheduleId: scheduleId,
+          occurrenceKey: occurrenceKey,
+        ));
+
+        if (showLocalPush) {
+          final pushId = LocalNotificationService.generateNotificationId(
+            scheduleId,
+            '$occurrenceKey:$type',
+            isOnDueDate: type != 'recurring_reminder',
+          );
+          await LocalNotificationService().showImmediateNotification(
+            notificationId: pushId,
+            title: title,
+            body: content,
+            scheduleId: scheduleId,
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('[createRecurringNotificationIfNotExists] error: $e');
+    }
+  }
+
+  /// Đánh dấu các thông báo nhắc hạn/đến hạn của kỳ đã xử lý thành đã đọc và hủy thông báo thanh trạng thái
+  Future<void> resolveRecurringNotificationsForOccurrence({
+    required String userId,
+    required String scheduleId,
+    required String occurrenceKey,
+    String? resolutionNote,
+  }) async {
+    try {
+      await LocalNotificationService()
+          .cancelNotificationForOccurrence(scheduleId, occurrenceKey);
+
+      final snap = await _db
+          .collection('notifications')
+          .where('userId', isEqualTo: userId)
+          .get();
+
+      final batch = _db.batch();
+      int count = 0;
+      for (final doc in snap.docs) {
+        final data = doc.data();
+        if (data['scheduleId'] == scheduleId &&
+            data['occurrenceKey'] == occurrenceKey &&
+            (data['type'] == 'recurring_due' ||
+                data['type'] == 'recurring_reminder' ||
+                data['type'] == 'recurring_failed')) {
+          final updates = <String, dynamic>{'status': 'read'};
+          if (resolutionNote != null && resolutionNote.isNotEmpty) {
+            updates['content'] = resolutionNote;
+          }
+          batch.update(doc.reference, updates);
+          count++;
+        }
+      }
+      if (count > 0) {
+        await batch.commit();
+      }
+    } catch (e) {
+      debugPrint('[resolveRecurringNotificationsForOccurrence] error: $e');
+    }
+  }
+
+  /// Đánh dấu các thông báo đang chờ của một lịch khi lịch bị tạm dừng hoặc xóa
+  Future<void> resolvePendingNotificationsForSchedule({
+    required String userId,
+    required String scheduleId,
+  }) async {
+    try {
+      await LocalNotificationService().cancelRemindersForSchedule(scheduleId);
+      final snap = await _db
+          .collection('notifications')
+          .where('userId', isEqualTo: userId)
+          .get();
+
+      final batch = _db.batch();
+      int count = 0;
+      for (final doc in snap.docs) {
+        final data = doc.data();
+        if (data['scheduleId'] == scheduleId &&
+            data['status'] == 'unread' &&
+            (data['type'] == 'recurring_due' ||
+                data['type'] == 'recurring_reminder')) {
+          batch.update(doc.reference, {'status': 'read'});
+          count++;
+        }
+      }
+      if (count > 0) {
+        await batch.commit();
+      }
+    } catch (e) {
+      debugPrint('[resolvePendingNotificationsForSchedule] error: $e');
+    }
+  }
+
+  /// Đồng bộ thông báo trong app và thanh trạng thái cho các kỳ đến hạn hoặc sắp đến hạn cần xử lý
+  Future<void> syncRecurringNotifications(String userId) async {
+    if (userId.isEmpty) return;
+    try {
+      final now = DateTime.now();
+      final today = DateTime(now.year, now.month, now.day);
+      final schedulesSnap = await _db
+          .collection('recurringTransactions')
+          .where('userId', isEqualTo: userId)
+          .get();
+
+      final schedules = schedulesSnap.docs
+          .map((d) => RecurringTransactionSchedule.fromMap(d.data(), d.id))
+          .where((s) => s.isActive)
+          .toList();
+
+      for (final s in schedules) {
+        final occurrenceKey =
+            RecurringTransactionService.getOccurrenceKey(s.nextDueDate);
+        if (s.lastProcessedKey == occurrenceKey) continue;
+
+        final displayName = s.note != null && s.note!.trim().isNotEmpty
+            ? s.note!.trim()
+            : (s.type == 'income' ? 'Thu nhập định kỳ' : 'Khoản chi định kỳ');
+        final isIncome = s.type == 'income';
+        final amountFormatted = '${AppFormatters.number(s.amount)} VNĐ';
+        final dueDateOnly = DateTime(
+          s.nextDueDate.year,
+          s.nextDueDate.month,
+          s.nextDueDate.day,
+        );
+
+        // 1. Quá hạn
+        if (dueDateOnly.isBefore(today)) {
+          final diffDays = today.difference(dueDateOnly).inDays;
+          await createRecurringNotificationIfNotExists(
+            userId: userId,
+            title: 'Khoản $displayName đang quá hạn',
+            content:
+                'Khoản ${isIncome ? 'thu' : 'chi'} $amountFormatted đã quá hạn $diffDays ngày (từ ${DateFormat('dd/MM/yyyy').format(s.nextDueDate)}). Chạm để xử lý ngay.',
+            type: 'recurring_due',
+            scheduleId: s.scheduleId,
+            occurrenceKey: occurrenceKey,
+          );
+        }
+        // 2. Đến hạn hôm nay
+        else if (dueDateOnly == today) {
+          final isManual =
+              s.postingMode == RecurringTransactionSchedule.postingModeManual;
+          await createRecurringNotificationIfNotExists(
+            userId: userId,
+            title: 'Khoản $displayName đến hạn hôm nay',
+            content: isManual
+                ? 'Khoản ${isIncome ? 'thu' : 'chi'} $amountFormatted cần bạn xác nhận để ghi nhận vào sổ.'
+                : 'Khoản ${isIncome ? 'thu' : 'chi'} $amountFormatted sẽ được tự động hạch toán.',
+            type: 'recurring_due',
+            scheduleId: s.scheduleId,
+            occurrenceKey: occurrenceKey,
+          );
+        }
+        // 3. Sắp đến hạn (theo reminderDaysBefore)
+        else if (s.reminderDaysBefore > 0) {
+          final reminderDate = DateTime(
+            dueDateOnly.year,
+            dueDateOnly.month,
+            dueDateOnly.day - s.reminderDaysBefore,
+          );
+          if (!today.isBefore(reminderDate) && today.isBefore(dueDateOnly)) {
+            final daysLeft = dueDateOnly.difference(today).inDays;
+            await createRecurringNotificationIfNotExists(
+              userId: userId,
+              title: 'Khoản $displayName sắp đến hạn',
+              content:
+                  'Còn $daysLeft ngày nữa đến hạn khoản ${isIncome ? 'thu' : 'chi'} $amountFormatted (${DateFormat('dd/MM/yyyy').format(s.nextDueDate)}).',
+              type: 'recurring_reminder',
+              scheduleId: s.scheduleId,
+              occurrenceKey: occurrenceKey,
+            );
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[syncRecurringNotifications] error: $e');
+    }
+  }
+
   // ---------------- RECURRING TRANSACTIONS ----------------
   Future<String> createRecurringTransaction(
       RecurringTransactionSchedule schedule) async {
@@ -745,7 +1246,7 @@ class FirestoreService {
       throw Exception('Không thể tạo lịch giao dịch với ví đã bị ẩn.');
     }
 
-    if (schedule.type == 'expense' && schedule.categoryId.isNotEmpty) {
+    if (schedule.categoryId.isNotEmpty) {
       final catDoc =
           await _db.collection('categories').doc(schedule.categoryId).get();
       if (!catDoc.exists) {
@@ -780,16 +1281,71 @@ class FirestoreService {
     return _db.collection('recurringTransactions').doc(scheduleId).update(data);
   }
 
-  Future<void> setRecurringTransactionActive(String scheduleId, bool isActive) {
-    return _db.collection('recurringTransactions').doc(scheduleId).update({
+  Future<void> setRecurringTransactionActive(String scheduleId, bool isActive) async {
+    final scheduleRef = _db.collection('recurringTransactions').doc(scheduleId);
+    final scheduleSnap = await scheduleRef.get();
+    if (!scheduleSnap.exists) return;
+
+    final sData = scheduleSnap.data()!;
+    final schedule = RecurringTransactionSchedule.fromMap(sData, scheduleId);
+
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+
+    final updateData = <String, dynamic>{
       'isActive': isActive,
-      'updatedAt': DateTime.now().toIso8601String(),
-    });
+      'updatedAt': now.toIso8601String(),
+    };
+
+    // Khi kích hoạt lại (isActive == true) mà ngày đến hạn nextDueDate đã nằm trong quá khứ (trước hôm nay),
+    // đồng bộ nextDueDate sang kỳ kế tiếp hợp lệ để không tạo hàng loạt giao dịch quá hạn ngoài ý muốn!
+    final dueDateOnly = DateTime(
+      schedule.nextDueDate.year,
+      schedule.nextDueDate.month,
+      schedule.nextDueDate.day,
+    );
+    if (isActive && dueDateOnly.isBefore(today)) {
+      final recService = RecurringTransactionService();
+      var synchronizedNextDue = schedule.nextDueDate;
+      while (DateTime(
+        synchronizedNextDue.year,
+        synchronizedNextDue.month,
+        synchronizedNextDue.day,
+      ).isBefore(today)) {
+        synchronizedNextDue = recService.nextOccurrenceAfter(
+          synchronizedNextDue,
+          schedule.frequency,
+          schedule.startDate,
+        );
+      }
+      updateData['nextDueDate'] = synchronizedNextDue.toIso8601String();
+    }
+
+    await scheduleRef.update(updateData);
+
+    if (!isActive) {
+      await resolvePendingNotificationsForSchedule(
+        userId: schedule.userId,
+        scheduleId: scheduleId,
+      );
+    }
   }
 
-  Future<void> deleteRecurringTransaction(String scheduleId) {
+  Future<void> deleteRecurringTransaction(String scheduleId) async {
+    try {
+      final snap = await _db.collection('recurringTransactions').doc(scheduleId).get();
+      if (snap.exists && snap.data() != null) {
+        final userId = (snap.data()!['userId'] ?? '').toString();
+        if (userId.isNotEmpty) {
+          await resolvePendingNotificationsForSchedule(
+            userId: userId,
+            scheduleId: scheduleId,
+          );
+        }
+      }
+    } catch (_) {}
     // Chỉ xóa schedule, không xóa lịch sử giao dịch đã tạo trước đó
-    return _db.collection('recurringTransactions').doc(scheduleId).delete();
+    await _db.collection('recurringTransactions').doc(scheduleId).delete();
   }
 
   Future<Map<String, dynamic>> processDueRecurringTransactions(
@@ -969,22 +1525,53 @@ class FirestoreService {
           }
         }
 
+        final displayName =
+            schedule.note != null && schedule.note!.trim().isNotEmpty
+                ? schedule.note!.trim()
+                : (schedule.type == 'income'
+                    ? 'Thu nhập định kỳ'
+                    : 'Khoản chi định kỳ');
+
         if (transactionAlreadyExists) {
           skippedCount++;
         } else if (invalidUserData) {
           failedSchedules.add(
-              'Ví cho khoản "${schedule.note ?? 'Giao dịch định kỳ'}" thiếu userId hợp lệ.');
+              'Ví cho khoản "$displayName" thiếu userId hợp lệ.');
           stopSchedule = true;
         } else if (walletUnavailable) {
           failedSchedules.add(
-              'Ví cho khoản "${schedule.note ?? 'Giao dịch định kỳ'}" không khả dụng.');
+              'Ví cho khoản "$displayName" không khả dụng.');
           stopSchedule = true;
         } else if (insufficientBalance) {
           failedSchedules.add(
-              'Ví không đủ số dư để thanh toán khoản "${schedule.note ?? 'Giao dịch định kỳ'}" (${schedule.amount.round()}đ).');
+              'Ví không đủ số dư để thanh toán khoản "$displayName" (${schedule.amount.round()}đ).');
           stopSchedule = true;
+          await createRecurringNotificationIfNotExists(
+            userId: userId,
+            title:
+                'Không thể ghi nhận "$displayName" vì ví không đủ số dư',
+            content:
+                'Ví không đủ số dư để tự động thanh toán ${AppFormatters.currency(schedule.amount)} cho kỳ $occurrenceKey. Vui lòng nạp thêm tiền hoặc đổi ví khác.',
+            type: 'recurring_failed',
+            scheduleId: schedule.scheduleId,
+            occurrenceKey: occurrenceKey,
+          );
         } else {
           processedCount++;
+          await resolveRecurringNotificationsForOccurrence(
+            userId: userId,
+            scheduleId: schedule.scheduleId,
+            occurrenceKey: occurrenceKey,
+          );
+          await createRecurringNotificationIfNotExists(
+            userId: userId,
+            title: 'Đã tự động hạch toán "$displayName"',
+            content:
+                'Đã ghi nhận giao dịch ${schedule.type == 'income' ? 'thu nhập' : 'chi tiêu'} ${AppFormatters.currency(schedule.amount)} cho kỳ $occurrenceKey.',
+            type: 'recurring_success',
+            scheduleId: schedule.scheduleId,
+            occurrenceKey: occurrenceKey,
+          );
         }
       }
     }
@@ -1052,7 +1639,14 @@ class FirestoreService {
           throw Exception('Ví thực hiện đã bị ẩn hoặc không hoạt động.');
         }
         if (schedule.type == 'expense' && wallet.balance < schedule.amount) {
-          throw Exception('Ví không đủ số dư để xác nhận giao dịch (${schedule.amount.round()}đ).');
+          throw InsufficientBalanceException(
+            message:
+                'Ví "${wallet.walletName}" không đủ số dư (${AppFormatters.currency(wallet.balance)}) để thanh toán ${AppFormatters.currency(schedule.amount)}.',
+            walletName: wallet.walletName,
+            currentBalance: wallet.balance,
+            requiredAmount: schedule.amount,
+            shortfall: schedule.amount - wallet.balance,
+          );
         }
 
         final appTx = AppTransaction(
@@ -1062,8 +1656,8 @@ class FirestoreService {
           categoryId: schedule.categoryId,
           amount: schedule.amount,
           type: schedule.type,
-          note: schedule.note != null && schedule.note!.isNotEmpty
-              ? schedule.note
+          note: schedule.note != null && schedule.note!.trim().isNotEmpty
+              ? schedule.note!.trim()
               : 'Giao dịch định kỳ',
           date: occurrenceDate,
           recurringScheduleId: schedule.scheduleId,
@@ -1113,6 +1707,14 @@ class FirestoreService {
         rethrow;
       }
     }
+
+    await resolveRecurringNotificationsForOccurrence(
+      userId: userId,
+      scheduleId: schedule.scheduleId,
+      occurrenceKey: occurrenceKey,
+      resolutionNote:
+          'Đã xác nhận thanh toán ${AppFormatters.currency(schedule.amount)} vào lúc ${DateFormat('HH:mm dd/MM/yyyy').format(DateTime.now())}.',
+    );
   }
 
   /// Bỏ qua kỳ giao dịch định kỳ thủ công
@@ -1181,6 +1783,14 @@ class FirestoreService {
         rethrow;
       }
     }
+
+    await resolveRecurringNotificationsForOccurrence(
+      userId: userId,
+      scheduleId: schedule.scheduleId,
+      occurrenceKey: occurrenceKey,
+      resolutionNote:
+          'Đã bỏ qua kỳ giao dịch ${DateFormat('dd/MM/yyyy').format(occurrenceDate)}.',
+    );
   }
 
   /// Dời ngày giao dịch định kỳ thủ công
@@ -1244,6 +1854,14 @@ class FirestoreService {
         rethrow;
       }
     }
+
+    await resolveRecurringNotificationsForOccurrence(
+      userId: userId,
+      scheduleId: schedule.scheduleId,
+      occurrenceKey: occurrenceKey,
+      resolutionNote:
+          'Đã dời kỳ thanh toán sang ngày ${DateFormat('dd/MM/yyyy').format(newDueDate)}.',
+    );
   }
 
   Stream<List<RecurringTransactionOccurrence>> streamRecurringOccurrences(
@@ -1255,10 +1873,16 @@ class FirestoreService {
         .map((snap) => snap.docs
             .map((d) => RecurringTransactionOccurrence.fromMap(d.data(), d.id))
             .toList())
-        .handleError((error) {
-      debugPrint('[streamRecurringOccurrences] error: $error');
-      return <RecurringTransactionOccurrence>[];
-    });
+        .transform(
+      StreamTransformer<List<RecurringTransactionOccurrence>,
+          List<RecurringTransactionOccurrence>>.fromHandlers(
+        handleData: (data, sink) => sink.add(data),
+        handleError: (error, stackTrace, sink) {
+          debugPrint('[streamRecurringOccurrences] fallback empty list: $error');
+          sink.add(<RecurringTransactionOccurrence>[]);
+        },
+      ),
+    );
   }
 
   bool _isPermissionDeniedError(Object e) {
@@ -1427,4 +2051,761 @@ class FirestoreService {
       debugPrint('Error deleting chat session: $e');
     }
   }
+
+  // ---------------- BOUNDED WINDOW QUERIES (PERFORMANCE & INTEGRITY) ----------------
+  /// Truy vấn giao dịch trong cửa sổ thời gian xác định [from..to] có phân trang (cursor pagination).
+  /// - Tránh tải toàn bộ lịch sử nhiều năm về RAM.
+  /// - Tuyệt đối KHÔNG dùng fallback `.limit(400)` gây mất dữ liệu âm thầm.
+  /// - Nếu môi trường chưa tạo Composite Index, ném `FirestoreIndexRequiredException` tường minh.
+  Future<List<AppTransaction>> getTransactionsByDateWindow(
+    String userId, {
+    required DateTime from,
+    required DateTime to,
+    int pageSize = 500,
+  }) async {
+    final List<AppTransaction> results = [];
+    DocumentSnapshot<Map<String, dynamic>>? lastDoc;
+    final int safePageSize = pageSize.clamp(50, 1000);
+
+    try {
+      while (true) {
+        Query<Map<String, dynamic>> query = _db
+            .collection('transactions')
+            .where('userId', isEqualTo: userId)
+            .where('date', isGreaterThanOrEqualTo: from.toIso8601String())
+            .where('date', isLessThanOrEqualTo: to.toIso8601String())
+            .orderBy('date', descending: true)
+            .limit(safePageSize);
+
+        if (lastDoc != null) {
+          query = query.startAfterDocument(lastDoc);
+        }
+
+        final snap = await query.get();
+        if (snap.docs.isEmpty) break;
+
+        for (final doc in snap.docs) {
+          results.add(AppTransaction.fromMap(doc.data(), doc.id));
+        }
+
+        if (snap.docs.length < safePageSize) {
+          break;
+        }
+        lastDoc = snap.docs.last;
+      }
+      return results;
+    } on FirebaseException catch (e) {
+      if (e.code == 'failed-precondition') {
+        throw const FirestoreIndexRequiredException(
+          collection: 'transactions',
+          message:
+              'Truy vấn giao dịch theo khoảng thời gian cần Composite Index (userId ASC, date DESC) trên Firestore. Vui lòng đồng bộ firestore.indexes.json.',
+        );
+      }
+      rethrow;
+    }
+  }
+
+  // ---------------- MONTHLY FINANCIAL PLANS (CLOSED-LOOP AI PLANNER) ----------------
+  static final Set<String> _processedSubmissionTokens = <String>{};
+  static final Set<String> _inFlightSubmissionTokens = <String>{};
+  static bool _topLevelMonthlyPlansBlocked = false;
+
+  String _buildPlanDocId(String userId, String targetMonth) =>
+      '${userId}_${targetMonth.replaceAll('/', '-')}';
+
+  String _buildMonthMapKey(String targetMonth) =>
+      targetMonth.replaceAll('/', '-');
+
+  MonthlyFinancialPlan? _extractPlanFromUserMap(
+    Map<String, dynamic>? userData,
+    String userId,
+    String targetMonth,
+  ) {
+    if (userData == null) return null;
+    final plansRaw = userData['monthlyPlans'];
+    if (plansRaw is! Map) return null;
+    final monthKey = _buildMonthMapKey(targetMonth);
+    final entry = plansRaw[monthKey] ?? plansRaw[targetMonth];
+    if (entry is! Map) return null;
+    final docId = _buildPlanDocId(userId, targetMonth);
+    return MonthlyFinancialPlan.fromMap(
+      Map<String, dynamic>.from(entry),
+      docId,
+    );
+  }
+
+  MonthlyFinancialPlan _activatePlanIfCurrentMonth(MonthlyFinancialPlan plan) {
+    final nowMonthKey = DateFormat('MM/yyyy').format(DateTime.now());
+    if (plan.status == PlanLifecycleStatus.approved &&
+        plan.targetMonth == nowMonthKey) {
+      return plan.copyWith(status: PlanLifecycleStatus.active);
+    }
+    return plan;
+  }
+
+  Future<MonthlyFinancialPlan?> getMonthlyPlan(
+    String userId,
+    String targetMonth,
+  ) async {
+    if (userId.isEmpty) return null;
+    final docId = _buildPlanDocId(userId, targetMonth);
+    MonthlyFinancialPlan? plan;
+
+    final bool shouldTryTopLevel =
+        _customDb != null || !_topLevelMonthlyPlansBlocked;
+
+    if (shouldTryTopLevel) {
+      try {
+        final doc = await _db.collection('monthly_plans').doc(docId).get();
+        if (doc.exists && doc.data() != null) {
+          plan = MonthlyFinancialPlan.fromMap(doc.data()!, doc.id);
+        }
+      } catch (e) {
+        if (_isPermissionDeniedError(e)) {
+          if (_customDb == null) {
+            _topLevelMonthlyPlansBlocked = true;
+          }
+          debugPrint(
+            '[getMonthlyPlan] Collection monthly_plans chưa mở quyền trên Cloud Rules -> tự động chuyển sang fallback users/{uid}.monthlyPlans.',
+          );
+        } else {
+          debugPrint('[getMonthlyPlan] Lỗi đọc monthly_plans: $e');
+        }
+      }
+    }
+
+    if (plan == null) {
+      try {
+        final userDoc = await _db.collection('users').doc(userId).get();
+        if (userDoc.exists && userDoc.data() != null) {
+          plan = _extractPlanFromUserMap(userDoc.data(), userId, targetMonth);
+        }
+      } catch (e) {
+        debugPrint('[getMonthlyPlan] Lỗi đọc fallback users/{uid}: $e');
+      }
+    }
+
+    if (plan == null) return null;
+    return _activatePlanIfCurrentMonth(plan);
+  }
+
+  Stream<MonthlyFinancialPlan?> streamMonthlyPlan(
+    String userId,
+    String targetMonth,
+  ) {
+    if (userId.isEmpty) return Stream.value(null);
+    final docId = _buildPlanDocId(userId, targetMonth);
+    final bool shouldTryTopLevel =
+        _customDb != null || !_topLevelMonthlyPlansBlocked;
+
+    if (!shouldTryTopLevel) {
+      return _db.collection('users').doc(userId).snapshots().map((userDoc) {
+        final p = _extractPlanFromUserMap(userDoc.data(), userId, targetMonth);
+        return p != null ? _activatePlanIfCurrentMonth(p) : null;
+      }).transform(
+        StreamTransformer<MonthlyFinancialPlan?,
+            MonthlyFinancialPlan?>.fromHandlers(
+          handleData: (data, sink) => sink.add(data),
+          handleError: (error, stackTrace, sink) => sink.add(null),
+        ),
+      );
+    }
+
+    return _db
+        .collection('monthly_plans')
+        .doc(docId)
+        .snapshots()
+        .map((doc) => doc.exists && doc.data() != null
+            ? _activatePlanIfCurrentMonth(
+                MonthlyFinancialPlan.fromMap(doc.data()!, doc.id),
+              )
+            : null)
+        .transform(
+      StreamTransformer<MonthlyFinancialPlan?,
+          MonthlyFinancialPlan?>.fromHandlers(
+        handleData: (data, sink) => sink.add(data),
+        handleError: (error, stackTrace, sink) {
+          if (_isPermissionDeniedError(error) && _customDb == null) {
+            _topLevelMonthlyPlansBlocked = true;
+          }
+          sink.add(null);
+        },
+      ),
+    );
+  }
+
+  /// Lưu và áp dụng Kế hoạch Tài chính Tháng trong một Firestore Transaction:
+  /// 1. Chống bấm xác nhận lặp (Idempotency / In-flight lock qua `submissionToken`).
+  /// 2. Đọc lại toàn bộ `budgets` của `targetMonth` ngay trong Transaction.
+  /// 3. Kiểm tra xung đột đồng thời với `expectedExistingBudgets` lúc mở bảng Xem trước.
+  /// 4. Chỉ ghi các danh mục được người dùng tích chọn (`selectedCategoryIds`), không tự ý ghi đè mục bỏ chọn.
+  /// 5. Lưu `originalSnapshot` bất biến ở lần phê duyệt đầu tiên.
+  Future<MonthlyFinancialPlan> commitMonthlyPlanTransactionally({
+    required MonthlyFinancialPlan planToCommit,
+    required Set<String> selectedCategoryIds,
+    required Map<String, double?> expectedExistingBudgets,
+    required String submissionToken,
+    DateTime? currentReferenceDate,
+  }) async {
+    if (_inFlightSubmissionTokens.contains(submissionToken) ||
+        _processedSubmissionTokens.contains(submissionToken)) {
+      final existing =
+          await getMonthlyPlan(planToCommit.userId, planToCommit.targetMonth);
+      if (existing != null) return existing;
+    }
+
+    _inFlightSubmissionTokens.add(submissionToken);
+    try {
+      final now = currentReferenceDate ?? DateTime.now();
+      final currentMonthStr = DateFormat('MM/yyyy').format(now);
+      final PlanLifecycleStatus resolvedStatus =
+          planToCommit.targetMonth == currentMonthStr
+              ? PlanLifecycleStatus.active
+              : PlanLifecycleStatus.approved;
+
+      final planDocId =
+          _buildPlanDocId(planToCommit.userId, planToCommit.targetMonth);
+      final monthKey = _buildMonthMapKey(planToCommit.targetMonth);
+      final planRef = _db.collection('monthly_plans').doc(planDocId);
+      final userRef = _db.collection('users').doc(planToCommit.userId);
+
+      // Truy vấn danh sách document ngân sách hiện tại của tháng mục tiêu
+      final existingBudgetQuery = await _db
+          .collection('budgets')
+          .where('userId', isEqualTo: planToCommit.userId)
+          .where('month', isEqualTo: planToCommit.targetMonth)
+          .get();
+
+      Future<MonthlyFinancialPlan> executeCommitTxn({
+        required bool useTopLevelPlanCollection,
+      }) async {
+        return await _db.runTransaction<MonthlyFinancialPlan>(
+          (txn) async {
+            MonthlyFinancialPlan? oldPlan;
+            if (useTopLevelPlanCollection) {
+              final existingPlanSnap = await txn.get(planRef);
+              if (existingPlanSnap.exists && existingPlanSnap.data() != null) {
+                oldPlan = MonthlyFinancialPlan.fromMap(
+                  existingPlanSnap.data()!,
+                  existingPlanSnap.id,
+                );
+              }
+            } else {
+              final userSnap = await txn.get(userRef);
+              if (userSnap.exists && userSnap.data() != null) {
+                oldPlan = _extractPlanFromUserMap(
+                  userSnap.data(),
+                  planToCommit.userId,
+                  planToCommit.targetMonth,
+                );
+              }
+            }
+
+            // Đọc lại từng budget doc bên trong Transaction để đảm bảo tính cô lập
+            final Map<String, DocumentSnapshot<Map<String, dynamic>>>
+                latestBudgetDocsByCat = {};
+            final Map<String, double?> latestLimitsByCat = {};
+
+            for (final qDoc in existingBudgetQuery.docs) {
+              final freshSnap = await txn.get(qDoc.reference);
+              if (freshSnap.exists && freshSnap.data() != null) {
+                final b = Budget.fromMap(freshSnap.data()!, freshSnap.id);
+                latestBudgetDocsByCat[b.categoryId] = freshSnap;
+                latestLimitsByCat[b.categoryId] = b.limit;
+              }
+            }
+
+            // Kiểm tra xung đột (Optimistic Concurrency Check) cho các danh mục được chọn áp dụng
+            final List<String> conflicts = [];
+            for (final catId in selectedCategoryIds) {
+              final expectedLimit = expectedExistingBudgets[catId];
+              final actualLimit = latestLimitsByCat[catId];
+              final bool bothNull = expectedLimit == null && actualLimit == null;
+              final bool bothEqual = expectedLimit != null &&
+                  actualLimit != null &&
+                  (expectedLimit - actualLimit).abs() < 0.01;
+              if (!bothNull && !bothEqual) {
+                conflicts.add(catId);
+              }
+            }
+
+            if (conflicts.isNotEmpty) {
+              throw PlanBudgetConflictException(
+                message:
+                    'Ngân sách của ${conflicts.length} danh mục vừa có thay đổi mới trước khi xác nhận. Vui lòng kiểm tra lại số liệu mới nhất.',
+                conflictingCategoryIds: conflicts,
+                latestBudgetsByCategory: latestLimitsByCat,
+              );
+            }
+
+            // Bảo toàn originalSnapshot nếu kế hoạch của tháng này đã từng được phê duyệt trước đó
+            PlanSnapshotData originalSnapshotToKeep =
+                planToCommit.originalSnapshot;
+            int nextRevision = 1;
+            List<PlanAdjustmentLog> historyToKeep =
+                planToCommit.adjustmentHistory;
+
+            if (oldPlan != null) {
+              if (oldPlan.status != PlanLifecycleStatus.draft) {
+                originalSnapshotToKeep = oldPlan.originalSnapshot;
+              }
+              nextRevision = oldPlan.revision + 1;
+              historyToKeep = oldPlan.adjustmentHistory;
+            }
+
+            final finalizedPlan = planToCommit.copyWith(
+              planId: planDocId,
+              status: resolvedStatus,
+              originalSnapshot: originalSnapshotToKeep,
+              adjustmentHistory: historyToKeep,
+              revision: nextRevision,
+              updatedAt: now,
+            );
+
+            if (useTopLevelPlanCollection) {
+              txn.set(planRef, finalizedPlan.toMap());
+            } else {
+              txn.set(
+                userRef,
+                {
+                  'monthlyPlans': {
+                    monthKey: finalizedPlan.toMap(),
+                  },
+                },
+                SetOptions(merge: true),
+              );
+            }
+
+            // Chỉ tạo mới hoặc cập nhật Budget cho những danh mục người dùng ĐÃ TÍCH CHỌN
+            for (final alloc in finalizedPlan.currentAllocations) {
+              if (!selectedCategoryIds.contains(alloc.categoryId)) {
+                continue;
+              }
+              final existingDoc = latestBudgetDocsByCat[alloc.categoryId];
+              if (existingDoc != null) {
+                txn.update(existingDoc.reference, {
+                  'limit': alloc.recommendedLimit,
+                });
+              } else {
+                final newBudgetRef = _db.collection('budgets').doc();
+                final newBudget = Budget(
+                  budgetId: newBudgetRef.id,
+                  userId: finalizedPlan.userId,
+                  categoryId: alloc.categoryId,
+                  limit: alloc.recommendedLimit,
+                  month: finalizedPlan.targetMonth,
+                );
+                txn.set(newBudgetRef, newBudget.toMap());
+              }
+            }
+
+            return finalizedPlan;
+          },
+        );
+      }
+
+      MonthlyFinancialPlan committedPlan;
+      final bool shouldTryTopLevel =
+          _customDb != null || !_topLevelMonthlyPlansBlocked;
+
+      if (shouldTryTopLevel) {
+        try {
+          committedPlan =
+              await executeCommitTxn(useTopLevelPlanCollection: true);
+        } catch (e) {
+          if (_isPermissionDeniedError(e)) {
+            if (_customDb == null) {
+              _topLevelMonthlyPlansBlocked = true;
+            }
+            committedPlan =
+                await executeCommitTxn(useTopLevelPlanCollection: false);
+          } else {
+            rethrow;
+          }
+        }
+      } else {
+        committedPlan =
+            await executeCommitTxn(useTopLevelPlanCollection: false);
+      }
+
+      _processedSubmissionTokens.add(submissionToken);
+      FinancialContextRevisionTracker.notifyDataMutated();
+      return committedPlan;
+    } finally {
+      _inFlightSubmissionTokens.remove(submissionToken);
+    }
+  }
+
+  /// Điều chỉnh kế hoạch giữa tháng khi phát sinh chi phí ngoài dự kiến (Rebalance).
+  /// - Giữ nguyên tuyệt đối `originalSnapshot` (bản kế hoạch gốc).
+  /// - Nối thêm `PlanAdjustmentLog` vào `adjustmentHistory` và tăng `revision`.
+  /// - TUYỆT ĐỐI KHÔNG chỉnh sửa document `SavingGoal` gốc khi người dùng điều chỉnh `targetSavingAmount` của tháng.
+  Future<MonthlyFinancialPlan> rebalanceMonthlyPlanTransactionally({
+    required String userId,
+    required String targetMonth,
+    required List<PlannedCategoryAllocation> updatedAllocations,
+    required double updatedTargetSaving,
+    required double updatedReferenceIncome,
+    required String reason,
+    required String strategy,
+    required String summary,
+    Set<String>? categoryIdsToSyncBudget,
+  }) async {
+    final planDocId = _buildPlanDocId(userId, targetMonth);
+    final monthKey = _buildMonthMapKey(targetMonth);
+    final planRef = _db.collection('monthly_plans').doc(planDocId);
+    final userRef = _db.collection('users').doc(userId);
+
+    final existingBudgetQuery = await _db
+        .collection('budgets')
+        .where('userId', isEqualTo: userId)
+        .where('month', isEqualTo: targetMonth)
+        .get();
+
+    Future<MonthlyFinancialPlan> executeRebalanceTxn({
+      required bool useTopLevelPlanCollection,
+    }) async {
+      return await _db.runTransaction<MonthlyFinancialPlan>(
+        (txn) async {
+          MonthlyFinancialPlan? currentPlan;
+          if (useTopLevelPlanCollection) {
+            final planSnap = await txn.get(planRef);
+            if (planSnap.exists && planSnap.data() != null) {
+              currentPlan =
+                  MonthlyFinancialPlan.fromMap(planSnap.data()!, planSnap.id);
+            }
+          } else {
+            final userSnap = await txn.get(userRef);
+            if (userSnap.exists && userSnap.data() != null) {
+              currentPlan = _extractPlanFromUserMap(
+                userSnap.data(),
+                userId,
+                targetMonth,
+              );
+            }
+          }
+
+          if (currentPlan == null) {
+            throw Exception(
+                'Không tìm thấy kế hoạch tháng $targetMonth để điều chỉnh.');
+          }
+
+          final Map<String, DocumentSnapshot<Map<String, dynamic>>>
+              budgetDocsByCat = {};
+          for (final qDoc in existingBudgetQuery.docs) {
+            final bSnap = await txn.get(qDoc.reference);
+            if (bSnap.exists && bSnap.data() != null) {
+              final b = Budget.fromMap(bSnap.data()!, bSnap.id);
+              budgetDocsByCat[b.categoryId] = bSnap;
+            }
+          }
+
+          final double newEssentialCap = updatedAllocations
+              .where((a) => a.isEssential)
+              .fold<double>(0, (s, a) => s + a.recommendedLimit);
+          final double newFlexibleCap = updatedAllocations
+              .where((a) => !a.isEssential)
+              .fold<double>(0, (s, a) => s + a.recommendedLimit);
+
+          final now = DateTime.now();
+          final newLog = PlanAdjustmentLog(
+            adjustedAt: now,
+            reason: reason,
+            strategy: strategy,
+            previousTargetSaving: currentPlan.targetSavingAmount,
+            newTargetSaving: updatedTargetSaving,
+            summary: summary,
+          );
+
+          final nextPlan = currentPlan.copyWith(
+            referenceIncome: updatedReferenceIncome,
+            essentialExpenseCap: newEssentialCap,
+            flexibleExpenseCap: newFlexibleCap,
+            targetSavingAmount: updatedTargetSaving,
+            currentAllocations: updatedAllocations,
+            // Giữ nguyên originalSnapshot gốc 100%
+            originalSnapshot: currentPlan.originalSnapshot,
+            adjustmentHistory: [...currentPlan.adjustmentHistory, newLog],
+            revision: currentPlan.revision + 1,
+            updatedAt: now,
+          );
+
+          if (useTopLevelPlanCollection) {
+            txn.set(planRef, nextPlan.toMap());
+          } else {
+            txn.set(
+              userRef,
+              {
+                'monthlyPlans': {
+                  monthKey: nextPlan.toMap(),
+                },
+              },
+              SetOptions(merge: true),
+            );
+          }
+
+          // Đồng bộ lại các Budget của các danh mục được điều chỉnh
+          final idsToSync = categoryIdsToSyncBudget ??
+              updatedAllocations.map((e) => e.categoryId).toSet();
+          for (final alloc in updatedAllocations) {
+            if (!idsToSync.contains(alloc.categoryId)) continue;
+            final bDoc = budgetDocsByCat[alloc.categoryId];
+            if (bDoc != null) {
+              txn.update(bDoc.reference, {'limit': alloc.recommendedLimit});
+            }
+          }
+
+          return nextPlan;
+        },
+      );
+    }
+
+    MonthlyFinancialPlan updatedPlan;
+    final bool shouldTryTopLevel =
+        _customDb != null || !_topLevelMonthlyPlansBlocked;
+
+    if (shouldTryTopLevel) {
+      try {
+        updatedPlan =
+            await executeRebalanceTxn(useTopLevelPlanCollection: true);
+      } catch (e) {
+        if (_isPermissionDeniedError(e)) {
+          if (_customDb == null) {
+            _topLevelMonthlyPlansBlocked = true;
+          }
+          updatedPlan =
+              await executeRebalanceTxn(useTopLevelPlanCollection: false);
+        } else {
+          rethrow;
+        }
+      }
+    } else {
+      updatedPlan =
+          await executeRebalanceTxn(useTopLevelPlanCollection: false);
+    }
+
+    FinancialContextRevisionTracker.notifyDataMutated();
+    return updatedPlan;
+  }
+
+  // ---------------- ADMIN OPERATIONS (USERS, SYSTEM CATEGORIES, ANNOUNCEMENTS, AUDIT LOGS) ----------------
+  Stream<List<AppUser>> streamAllUsersForAdmin() {
+    return _db.collection('users').snapshots().map((snap) {
+      final list =
+          snap.docs.map((d) => AppUser.fromMap(d.data(), d.id)).toList();
+      list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      return list;
+    });
+  }
+
+  Future<void> updateUserStatusOrRoleByAdmin({
+    required String targetUid,
+    String? status,
+    String? role,
+  }) async {
+    final Map<String, dynamic> updates = {};
+    if (status != null) updates['status'] = status;
+    if (role != null) updates['role'] = role;
+    if (updates.isEmpty) return;
+
+    await _db.collection('users').doc(targetUid).update(updates);
+  }
+
+  Stream<List<SystemCategoryTemplate>> streamSystemCategoryTemplates() {
+    return _db
+        .collection('system_categories')
+        .snapshots()
+        .map((snap) => snap.docs
+            .map((d) => SystemCategoryTemplate.fromMap(d.data(), d.id))
+            .toList())
+        .transform(
+      StreamTransformer<List<SystemCategoryTemplate>,
+          List<SystemCategoryTemplate>>.fromHandlers(
+        handleData: (data, sink) => sink.add(data),
+        handleError: (error, stackTrace, sink) {
+          debugPrint('[streamSystemCategoryTemplates] fallback empty: $error');
+          sink.add(<SystemCategoryTemplate>[]);
+        },
+      ),
+    );
+  }
+
+  Future<List<SystemCategoryTemplate>> getSystemCategoryTemplates() async {
+    try {
+      final snap = await _db.collection('system_categories').get();
+      return snap.docs
+          .map((d) => SystemCategoryTemplate.fromMap(d.data(), d.id))
+          .where((t) => t.isActive)
+          .toList();
+    } catch (_) {
+      return [];
+    }
+  }
+
+  /// Truy vấn danh mục hệ thống cho màn hình khởi tạo User mới (CategorySetupScreen).
+  /// Phân biệt tường minh giữa:
+  /// - Truy cập Firestore thành công (kể cả khi collection rỗng hoặc toàn bộ danh mục bị ẩn do Admin cấu hình).
+  /// - Không thể truy cập nguồn dữ liệu từ Firestore (ném lỗi kết nối/quyền) để chỉ fallback về constants.dart khi lỗi truy cập.
+  Future<SystemCategoriesSetupResult> fetchSystemCategoriesForSetup() async {
+    try {
+      final snap = await _db.collection('system_categories').get();
+      final allTemplates = snap.docs
+          .map((d) => SystemCategoryTemplate.fromMap(d.data(), d.id))
+          .toList();
+      final activeTemplates =
+          allTemplates.where((t) => t.isActive).toList();
+      return SystemCategoriesSetupResult(
+        activeTemplates: activeTemplates,
+        totalDocsInCollection: allTemplates.length,
+        isFirestoreAccessible: true,
+      );
+    } catch (e) {
+      debugPrint('[fetchSystemCategoriesForSetup] Firestore unreachable: $e');
+      return const SystemCategoriesSetupResult(
+        activeTemplates: [],
+        totalDocsInCollection: 0,
+        isFirestoreAccessible: false,
+      );
+    }
+  }
+
+  Future<String> saveSystemCategoryTemplate(
+    SystemCategoryTemplate template,
+  ) async {
+    String docId = template.id;
+    final payload = template
+        .copyWith(
+          createdAt: template.createdAt ?? DateTime.now(),
+          updatedAt: DateTime.now(),
+        )
+        .toMap();
+
+    if (docId.isEmpty) {
+      final ref = await _db.collection('system_categories').add(payload);
+      docId = ref.id;
+    } else {
+      await _db
+          .collection('system_categories')
+          .doc(docId)
+          .set(payload, SetOptions(merge: true));
+    }
+    return docId;
+  }
+
+  /// Ẩn hoặc hiện danh mục hệ thống thông qua trường `isActive`
+  /// (Không xóa cứng để bảo toàn tham chiếu và dữ liệu lịch sử).
+  Future<void> setSystemCategoryActive(
+    String id,
+    bool isActive,
+  ) async {
+    await _db.collection('system_categories').doc(id).update({
+      'isActive': isActive,
+      'updatedAt': DateTime.now().toIso8601String(),
+    });
+  }
+
+  Future<void> deleteSystemCategoryTemplate(String id) async {
+    await _db.collection('system_categories').doc(id).delete();
+  }
+
+  Stream<List<SystemAnnouncement>> streamSystemAnnouncements({
+    bool activeOnly = false,
+  }) {
+    return _db
+        .collection('system_announcements')
+        .snapshots()
+        .map((snap) {
+      var list = snap.docs
+          .map((d) => SystemAnnouncement.fromMap(d.data(), d.id))
+          .toList();
+      if (activeOnly) {
+        list = list.where((a) => a.isActive).toList();
+      }
+      list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      return list;
+    }).transform(
+      StreamTransformer<List<SystemAnnouncement>,
+          List<SystemAnnouncement>>.fromHandlers(
+        handleData: (data, sink) => sink.add(data),
+        handleError: (error, stackTrace, sink) {
+          debugPrint('[streamSystemAnnouncements] fallback empty: $error');
+          sink.add(<SystemAnnouncement>[]);
+        },
+      ),
+    );
+  }
+
+  Future<String> saveSystemAnnouncement(
+    SystemAnnouncement announcement,
+  ) async {
+    String docId = announcement.id;
+    final payload = announcement
+        .copyWith(updatedAt: DateTime.now())
+        .toMap();
+
+    if (docId.isEmpty) {
+      final ref = await _db.collection('system_announcements').add(payload);
+      docId = ref.id;
+    } else {
+      await _db
+          .collection('system_announcements')
+          .doc(docId)
+          .set(payload, SetOptions(merge: true));
+    }
+    return docId;
+  }
+
+  Future<void> setSystemAnnouncementActive(
+    String id,
+    bool isActive,
+  ) async {
+    await _db.collection('system_announcements').doc(id).update({
+      'isActive': isActive,
+      'updatedAt': DateTime.now().toIso8601String(),
+    });
+  }
+
+  Future<void> deleteSystemAnnouncement(String id) async {
+    await _db.collection('system_announcements').doc(id).delete();
+  }
+
+  // ---------------- ADMIN AUDIT LOGS (READ ONLY TRÊN CLIENT - SERVER GHI) ----------------
+  Stream<List<AdminAuditLog>> streamAdminAuditLogs({int limit = 100}) {
+    return _db
+        .collection('admin_logs')
+        .snapshots()
+        .map((snap) {
+      final list = snap.docs
+          .map((d) => AdminAuditLog.fromMap(d.data(), d.id))
+          .toList();
+      list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      if (list.length > limit) {
+        return list.sublist(0, limit);
+      }
+      return list;
+    }).transform(
+      StreamTransformer<List<AdminAuditLog>,
+          List<AdminAuditLog>>.fromHandlers(
+        handleData: (data, sink) => sink.add(data),
+        handleError: (error, stackTrace, sink) {
+          debugPrint('[streamAdminAuditLogs] fallback empty: $error');
+          sink.add(<AdminAuditLog>[]);
+        },
+      ),
+    );
+  }
+}
+
+/// Kết quả truy vấn danh mục mẫu hệ thống phục vụ khởi tạo cho User mới.
+class SystemCategoriesSetupResult {
+  final List<SystemCategoryTemplate> activeTemplates;
+  final int totalDocsInCollection;
+  final bool isFirestoreAccessible;
+
+  const SystemCategoriesSetupResult({
+    required this.activeTemplates,
+    required this.totalDocsInCollection,
+    required this.isFirestoreAccessible,
+  });
 }

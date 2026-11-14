@@ -1,10 +1,19 @@
 const functions = require("firebase-functions");
+const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const nodemailer = require("nodemailer");
 const crypto = require("crypto");
+const {
+  ALLOWED_CONFIG_TYPES,
+  computeCanonicalConfigHash,
+  validateConfigPayloadServerSide,
+  verifyAdminCallerWithDeps,
+  createAdminEndpointHandlers,
+} = require("./admin_helpers");
 
 admin.initializeApp();
 const db = admin.firestore();
+const geminiApiKeySecret = defineSecret("GEMINI_API_KEY");
 
 // ----------------------------------------------------------------------
 // CẤU HÌNH GỬI EMAIL (GMAIL SMTP HOẶC DỊCH VỤ EMAIL TÙY CHỌN)
@@ -361,56 +370,32 @@ async function verifyOptionalAppCheck(req) {
 }
 
 async function verifyAdminCaller(req) {
-  await verifyOptionalAppCheck(req);
-  const authHeader = req.headers.authorization || "";
-  if (!authHeader.startsWith("Bearer ")) {
-    const err = new Error("Thiếu Firebase ID Token xác thực.");
-    err.statusCode = 401;
-    throw err;
-  }
-
-  const idToken = authHeader.substring("Bearer ".length).trim();
-  let decoded;
-  try {
-    decoded = await admin.auth().verifyIdToken(idToken, true);
-  } catch (e) {
-    const err = new Error("Phiên đăng nhập không hợp lệ hoặc đã hết hạn.");
-    err.statusCode = 401;
-    throw err;
-  }
-
-  const adminUserDoc = await db.collection("users").doc(decoded.uid).get();
-  const userData = adminUserDoc.exists ? adminUserDoc.data() : {};
-
-  if (userData && userData.status === "locked") {
-    const err = new Error("Tài khoản quản trị viên này đã bị khóa.");
-    err.statusCode = 403;
-    throw err;
-  }
-
-  const hasClaim = decoded.admin === true;
-  const hasFirestoreRole = userData && userData.role === "admin";
-
-  if (!hasClaim && !hasFirestoreRole) {
-    const err = new Error("Truy cập bị từ chối: Tài khoản không có quyền Quản trị viên (Admin).");
-    err.statusCode = 403;
-    throw err;
-  }
-
-  // Đồng bộ Custom Claim admin=true nếu hồ sơ Firestore là admin nhưng token chưa có claim
-  if (!hasClaim && hasFirestoreRole) {
-    try {
-      await admin.auth().setCustomUserClaims(decoded.uid, { admin: true });
-    } catch (claimErr) {
-      functions.logger.warn("Không thể đồng bộ Custom Claim tự động:", claimErr);
-    }
-  }
-
-  return {
-    uid: decoded.uid,
-    email: decoded.email || (userData && userData.email) || "",
-  };
+  return verifyAdminCallerWithDeps({
+    req,
+    db,
+    auth: admin.auth(),
+    verifyAppCheckFn: verifyOptionalAppCheck,
+    logger: functions.logger,
+  });
 }
+
+const adminHandlers = createAdminEndpointHandlers({
+  db,
+  auth: admin.auth(),
+  verifyAppCheckFn: verifyOptionalAppCheck,
+  logger: functions.logger,
+  geminiApiKeyGetter: async () => {
+    try {
+      const secretVal = geminiApiKeySecret.value();
+      if (secretVal && String(secretVal).trim()) {
+        return String(secretVal).trim();
+      }
+    } catch (_) {
+      // Môi trường local/test không gắn Secret Manager có thể fallback về biến môi trường
+    }
+    return process.env.GEMINI_API_KEY || "";
+  },
+});
 
 /**
  * 4. Endpoint Khóa / Mở khóa tài khoản người dùng (Firebase Auth + Firestore + Audit Log)
@@ -502,71 +487,7 @@ exports.adminSetUserStatus = functions.https.onRequest(async (req, res) => {
  */
 exports.adminSetUserRole = functions.https.onRequest(async (req, res) => {
   if (applyAdminCors(req, res)) return;
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method Not Allowed" });
-    return;
-  }
-
-  try {
-    const caller = await verifyAdminCaller(req);
-    const { targetUid, role } = req.body || {};
-
-    if (!targetUid || (role !== "user" && role !== "admin")) {
-      res.status(400).json({ error: "Tham số targetUid hoặc role không hợp lệ." });
-      return;
-    }
-
-    if (targetUid === caller.uid && role !== "admin") {
-      res.status(400).json({ error: "Không thể tự thu hồi quyền Admin của chính mình." });
-      return;
-    }
-
-    const isAdminRole = role === "admin";
-    const targetDocRef = db.collection("users").doc(targetUid);
-    const targetSnap = await targetDocRef.get();
-    const targetEmail = targetSnap.exists ? (targetSnap.data().email || targetUid) : targetUid;
-
-    // 1. Gán Firebase Custom Claims
-    await admin.auth().setCustomUserClaims(targetUid, { admin: isAdminRole });
-
-    // 2. Cập nhật trường role trên Firestore
-    const nowIso = new Date().toISOString();
-    await targetDocRef.set(
-      {
-        role: role,
-        updatedAt: nowIso,
-      },
-      { merge: true }
-    );
-
-    // 3. Ghi nhật ký quản trị
-    const logRef = await db.collection("admin_logs").add({
-      adminId: caller.uid,
-      adminEmail: caller.email,
-      action: "SET_USER_ROLE",
-      targetType: "user",
-      targetId: targetUid,
-      targetLabel: targetEmail,
-      result: "success",
-      details: `Cập nhật quyền tài khoản ${targetEmail} thành ${role.toUpperCase()} (Custom Claim admin=${isAdminRole}).`,
-      source: "cloud_function",
-      createdAt: nowIso,
-    });
-
-    res.status(200).json({
-      success: true,
-      targetUid: targetUid,
-      role: role,
-      logId: logRef.id,
-      message: `Đã cập nhật quyền ${targetEmail} thành ${role.toUpperCase()}.`,
-    });
-  } catch (error) {
-    functions.logger.error("Lỗi adminSetUserRole:", error);
-    const code = error.statusCode || 500;
-    res.status(code).json({
-      error: error.message || "Không thể cập nhật quyền tài khoản.",
-    });
-  }
+  return adminHandlers.adminSetUserRole(req, res);
 });
 
 /**
@@ -702,94 +623,6 @@ async function getOrCreateServerSecret(secretId, envVarName, configProp) {
   return generatedSecret;
 }
 
-const ALLOWED_CONFIG_TYPES = [
-  "ai_runtime",
-  "financial_heuristics",
-  "transaction_rules",
-];
-
-// Danh mục Model ID hợp lệ theo tài liệu Gemini API chính thức:
-// - Stable: gemini-3.8-flash, gemini-3.7-flash, gemini-3.6-flash, gemini-3.5-flash, gemini-3.5-flash-lite
-// - Preview: gemini-3-flash-preview
-// - Legacy (tùy tài khoản): gemini-2.5-flash, gemini-2.5-flash-lite, gemini-2.5-pro
-// - Mutable Alias (không được dùng làm fallback duy nhất): gemini-flash-latest
-const SUPPORTED_GEMINI_MODELS = [
-  "gemini-3.8-flash",
-  "gemini-3.7-flash",
-  "gemini-3.6-flash",
-  "gemini-3.5-flash",
-  "gemini-3.5-flash-lite",
-  "gemini-3-flash-preview",
-  "gemini-2.5-flash",
-  "gemini-2.5-flash-lite",
-  "gemini-2.5-pro",
-  "gemini-flash-latest",
-];
-
-const MUTABLE_ALIAS_GEMINI_MODELS = [
-  "gemini-flash-latest",
-];
-
-const FORBIDDEN_SECRET_KEYS = [
-  "apikey",
-  "geminiapikey",
-  "gemini_api_key",
-  "api_key",
-  "secret",
-  "privatekey",
-  "private_key",
-  "secretsalt",
-  "accesstoken",
-];
-
-function containsForbiddenSecretField(obj) {
-  if (!obj || typeof obj !== "object") return false;
-  if (Array.isArray(obj)) {
-    return obj.some(containsForbiddenSecretField);
-  }
-  for (const key of Object.keys(obj)) {
-    const lower = key.toLowerCase();
-    if (FORBIDDEN_SECRET_KEYS.includes(lower)) {
-      return true;
-    }
-    if (containsForbiddenSecretField(obj[key])) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Chuẩn hóa JSON đệ quy khớp 100% với hàm `canonicalizeJsonValue` trong Dart
- */
-function canonicalizeJsonValue(value) {
-  if (value === null || value === undefined || typeof value === "boolean" || typeof value === "string") {
-    return value === undefined ? null : value;
-  }
-  if (typeof value === "number") {
-    if (Number.isInteger(value)) return value;
-    const rounded = Number(value.toFixed(6));
-    return Number.isInteger(rounded) ? Math.trunc(rounded) : rounded;
-  }
-  if (Array.isArray(value)) {
-    return value.map(canonicalizeJsonValue);
-  }
-  if (typeof value === "object") {
-    const sortedKeys = Object.keys(value).sort();
-    const result = {};
-    for (const k of sortedKeys) {
-      result[k] = canonicalizeJsonValue(value[k]);
-    }
-    return result;
-  }
-  return String(value);
-}
-
-function computeCanonicalConfigHash(payload) {
-  const canonicalJson = JSON.stringify(canonicalizeJsonValue(payload || {}));
-  return crypto.createHash("sha256").update(canonicalJson, "utf8").digest("hex");
-}
-
 async function computeSandboxSignature(configType, canonicalHash) {
   const secret = await getOrCreateServerSecret(
     "sandbox_hmac_v1",
@@ -812,72 +645,6 @@ async function computePseudonymousReporterHash(uid) {
     .createHmac("sha256", secret)
     .update(`reporter:${uid}`, "utf8")
     .digest("hex");
-}
-
-function validateConfigPayloadServerSide(configType, payload) {
-  if (!payload || typeof payload !== "object") {
-    return ["Payload cấu hình không hợp lệ hoặc bị rỗng."];
-  }
-  const errors = [];
-
-  if (containsForbiddenSecretField(payload)) {
-    errors.push("Tuyệt đối không được đưa API Key hoặc khóa bí mật vào cấu hình động.");
-  }
-
-  if (configType === "ai_runtime") {
-    const primary = String(payload.primaryModel || "").trim();
-    if (!SUPPORTED_GEMINI_MODELS.includes(primary)) {
-      errors.push(`Model chính "${primary}" không nằm trong danh sách Whitelist hỗ trợ.`);
-    }
-    if (MUTABLE_ALIAS_GEMINI_MODELS.includes(primary)) {
-      errors.push(`Không được chọn alias động "${primary}" làm model chính.`);
-    }
-    if (Array.isArray(payload.fallbackModels)) {
-      const cleanFallbacks = [];
-      for (const fb of payload.fallbackModels) {
-        const fbStr = String(fb || "").trim();
-        if (!SUPPORTED_GEMINI_MODELS.includes(fbStr)) {
-          errors.push(`Model dự phòng "${fbStr}" không nằm trong danh sách Whitelist.`);
-        } else {
-          cleanFallbacks.push(fbStr);
-        }
-      }
-      const nonAliasFallbacks = cleanFallbacks.filter(
-        (m) => !MUTABLE_ALIAS_GEMINI_MODELS.includes(m)
-      );
-      if (cleanFallbacks.length > 0 && nonAliasFallbacks.length === 0) {
-        errors.push(
-          "Không được chỉ sử dụng alias động (gemini-flash-latest) làm cơ chế fallback duy nhất."
-        );
-      }
-    }
-    const temp = Number(payload.temperature ?? 0.35);
-    if (Number.isNaN(temp) || temp < 0.1 || temp > 0.8) {
-      errors.push("Temperature phải nằm trong khoảng 0.1 đến 0.8.");
-    }
-    const maxHist = Number(payload.maxChatHistoryMessages ?? 10);
-    if (Number.isNaN(maxHist) || maxHist < 4 || maxHist > 20) {
-      errors.push("Số tin nhắn lịch sử hội thoại phải từ 4 đến 20.");
-    }
-  } else if (configType === "financial_heuristics") {
-    const minRec = Number(payload.minRecommendedSavingRate ?? 0.2);
-    const defSav = Number(payload.defaultSavingRateNoGoal ?? 0.15);
-    if (defSav > minRec) {
-      errors.push("Tỷ lệ tiết kiệm mặc định không được lớn hơn tỷ lệ tiết kiệm khuyến nghị.");
-    }
-    const catWarn = Number(payload.categoryForecastWarningRatio ?? 1.3);
-    const catCrit = Number(payload.categoryForecastCriticalRatio ?? 1.6);
-    if (catCrit < catWarn + 0.15) {
-      errors.push("Ngưỡng dự báo nghiêm trọng phải lớn hơn ngưỡng cảnh báo ít nhất 0.15.");
-    }
-    const txWarn = Number(payload.txAnomalyWarningMultiplier ?? 2.0);
-    const txCrit = Number(payload.txAnomalyCriticalMultiplier ?? 4.0);
-    if (txCrit < txWarn + 1.0) {
-      errors.push("Hệ số giao dịch bất thường nghiêm trọng phải lớn hơn hệ số cảnh báo ít nhất 1.0x.");
-    }
-  }
-
-  return errors;
 }
 
 async function verifyActiveUserCaller(req) {
@@ -1037,6 +804,7 @@ exports.adminPublishConfig = functions.https.onRequest(async (req, res) => {
       if (validationErrors.length > 0) {
         const err = new Error(validationErrors.join(" "));
         err.statusCode = 400;
+        err.validationErrors = validationErrors;
         throw err;
       }
 
@@ -1114,9 +882,13 @@ exports.adminPublishConfig = functions.https.onRequest(async (req, res) => {
   } catch (error) {
     functions.logger.error("Lỗi adminPublishConfig:", error);
     const code = error.statusCode || 500;
-    res.status(code).json({
+    const body = {
       error: error.message || "Không thể xuất bản cấu hình.",
-    });
+    };
+    if (Array.isArray(error.validationErrors) && error.validationErrors.length > 0) {
+      body.validationErrors = error.validationErrors;
+    }
+    res.status(code).json(body);
   }
 });
 
@@ -1432,4 +1204,60 @@ exports.adminResolveAiFeedback = functions.https.onRequest(async (req, res) => {
     });
   }
 });
+
+// ======================================================================
+// GIAI ĐOẠN 3 (BẢN VÁ NỀN): SESSION VERIFY, KNOWLEDGE PUBLISH, LIVE GEMINI SANDBOX & ADMIN CRUD
+// ======================================================================
+
+/**
+ * 13. Endpoint Xác minh phiên Quản trị viên chuẩn phía Server & đồng bộ Custom Claims
+ * GET/POST /adminVerifySession
+ */
+exports.adminVerifySession = functions.https.onRequest(async (req, res) => {
+  if (applyAdminCors(req, res)) return;
+  return adminHandlers.adminVerifySession(req, res);
+});
+
+/**
+ * 14. Endpoint Xuất bản / Tạm ngưng bài viết Tri thức Tài chính nguyên tử
+ * POST /adminPublishKnowledgeBase
+ * Body: { articleId: string, action?: 'publish' | 'toggle_active', isActive?: boolean, changeNote?: string }
+ */
+exports.adminPublishKnowledgeBase = functions.https.onRequest(async (req, res) => {
+  if (applyAdminCors(req, res)) return;
+  return adminHandlers.adminPublishKnowledgeBase(req, res);
+});
+
+/**
+ * 15. Endpoint Chạy thử nghiệm Gemini AI Sandbox (Đọc GEMINI_API_KEY từ Secret Manager, không lộ key cho Web)
+ * POST /adminRunSandbox
+ */
+exports.adminRunSandbox = functions
+  .runWith({
+    secrets: [geminiApiKeySecret],
+    timeoutSeconds: 30,
+  })
+  .https.onRequest(async (req, res) => {
+    if (applyAdminCors(req, res)) return;
+    return adminHandlers.adminRunSandbox(req, res);
+  });
+
+/**
+ * 16. Endpoint Quản trị Danh mục Hệ thống (`system_categories`) + Audit Log Server
+ * POST /adminManageSystemCategory
+ */
+exports.adminManageSystemCategory = functions.https.onRequest(async (req, res) => {
+  if (applyAdminCors(req, res)) return;
+  return adminHandlers.adminManageSystemCategory(req, res);
+});
+
+/**
+ * 17. Endpoint Quản trị Thông báo Hệ thống (`system_announcements`) + Audit Log Server
+ * POST /adminManageAnnouncement
+ */
+exports.adminManageAnnouncement = functions.https.onRequest(async (req, res) => {
+  if (applyAdminCors(req, res)) return;
+  return adminHandlers.adminManageAnnouncement(req, res);
+});
+
 

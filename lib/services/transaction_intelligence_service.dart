@@ -56,139 +56,12 @@ class TransactionIntelligenceService {
   static Map<String, List<String>> get builtInIncomeKeywords =>
       _incomeKeywords;
 
-  /// Bảng từ khóa mở rộng cho các danh mục phổ biến
-  static const Map<String, List<String>> _expenseKeywords = {
-    'di chuyen': [
-      'grab',
-      'be',
-      'xanh sm',
-      'gojek',
-      'taxi',
-      'xang',
-      'xe bus',
-      've xe',
-      'gui xe',
-      'bai xe',
-      'di chuyen',
-      'giao thong'
-    ],
-    'an uong': [
-      'highlands',
-      'starbucks',
-      'ca phe',
-      'pho',
-      'com',
-      'tra sua',
-      'kfc',
-      'mcdonalds',
-      'lotte',
-      'nha hang',
-      'an sang',
-      'an trua',
-      'an toi',
-      'banh mi',
-      'nuoc ep',
-      'tai xin',
-      'quan an',
-      'bun',
-      'lau',
-      'nuong',
-      'tra',
-      'banh',
-      'food',
-      'coffee',
-      'sua da',
-      'bac xiu',
-      'matcha',
-      'sinh to'
-    ],
-    'mua sam': [
-      'shopee',
-      'lazada',
-      'tiki',
-      'sieu thi',
-      'quan ao',
-      'giay',
-      'bach hoa xanh',
-      'winmart',
-      'circle k',
-      '7-eleven',
-      'mua sam',
-      'thoi trang',
-      'my pham',
-      'shopping'
-    ],
-    'hoa don': [
-      'dien',
-      'nuoc',
-      'internet',
-      'wifi',
-      'truyen hinh',
-      'tien dien',
-      'tien nuoc',
-      'tien nha',
-      'rac',
-      'hoa don',
-      'dich vu',
-      'bill'
-    ],
-    'suc khoe': [
-      'thuoc',
-      'nha thuoc',
-      'benh vien',
-      'phong kham',
-      'kham benh',
-      'pharmedic',
-      'pharmacity',
-      'long chau',
-      'y te',
-      'suc khoe'
-    ],
-    'giai tri': [
-      'xem phim',
-      'cgv',
-      'lotte cinema',
-      'du lich',
-      'game',
-      've xem phim',
-      'giai tri',
-      'cinema',
-      'movie'
-    ],
-    'giao duc': [
-      'hoc phi',
-      'sach',
-      'khoa hoc',
-      'giao duc',
-      'truong hoc',
-      'hoc tap',
-      'hoc tieng anh'
-    ],
-  };
+  /// Bảng từ khóa mở rộng cho các danh mục phổ biến (nguồn chuẩn dùng chung với Validation & Admin)
+  static const Map<String, List<String>> _expenseKeywords =
+      kProtectedBuiltInExpenseKeywords;
 
-  static const Map<String, List<String>> _incomeKeywords = {
-    'thuong': [
-      'thuong',
-      'tien thuong',
-      'bonus',
-      'khen thuong',
-      'thuong tet',
-    ],
-    'luong': [
-      'luong',
-      'thuong',
-      'income',
-      'salary',
-      'tien luong',
-      'tien thuong',
-      'freelance',
-      'hoa hong',
-      'ban hang',
-      'doanh thu',
-      'thu nhap',
-      'bonus'
-    ],
-  };
+  static const Map<String, List<String>> _incomeKeywords =
+      kProtectedBuiltInIncomeKeywords;
 
   static const _PaymentProviderRule _cashRule = _PaymentProviderRule(
     key: 'cash',
@@ -863,6 +736,8 @@ class TransactionIntelligenceService {
 
     final merged = List<_PaymentProviderRule>.from(_specificProviderRules);
     for (final custom in customList) {
+      if (!custom.isActive) continue;
+      if (kProtectedPaymentProviderKeys.contains(custom.key)) continue;
       if (!kCanonicalWalletTypes.contains(custom.walletType)) continue;
       final safeReceiptKeywords = custom.receiptKeywords
           .map(removeVietnameseDiacritics)
@@ -906,6 +781,10 @@ class TransactionIntelligenceService {
 
     if (rawAdminMap.isEmpty) return const {};
 
+    final disabledAdminSet = effectiveRules.disabledAdminKeywords
+        .map(removeVietnameseDiacritics)
+        .toSet();
+
     // Tập hợp mọi từ khóa chuẩn đã thuộc quy tắc hệ thống
     final allSystemKeywords = <String>{
       for (final list in systemMap.values)
@@ -919,7 +798,11 @@ class TransactionIntelligenceService {
       if (!allowedGroups.contains(groupKey)) continue;
       for (final rawKw in entry.value) {
         final kwNorm = removeVietnameseDiacritics(rawKw);
-        if (kwNorm.length < 2 || allSystemKeywords.contains(kwNorm)) continue;
+        if (kwNorm.length < 2 ||
+            allSystemKeywords.contains(kwNorm) ||
+            disabledAdminSet.contains(kwNorm)) {
+          continue;
+        }
         adminKeywordGroupClaims.putIfAbsent(kwNorm, () => <String>{}).add(groupKey);
       }
     }
@@ -932,6 +815,8 @@ class TransactionIntelligenceService {
       for (final rawKw in entry.value) {
         final kwNorm = removeVietnameseDiacritics(rawKw);
         if (kwNorm.length < 2) continue;
+        // Bỏ qua từ khóa Admin đang tạm tắt
+        if (disabledAdminSet.contains(kwNorm)) continue;
         // Chặn ghi đè từ khóa hệ thống
         if (allSystemKeywords.contains(kwNorm)) continue;
         // Chặn từ khóa bị gán đồng thời vào >= 2 nhóm khác nhau

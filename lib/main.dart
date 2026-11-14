@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/date_symbol_data_local.dart';
 import 'firebase_options.dart';
 import 'routes/app_routes.dart';
+import 'screens/management/recurring_transaction_screen.dart';
 import 'utils/constants.dart';
-import 'services/theme_controller.dart';
+import 'services/language_controller.dart';
 import 'services/local_notification_service.dart';
+import 'l10n/app_localizations.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -14,7 +17,15 @@ Future<void> main() async {
     options: DefaultFirebaseOptions.currentPlatform,
   );
   await initializeDateFormatting('vi_VN', null);
-  await ThemeController.loadSavedTheme();
+  await initializeDateFormatting('en_US', null);
+  await LanguageController.loadSavedLanguage();
+  LocalNotificationService.onOpenRecurringSchedule = (scheduleId) {
+    AppRoutes.navigatorKey.currentState?.push(
+      MaterialPageRoute(
+        builder: (_) => RecurringTransactionScreen(targetScheduleId: scheduleId),
+      ),
+    );
+  };
   await LocalNotificationService().initialize();
   runApp(const FinanceAiApp());
 }
@@ -224,16 +235,23 @@ class FinanceAiApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<ThemeMode>(
-      valueListenable: ThemeController.mode,
-      builder: (context, mode, _) {
+    return ValueListenableBuilder<Locale>(
+      valueListenable: LanguageController.currentLocale,
+      builder: (context, locale, _) {
         return MaterialApp(
           navigatorKey: AppRoutes.navigatorKey,
           title: AppStrings.appName,
           debugShowCheckedModeBanner: false,
-          themeMode: mode,
+          themeMode: ThemeMode.light,
           theme: _buildTheme(Brightness.light),
-          darkTheme: _buildTheme(Brightness.dark),
+          locale: locale,
+          supportedLocales: LanguageController.supportedLocales,
+          localizationsDelegates: const [
+            AppLocalizations.delegate,
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
           initialRoute: AppRoutes.splash,
           routes: AppRoutes.routes,
         );

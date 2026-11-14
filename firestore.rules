@@ -39,13 +39,12 @@ service cloud.firestore {
         && request.resource.data.get('role', 'user') == 'user'
         && request.resource.data.get('status', 'active') == 'active';
 
-      allow update: if (isActiveUser()
+      allow update: if isActiveUser()
         && request.auth.uid == uid
         && request.resource.data.get('role', 'user') == resource.data.get('role', 'user')
-        && request.resource.data.get('status', 'active') == resource.data.get('status', 'active'))
-        || isAdmin();
+        && request.resource.data.get('status', 'active') == resource.data.get('status', 'active');
 
-      allow delete: if isAdmin();
+      allow delete: if false;
 
       match /quickTemplates/{templateId} {
         allow read, write: if isActiveUser() && request.auth.uid == uid;
@@ -169,15 +168,16 @@ service cloud.firestore {
         && request.resource.data.userId == request.auth.uid;
     }
 
-    // 3. Cấu hình hệ thống dành cho Admin (Mọi người dùng đăng nhập được đọc, chỉ Admin được ghi)
+    // 3. Cấu hình hệ thống dành cho Admin (Mọi người dùng đăng nhập được đọc;
+    //    việc ghi phải đi qua Cloud Functions để đảm bảo sinh Audit Log phía Server)
     match /system_categories/{catId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if false;
     }
 
     match /system_announcements/{annId} {
       allow read: if isSignedIn();
-      allow write: if isAdmin();
+      allow write: if false;
     }
 
     // 4. Nhật ký quản trị hệ thống (Immutable Server-Authenticated Audit Logs)
@@ -231,7 +231,50 @@ service cloud.firestore {
     }
 
     match /financial_knowledge_drafts/{articleId} {
-      allow read, write: if isAdmin();
+      allow read, delete: if isAdmin();
+      allow create, update: if isAdmin()
+        && request.resource.data.keys().hasAll([
+          'articleId',
+          'title',
+          'topic',
+          'triggerCondition',
+          'priority',
+          'summaryForUser',
+          'aiGroundingSnippet',
+          'isActive'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'articleId',
+          'title',
+          'topic',
+          'triggerCondition',
+          'priority',
+          'summaryForUser',
+          'aiGroundingSnippet',
+          'suggestedPrompts',
+          'isActive',
+          'updatedAt',
+          'updatedBy',
+          'lastPublishedVersion',
+          'lastPublishedAt',
+          'lastPublishedBy'
+        ])
+        && request.resource.data.articleId == articleId
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 3
+        && request.resource.data.title.size() <= 120
+        && request.resource.data.topic in ['budget_rule', 'saving_strategy', 'spending_control', 'crisis_recovery']
+        && request.resource.data.triggerCondition in ['always', 'low_saving_rate', 'essential_deficit', 'variable_income', 'budget_overrun', 'infeasible_goal']
+        && request.resource.data.priority is int
+        && request.resource.data.priority >= 1
+        && request.resource.data.priority <= 10
+        && request.resource.data.summaryForUser is string
+        && request.resource.data.summaryForUser.size() >= 1
+        && request.resource.data.summaryForUser.size() <= 250
+        && request.resource.data.aiGroundingSnippet is string
+        && request.resource.data.aiGroundingSnippet.size() >= 1
+        && request.resource.data.aiGroundingSnippet.size() <= 300
+        && request.resource.data.isActive is bool;
     }
 
     // - Lịch sử phiên bản cấu hình (Immutable Snapshots): Chỉ Admin được đọc; chỉ Cloud Function tạo mới.
