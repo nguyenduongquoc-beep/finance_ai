@@ -1,3 +1,4 @@
+import '../models/ai_runtime_config_model.dart';
 import '../models/budget_model.dart';
 import '../models/category_model.dart';
 import '../models/financial_forecast_result.dart';
@@ -6,6 +7,7 @@ import '../models/recurring_transaction_model.dart';
 import '../models/saving_goal_model.dart';
 import '../models/transaction_model.dart';
 import '../models/wallet_model.dart';
+import 'ai_config_sync_service.dart';
 import 'financial_analytics_service.dart';
 import 'recurring_transaction_service.dart';
 
@@ -19,6 +21,16 @@ class FinancialForecastService {
   static const double kAnomalyThresholdRatio = 1.30; // Vượt 30% kỳ vọng
   static const double kAnomalyCriticalRatio = 1.60; // Vượt 60% -> critical
   static const double kBudgetWarningRatio = 0.80; // Dùng >= 80% hạn mức
+
+  final FinancialHeuristicsConfig? _heuristicsOverride;
+
+  FinancialForecastService({FinancialHeuristicsConfig? heuristicsOverride})
+      : _heuristicsOverride = heuristicsOverride;
+
+  /// Lấy bộ ngưỡng định lượng đang hiệu lực (tách biệt hoàn toàn ngưỡng bất thường
+  /// theo danh mục tháng và ngưỡng bất thường của từng giao dịch đơn lẻ).
+  FinancialHeuristicsConfig get effectiveHeuristics =>
+      _heuristicsOverride ?? AiConfigSyncService.instance.currentHeuristics;
 
   /// 1. Dự báo số dư cuối tháng (Có hỗ trợ các khoản định kỳ chưa đến hạn)
   MonthEndForecast calculateMonthEndForecast({
@@ -129,7 +141,10 @@ class FinancialForecastService {
     required List<Category> categories,
     required List<AppTransaction> currentMonthTx,
     DateTime? refDate,
+    FinancialHeuristicsConfig? heuristicsOverride,
   }) {
+    final h = heuristicsOverride ?? effectiveHeuristics;
+    final budgetWarnRatio = h.budgetNearLimitRatio;
     final today = refDate ?? DateTime.now();
     final daysInMonth = DateTime(today.year, today.month + 1, 0).day;
     final elapsedDays = today.day.clamp(1, daysInMonth);
@@ -179,13 +194,13 @@ class FinancialForecastService {
 
         if (inCurrentMonth) {
           status = BudgetForecastStatus.atRisk;
-        } else if (percentUsed >= kBudgetWarningRatio) {
+        } else if (percentUsed >= budgetWarnRatio) {
           status = BudgetForecastStatus.warning;
         } else {
           status = BudgetForecastStatus.safe;
         }
       } else {
-        if (percentUsed >= kBudgetWarningRatio) {
+        if (percentUsed >= budgetWarnRatio) {
           status = BudgetForecastStatus.warning;
         } else {
           status = BudgetForecastStatus.safe;
@@ -216,7 +231,13 @@ class FinancialForecastService {
     required List<List<AppTransaction>> preceding3MonthsTx,
     required List<Category> categories,
     DateTime? refDate,
+    FinancialHeuristicsConfig? heuristicsOverride,
   }) {
+    final h = heuristicsOverride ?? effectiveHeuristics;
+    final anomalyWarnRatio = h.categoryForecastWarningRatio;
+    final anomalyCritRatio = h.categoryForecastCriticalRatio;
+    final minAnomalyDiffVnd = h.categoryForecastMinDiffVnd;
+
     final today = refDate ?? DateTime.now();
     final daysInCurrentMonth = DateTime(today.year, today.month + 1, 0).day;
     final elapsedDays = today.day.clamp(1, daysInCurrentMonth);
@@ -260,9 +281,9 @@ class FinancialForecastService {
           (averageMonthlySpend * elapsedDays) / daysInCurrentMonth;
       final excessAmount = currentSpend - expectedSpendToDate;
 
-      // Điều kiện bất thường: > 30% kỳ vọng VÀ chênh lệch tuyệt đối >= 100.000đ
-      if (currentSpend > expectedSpendToDate * kAnomalyThresholdRatio &&
-          excessAmount >= kMinAnomalyAmountVnd) {
+      // Điều kiện bất thường theo danh mục tháng (tách biệt với giao dịch lẻ)
+      if (currentSpend > expectedSpendToDate * anomalyWarnRatio &&
+          excessAmount >= minAnomalyDiffVnd) {
         final catName = categories
             .firstWhere(
               (c) => c.categoryId == catId,
@@ -280,7 +301,7 @@ class FinancialForecastService {
         final excessRatio = expectedSpendToDate > 0
             ? (currentSpend / expectedSpendToDate)
             : 1.0;
-        final severity = excessRatio >= kAnomalyCriticalRatio
+        final severity = excessRatio >= anomalyCritRatio
             ? IssueSeverity.critical
             : IssueSeverity.warning;
 
@@ -308,18 +329,25 @@ class FinancialForecastService {
     required List<SpendingAnomaly> anomalies,
     required List<FinancialIssue> issues,
     required List<HealthScoreDeduction> outDeductions,
+    FinancialHeuristicsConfig? heuristicsOverride,
   }) {
+    final h = heuristicsOverride ?? effectiveHeuristics;
+    final negBalPenalty = h.healthNegativeBalancePenalty;
+    final exceededPenalty = h.healthBudgetExceededPenalty;
+    final atRiskPenalty = h.healthBudgetAtRiskPenalty;
+    final nearLimitPct = (h.budgetNearLimitRatio * 100).round();
+
     double score = 100;
     outDeductions.clear();
 
     // 1. Phạt dự báo số dư cuối tháng
     if (monthEndForecast.hasEnoughData) {
       if (monthEndForecast.projectedEndBalance < 0) {
-        outDeductions.add(const HealthScoreDeduction(
+        outDeductions.add(HealthScoreDeduction(
           reason: 'Dự báo âm số dư cuối tháng',
-          points: 25,
+          points: negBalPenalty,
         ));
-        score -= 25;
+        score -= negBalPenalty;
       } else if (monthEndForecast.projectedEndBalance < 1000000) {
         outDeductions.add(const HealthScoreDeduction(
           reason: 'Dự báo số dư cuối tháng thấp (< 1.000.000đ)',
@@ -335,7 +363,7 @@ class FinancialForecastService {
     // 2. Ngân sách vượt / nguy cơ
     for (final b in budgetForecasts) {
       if (b.status == BudgetForecastStatus.exceeded) {
-        const pts = 15;
+        final pts = exceededPenalty;
         categoryDeductionMap[b.categoryId] =
             (categoryDeductionMap[b.categoryId] ?? 0) + pts;
         outDeductions.add(HealthScoreDeduction(
@@ -344,7 +372,7 @@ class FinancialForecastService {
           categoryId: b.categoryId,
         ));
       } else if (b.status == BudgetForecastStatus.atRisk) {
-        const pts = 10;
+        final pts = atRiskPenalty;
         categoryDeductionMap[b.categoryId] =
             (categoryDeductionMap[b.categoryId] ?? 0) + pts;
         outDeductions.add(HealthScoreDeduction(
@@ -357,7 +385,8 @@ class FinancialForecastService {
         categoryDeductionMap[b.categoryId] =
             (categoryDeductionMap[b.categoryId] ?? 0) + pts;
         outDeductions.add(HealthScoreDeduction(
-          reason: 'Ngân sách "${b.categoryName}" gần chạm hạn mức (>=80%)',
+          reason:
+              'Ngân sách "${b.categoryName}" gần chạm hạn mức (>=$nearLimitPct%)',
           points: pts,
           categoryId: b.categoryId,
         ));
@@ -435,7 +464,8 @@ class FinancialForecastService {
     DateTime? refDate,
   }) {
     final today = refDate ?? DateTime.now();
-    final analytics = FinancialAnalyticsService();
+    final analytics =
+        FinancialAnalyticsService(heuristicsOverride: _heuristicsOverride);
 
     final lastMonthTx = preceding3MonthsTx.isNotEmpty
         ? preceding3MonthsTx.last

@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import '../models/ai_runtime_config_model.dart';
 import '../models/transaction_model.dart';
 import '../models/wallet_model.dart';
 import '../models/budget_model.dart';
@@ -6,8 +7,11 @@ import '../models/category_model.dart';
 import '../models/saving_goal_model.dart';
 import '../models/user_model.dart';
 import '../models/financial_issue.dart';
+import '../models/monthly_financial_plan.dart';
+import '../services/ai_config_sync_service.dart';
 import '../services/firestore_service.dart';
 import '../services/financial_analytics_service.dart';
+import '../services/financial_context_revision_tracker.dart';
 import '../utils/formatters.dart';
 
 /// Loại thẻ Insight hiển thị tương tác trong cuộc trò chuyện
@@ -107,6 +111,10 @@ class FinancialChatContext {
   final List<DynamicPromptChip> dynamicPrompts;
   final bool hasSufficientData;
   final bool isEmptyData;
+  final DataSufficiencyTier dataTier;
+  final MonthlyFinancialPlan? activePlan;
+  final String revisionSignature;
+  final int mutationVersion;
 
   const FinancialChatContext({
     required this.rawPromptContext,
@@ -125,6 +133,10 @@ class FinancialChatContext {
     required this.dynamicPrompts,
     required this.hasSufficientData,
     required this.isEmptyData,
+    this.dataTier = DataSufficiencyTier.preliminary,
+    this.activePlan,
+    this.revisionSignature = '',
+    this.mutationVersion = 0,
   });
 }
 
@@ -134,17 +146,96 @@ class FinancialChatContext {
 /// để làm ngữ cảnh chuẩn xác cho Gemini, không để AI tự đoán mò.
 /// ============================================================
 class FinancialChatContextService {
-  final FirestoreService _firestoreService;
+  FirestoreService? _firestoreService;
   final FinancialAnalyticsService _analyticsService;
+  final FinancialHeuristicsConfig? _heuristicsOverride;
 
   FinancialChatContextService({
     FirestoreService? firestoreService,
     FinancialAnalyticsService? analyticsService,
-  })  : _firestoreService = firestoreService ?? FirestoreService(),
-        _analyticsService = analyticsService ?? FinancialAnalyticsService();
+    FinancialHeuristicsConfig? heuristicsOverride,
+  })  : _firestoreService = firestoreService,
+        _heuristicsOverride = heuristicsOverride,
+        _analyticsService = analyticsService ??
+            FinancialAnalyticsService(heuristicsOverride: heuristicsOverride);
+
+  FirestoreService get _resolvedFirestore =>
+      _firestoreService ??= FirestoreService();
+
+  FinancialHeuristicsConfig get effectiveHeuristics =>
+      _heuristicsOverride ?? AiConfigSyncService.instance.currentHeuristics;
 
   Future<FinancialChatContext> buildContext(String userId) async {
+    await AiConfigSyncService.instance.syncPublishedConfigsIfNeeded();
     final now = DateTime.now();
+    final startOfTwoMonthsAgo = DateTime(now.year, now.month - 2, 1);
+    final endOfCurrentMonth = DateTime(now.year, now.month + 1, 0, 23, 59, 59);
+    final currentMonthStr = AppFormatters.month(now);
+
+    Future<List<AppTransaction>> fetchWindowTransactions() async {
+      try {
+        return await _resolvedFirestore.getTransactionsByDateWindow(
+          userId,
+          from: startOfTwoMonthsAgo,
+          to: endOfCurrentMonth,
+        );
+      } catch (_) {
+        return await _resolvedFirestore.getTransactionsSafely(userId);
+      }
+    }
+
+    // Lấy song song dữ liệu trong cửa sổ phân tích 3 tháng từ Firestore
+    final results = await Future.wait<dynamic>([
+      fetchWindowTransactions(),
+      _resolvedFirestore.getWalletsSafely(userId),
+      _resolvedFirestore.getBudgetsSafely(userId, month: currentMonthStr),
+      _resolvedFirestore.getCategoriesSafely(userId),
+      _resolvedFirestore.getSavingGoalsSafely(userId),
+      _resolvedFirestore.getUserProfile(userId),
+      _resolvedFirestore.getMonthlyPlan(userId, currentMonthStr),
+    ]);
+
+    final allTransactions = results[0] as List<AppTransaction>;
+    final wallets = results[1] as List<Wallet>;
+    final budgets = results[2] as List<Budget>;
+    final categories = results[3] as List<Category>;
+    final savingGoals = results[4] as List<SavingGoal>;
+    final userProfile = results[5] as AppUser?;
+    final activePlan = results[6] as MonthlyFinancialPlan?;
+
+    return buildContextFromData(
+      allTransactions: allTransactions,
+      wallets: wallets,
+      budgets: budgets,
+      categories: categories,
+      savingGoals: savingGoals,
+      userProfile: userProfile,
+      declaredMonthlyIncome: userProfile?.monthlyIncome,
+      activePlan: activePlan,
+      referenceDate: now,
+    );
+  }
+
+  /// Phương thức thuần (Pure, không phụ thuộc Firestore/userId) để tổng hợp ngữ cảnh tài chính.
+  /// Dùng chung 100% logic cho cả luồng User thực tế và AI Sandbox / Unit Test.
+  FinancialChatContext buildContextFromData({
+    List<AppTransaction>? allTransactions,
+    List<AppTransaction>? currentMonthTx,
+    List<AppTransaction>? lastMonthTx,
+    List<AppTransaction>? twoMonthsAgoTx,
+    required List<Wallet> wallets,
+    required List<Budget> budgets,
+    required List<Category> categories,
+    required List<SavingGoal> savingGoals,
+    double? declaredMonthlyIncome,
+    AppUser? userProfile,
+    MonthlyFinancialPlan? activePlan,
+    FinancialHeuristicsConfig? heuristicsOverride,
+    List<String>? customSuggestedPrompts,
+    DateTime? referenceDate,
+  }) {
+    final h = heuristicsOverride ?? effectiveHeuristics;
+    final now = referenceDate ?? DateTime.now();
     final startOfCurrentMonth = DateTime(now.year, now.month, 1);
     final endOfCurrentMonth = DateTime(now.year, now.month + 1, 0, 23, 59, 59);
 
@@ -154,49 +245,50 @@ class FinancialChatContextService {
     final startOfTwoMonthsAgo = DateTime(now.year, now.month - 2, 1);
     final ninetyDaysAgo = now.subtract(const Duration(days: 90));
 
-    // Lấy song song dữ liệu từ Firestore an toàn không phụ thuộc composite index
-    final results = await Future.wait<dynamic>([
-      _firestoreService.getTransactionsSafely(userId),
-      _firestoreService.getWalletsSafely(userId),
-      _firestoreService.getBudgetsSafely(userId,
-          month: AppFormatters.month(now)),
-      _firestoreService.getCategoriesSafely(userId),
-      _firestoreService.getSavingGoalsSafely(userId),
-      _firestoreService.getUserProfile(userId),
-    ]);
+    final List<AppTransaction> resolvedAllTx;
+    final List<AppTransaction> resolvedCurrentMonthTx;
+    final List<AppTransaction> resolvedLastMonthTx;
+    final List<AppTransaction> resolvedTwoMonthsAgoTx;
 
-    final allTransactions = results[0] as List<AppTransaction>;
-    final wallets = results[1] as List<Wallet>;
-    final budgets = results[2] as List<Budget>;
-    final categories = results[3] as List<Category>;
-    final savingGoals = results[4] as List<SavingGoal>;
-    final userProfile = results[5] as AppUser?;
+    if (currentMonthTx != null ||
+        lastMonthTx != null ||
+        twoMonthsAgoTx != null) {
+      resolvedCurrentMonthTx = currentMonthTx ?? const [];
+      resolvedLastMonthTx = lastMonthTx ?? const [];
+      resolvedTwoMonthsAgoTx = twoMonthsAgoTx ?? const [];
+      resolvedAllTx = allTransactions ??
+          <AppTransaction>[
+            ...resolvedCurrentMonthTx,
+            ...resolvedLastMonthTx,
+            ...resolvedTwoMonthsAgoTx,
+          ];
+    } else {
+      resolvedAllTx = allTransactions ?? const [];
+      resolvedCurrentMonthTx = resolvedAllTx.where((t) {
+        return t.date.isAfter(
+                startOfCurrentMonth.subtract(const Duration(seconds: 1))) &&
+            t.date.isBefore(endOfCurrentMonth.add(const Duration(seconds: 1)));
+      }).toList();
 
-    // Phân loại giao dịch theo tháng
-    final currentMonthTx = allTransactions.where((t) {
-      return t.date.isAfter(
-              startOfCurrentMonth.subtract(const Duration(seconds: 1))) &&
-          t.date.isBefore(endOfCurrentMonth.add(const Duration(seconds: 1)));
-    }).toList();
+      resolvedLastMonthTx = resolvedAllTx.where((t) {
+        return t.date
+                .isAfter(startOfLastMonth.subtract(const Duration(seconds: 1))) &&
+            t.date.isBefore(endOfLastMonth.add(const Duration(seconds: 1)));
+      }).toList();
 
-    final lastMonthTx = allTransactions.where((t) {
-      return t.date
-              .isAfter(startOfLastMonth.subtract(const Duration(seconds: 1))) &&
-          t.date.isBefore(endOfLastMonth.add(const Duration(seconds: 1)));
-    }).toList();
-
-    final twoMonthsAgoTx = allTransactions.where((t) {
-      return t.date.isAfter(
-              startOfTwoMonthsAgo.subtract(const Duration(seconds: 1))) &&
-          t.date.isBefore(startOfLastMonth);
-    }).toList();
+      resolvedTwoMonthsAgoTx = resolvedAllTx.where((t) {
+        return t.date.isAfter(
+                startOfTwoMonthsAgo.subtract(const Duration(seconds: 1))) &&
+            t.date.isBefore(startOfLastMonth);
+      }).toList();
+    }
 
     // 1. Tính toán định lượng tháng hiện tại
-    final incomeThisMonth = currentMonthTx
+    final incomeThisMonth = resolvedCurrentMonthTx
         .where((t) => t.type == 'income')
         .fold<double>(0.0, (sum, t) => sum + t.amount);
 
-    final expenseThisMonth = currentMonthTx
+    final expenseThisMonth = resolvedCurrentMonthTx
         .where((t) => t.type == 'expense')
         .fold<double>(0.0, (sum, t) => sum + t.amount);
 
@@ -207,41 +299,41 @@ class FinancialChatContextService {
 
     // Chi tiêu theo danh mục tháng này
     final Map<String, double> currentExpenseByCat = {};
-    for (final t in currentMonthTx.where((t) => t.type == 'expense')) {
+    for (final t in resolvedCurrentMonthTx.where((t) => t.type == 'expense')) {
       currentExpenseByCat[t.categoryId] =
           (currentExpenseByCat[t.categoryId] ?? 0) + t.amount;
     }
 
     // 2. Tính toán định lượng tháng trước
-    final incomeLastMonth = lastMonthTx
+    final incomeLastMonth = resolvedLastMonthTx
         .where((t) => t.type == 'income')
         .fold<double>(0.0, (sum, t) => sum + t.amount);
 
-    final expenseLastMonth = lastMonthTx
+    final expenseLastMonth = resolvedLastMonthTx
         .where((t) => t.type == 'expense')
         .fold<double>(0.0, (sum, t) => sum + t.amount);
 
     final netLastMonth = incomeLastMonth - expenseLastMonth;
 
     final Map<String, double> lastExpenseByCat = {};
-    for (final t in lastMonthTx.where((t) => t.type == 'expense')) {
+    for (final t in resolvedLastMonthTx.where((t) => t.type == 'expense')) {
       lastExpenseByCat[t.categoryId] =
           (lastExpenseByCat[t.categoryId] ?? 0) + t.amount;
     }
 
     // 3. Tính toán tháng trước nữa để có trung bình 3 tháng
-    final incomeTwoMonthsAgo = twoMonthsAgoTx
+    final incomeTwoMonthsAgo = resolvedTwoMonthsAgoTx
         .where((t) => t.type == 'income')
         .fold<double>(0.0, (sum, t) => sum + t.amount);
-    final expenseTwoMonthsAgo = twoMonthsAgoTx
+    final expenseTwoMonthsAgo = resolvedTwoMonthsAgoTx
         .where((t) => t.type == 'expense')
         .fold<double>(0.0, (sum, t) => sum + t.amount);
     final netTwoMonthsAgo = incomeTwoMonthsAgo - expenseTwoMonthsAgo;
 
     final List<double> recentNets = [];
-    if (currentMonthTx.isNotEmpty) recentNets.add(netCashFlow);
-    if (lastMonthTx.isNotEmpty) recentNets.add(netLastMonth);
-    if (twoMonthsAgoTx.isNotEmpty) recentNets.add(netTwoMonthsAgo);
+    if (resolvedCurrentMonthTx.isNotEmpty) recentNets.add(netCashFlow);
+    if (resolvedLastMonthTx.isNotEmpty) recentNets.add(netLastMonth);
+    if (resolvedTwoMonthsAgoTx.isNotEmpty) recentNets.add(netTwoMonthsAgo);
 
     final averageMonthlySavings = recentNets.isNotEmpty
         ? recentNets.fold<double>(0.0, (a, b) => a + b) / recentNets.length
@@ -252,7 +344,7 @@ class FinancialChatContextService {
         .where((w) => w.isActive)
         .fold<double>(0.0, (sum, w) => sum + w.balance);
 
-    // 5. Ngân sách & Hạn mức
+    // 5. Ngân sách & Hạn mức (theo ngưỡng budgetNearLimitRatio động)
     final List<Budget> overBudgets = [];
     final List<Budget> nearLimitBudgets = [];
 
@@ -260,27 +352,58 @@ class FinancialChatContextService {
       final spent = currentExpenseByCat[b.categoryId] ?? 0;
       if (b.isOverBudget(spent)) {
         overBudgets.add(b);
-      } else if (b.isNearLimit(spent)) {
+      } else if (b.limit > 0 && spent >= b.limit * h.budgetNearLimitRatio) {
         nearLimitBudgets.add(b);
       }
     }
 
+    final effectiveDeclaredIncome =
+        declaredMonthlyIncome ?? userProfile?.monthlyIncome ?? 0.0;
+
     // 6. Phát hiện vấn đề tài chính định lượng (Issues)
     final issues = _analyticsService.detectIssues(
-      currentMonthTx: currentMonthTx,
-      lastMonthTx: lastMonthTx,
+      currentMonthTx: resolvedCurrentMonthTx,
+      lastMonthTx: resolvedLastMonthTx,
       categories: categories,
-      monthlyIncome: userProfile?.monthlyIncome ?? incomeThisMonth,
+      monthlyIncome: effectiveDeclaredIncome > 0
+          ? effectiveDeclaredIncome
+          : incomeThisMonth,
+      heuristicsOverride: h,
     );
 
-    // 7. Đánh giá chất lượng dữ liệu
+    // 7. Đánh giá chất lượng dữ liệu đa chiều (Tier 0 -> Tier 4)
+    final sufficiency = _analyticsService.assessDataSufficiency(
+      currentMonthTx: resolvedCurrentMonthTx,
+      historicalMonthsTx: [resolvedLastMonthTx, resolvedTwoMonthsAgoTx],
+      currentBudgets: budgets,
+      wallets: wallets,
+      savingGoals: savingGoals,
+      activePlan: activePlan,
+      referenceToday: now,
+    );
     final ninetyDaysTx =
-        allTransactions.where((t) => t.date.isAfter(ninetyDaysAgo)).toList();
-    final isEmptyData = allTransactions.isEmpty;
-    final hasSufficientData = ninetyDaysTx.length >= 5 &&
-        (lastMonthTx.isNotEmpty || currentMonthTx.length >= 8);
+        resolvedAllTx.where((t) => t.date.isAfter(ninetyDaysAgo)).toList();
+    final isEmptyData = sufficiency.tier == DataSufficiencyTier.empty;
+    final hasSufficientData =
+        sufficiency.tier != DataSufficiencyTier.empty &&
+            sufficiency.tier != DataSufficiencyTier.preliminary &&
+            ninetyDaysTx.length >= 5;
 
-    // 8. Tạo Prompts gợi ý động theo ngữ cảnh thực tế
+    final revisionSignature =
+        FinancialContextRevisionTracker.computeRevisionSignature(
+      transactions: resolvedAllTx,
+      budgets: budgets,
+      categories: categories,
+      savingGoals: savingGoals,
+      wallets: wallets,
+      activePlan: activePlan,
+    );
+
+    // 8. Tạo Prompts gợi ý động theo ngữ cảnh thực tế + gợi ý Admin (nếu có)
+    final customFromConfig = AiConfigSyncService
+        .instance.currentAiRuntime.customSuggestedChatPrompts.values
+        .expand((list) => list)
+        .toList();
     final dynamicPrompts = _generateDynamicPrompts(
       isEmptyData: isEmptyData,
       netCashFlow: netCashFlow,
@@ -289,11 +412,13 @@ class FinancialChatContextService {
       categories: categories,
       currentExpenseByCat: currentExpenseByCat,
       issues: issues,
+      customSuggestedPrompts: customSuggestedPrompts ?? customFromConfig,
     );
 
-    // 9. Xây dựng chuỗi prompt context hoàn chỉnh
+    // 9. Xây dựng chuỗi prompt context hoàn chỉnh (đã lọc PII và kiểm soát kích thước)
     final rawPromptContext = _formatContextString(
       userProfile: userProfile,
+      declaredMonthlyIncome: effectiveDeclaredIncome,
       now: now,
       incomeThisMonth: incomeThisMonth,
       expenseThisMonth: expenseThisMonth,
@@ -313,7 +438,11 @@ class FinancialChatContextService {
       issues: issues,
       isEmptyData: isEmptyData,
       hasSufficientData: hasSufficientData,
-      totalTxCount: allTransactions.length,
+      totalTxCount: resolvedAllTx.length,
+      sufficiency: sufficiency,
+      activePlan: activePlan,
+      currentMonthTx: resolvedCurrentMonthTx,
+      heuristics: h,
     );
 
     return FinancialChatContext(
@@ -333,6 +462,10 @@ class FinancialChatContextService {
       dynamicPrompts: dynamicPrompts,
       hasSufficientData: hasSufficientData,
       isEmptyData: isEmptyData,
+      dataTier: sufficiency.tier,
+      activePlan: activePlan,
+      revisionSignature: revisionSignature,
+      mutationVersion: FinancialContextRevisionTracker.localMutationVersion,
     );
   }
 
@@ -345,6 +478,7 @@ class FinancialChatContextService {
     required List<Category> categories,
     required Map<String, double> currentExpenseByCat,
     required List<FinancialIssue> issues,
+    List<String> customSuggestedPrompts = const [],
   }) {
     final List<DynamicPromptChip> prompts = [];
 
@@ -475,12 +609,41 @@ class FinancialChatContextService {
       category: 'saving',
     ));
 
+    // Bổ sung các câu hỏi gợi ý tùy chỉnh từ Admin (nếu chưa trùng lặp)
+    final existingLabels =
+        prompts.map((p) => p.label.trim().toLowerCase()).toSet();
+    for (final customLabel in customSuggestedPrompts.take(10)) {
+      final trimmed = customLabel.trim();
+      if (trimmed.isNotEmpty &&
+          !existingLabels.contains(trimmed.toLowerCase())) {
+        prompts.add(DynamicPromptChip(
+          label: trimmed,
+          category: 'featured',
+          icon: '✨',
+        ));
+        existingLabels.add(trimmed.toLowerCase());
+      }
+    }
+
     return prompts;
   }
 
-  /// Định dạng chuỗi context chi tiết và chặt chẽ cho Gemini
+  /// Lọc PII khỏi tên hiển thị (không bao giờ gửi email, SĐT hoặc UID cho Gemini)
+  static String _sanitizeDisplayName(String? rawName) {
+    if (rawName == null || rawName.trim().isEmpty) return 'Khách';
+    var cleaned = rawName.trim();
+    if (cleaned.contains('@')) {
+      cleaned = cleaned.split('@').first.trim();
+    }
+    cleaned = cleaned.replaceAll(RegExp(r'\b\d{9,12}\b'), '[ẩn]');
+    if (cleaned.isEmpty) return 'Khách';
+    return cleaned.length > 40 ? cleaned.substring(0, 40) : cleaned;
+  }
+
+  /// Định dạng chuỗi context chi tiết và chặt chẽ cho Gemini (đã lọc PII & giới hạn kích thước)
   String _formatContextString({
     required AppUser? userProfile,
+    double declaredMonthlyIncome = 0,
     required DateTime now,
     required double incomeThisMonth,
     required double expenseThisMonth,
@@ -501,23 +664,30 @@ class FinancialChatContextService {
     required bool isEmptyData,
     required bool hasSufficientData,
     required int totalTxCount,
+    DataSufficiencyAssessment? sufficiency,
+    MonthlyFinancialPlan? activePlan,
+    List<AppTransaction> currentMonthTx = const [],
+    required FinancialHeuristicsConfig heuristics,
   }) {
     final buffer = StringBuffer();
     final monthStr = '${now.month}/${now.year}';
     final dayOfMonth = now.day;
+    final effectiveDeclared = declaredMonthlyIncome > 0
+        ? declaredMonthlyIncome
+        : (userProfile?.monthlyIncome ?? 0.0);
 
     buffer.writeln('=== DỮ LIỆU TÀI CHÍNH THỰC TẾ CỦA NGƯỜI DÙNG ===');
-    buffer.writeln('- Người dùng: ${userProfile?.name ?? 'Khách'}');
-    if (userProfile != null && userProfile.monthlyIncome > 0) {
+    buffer.writeln('- Người dùng: ${_sanitizeDisplayName(userProfile?.name)}');
+    if (effectiveDeclared > 0) {
       buffer.writeln(
-          '- Thu nhập kỳ vọng khai báo trong hồ sơ: ${AppFormatters.number(userProfile.monthlyIncome)} đ/tháng (Lưu ý AI: Dùng làm tham chiếu cơ sở cho quy tắc 50/30/20 hoặc lập kế hoạch, KHÔNG tự cộng vào số dư thực tế hay tổng thu giao dịch)');
-    }
-    if (userProfile?.occupation != null &&
-        userProfile!.occupation!.isNotEmpty) {
-      buffer.writeln('- Lĩnh vực nghề nghiệp: ${userProfile.occupation}');
+          '- Thu nhập kỳ vọng khai báo trong hồ sơ: ${AppFormatters.number(effectiveDeclared)} đ/tháng (Lưu ý AI: Dùng làm tham chiếu cơ sở cho quy tắc 50/30/20 hoặc lập kế hoạch, KHÔNG tự cộng vào số dư thực tế hay tổng thu giao dịch)');
     }
     buffer.writeln('- Thời điểm phân tích: Ngày $dayOfMonth tháng $monthStr');
     buffer.writeln('- Tổng số giao dịch đã ghi nhận: $totalTxCount giao dịch');
+    if (sufficiency != null) {
+      buffer.writeln(
+          '- Cấp độ dữ liệu (${sufficiency.tier.name}): ${sufficiency.limitationNote}');
+    }
 
     if (isEmptyData) {
       buffer.writeln('\n[TRẠNG THÁI DỮ LIỆU]: CHƯA CÓ GIAO DỊCH NÀO.');
@@ -586,6 +756,8 @@ class FinancialChatContextService {
     }
 
     // 4. Tình trạng Ngân sách
+    final nearLimitPctThreshold =
+        (heuristics.budgetNearLimitRatio * 100).round();
     buffer.writeln('\n4. TÌNH TRẠNG NGÂN SÁCH THÁNG NÀY:');
     if (budgets.isEmpty) {
       buffer.writeln('- Người dùng chưa thiết lập ngân sách cho tháng này.');
@@ -605,7 +777,7 @@ class FinancialChatContextService {
         );
         final status = spent > b.limit
             ? '⚠️ VƯỢT NGÂN SÁCH (+${AppFormatters.number(spent - b.limit)} đ)'
-            : (percent >= 80
+            : (percent >= nearLimitPctThreshold
                 ? '⚡ SẮP CHẠM HẠN MỨC ($percent%)'
                 : 'An toàn ($percent%)');
         buffer.writeln(
@@ -635,6 +807,25 @@ class FinancialChatContextService {
         buffer.writeln(
             '- [${issue.severity.name.toUpperCase()}] ${issue.title}: ${issue.rootCause}. Tác động: ${issue.impact}. Đề xuất: ${issue.recommendation}');
       }
+    }
+
+    // 7. Kế hoạch tài chính tháng đã cam kết (nếu có)
+    if (activePlan != null) {
+      final exec = _analyticsService.evaluatePlanExecution(
+        plan: activePlan,
+        targetMonthTx: currentMonthTx,
+        referenceToday: now,
+      );
+      buffer.writeln(
+          '\n7. KẾ HOẠCH TÀI CHÍNH THÁNG ĐÃ CAM KẾT (${activePlan.targetMonth} - Trạng thái: ${activePlan.status.name}, Phiên bản v${activePlan.revision}):');
+      buffer.writeln(
+          '- Thu nhập tham chiếu kế hoạch: ${AppFormatters.number(activePlan.referenceIncome)} đ');
+      buffer.writeln(
+          '- Trần chi phí Thiết yếu: ${AppFormatters.number(activePlan.essentialExpenseCap)} đ | Trần chi phí Linh hoạt: ${AppFormatters.number(activePlan.flexibleExpenseCap)} đ');
+      buffer.writeln(
+          '- Mục tiêu tiết kiệm tháng: ${AppFormatters.number(activePlan.targetSavingAmount)} đ (Thực đạt: ${AppFormatters.number(exec.effectiveMonthlySaved)} đ, trong đó đã nạp vào mục tiêu: ${AppFormatters.number(exec.netGoalContributions)} đ, thặng dư còn trong ví: ${AppFormatters.number(exec.unallocatedWalletSurplus)} đ)');
+      buffer.writeln(
+          '- Điểm tuân thủ kế hoạch tổng hợp: ${exec.overallAdherenceScore.round()}/100 (${exec.onTrackCategoryCount}/${exec.categoryStatuses.length} danh mục đúng kế hoạch)');
     }
 
     return buffer.toString();

@@ -5,42 +5,86 @@ import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart
 import 'package:path_provider/path_provider.dart' show getTemporaryDirectory;
 import 'dart:typed_data';
 import 'dart:convert';
+import '../models/ai_runtime_config_model.dart';
 import '../models/receipt_info.dart';
 import '../models/financial_issue.dart';
 import '../models/trend_result.dart';
 import '../models/transaction_model.dart';
 import '../models/category_model.dart';
 import '../models/financial_forecast_result.dart';
+import '../models/monthly_financial_plan.dart';
 import '../config/api_keys.dart';
+import '../services/ai_config_sync_service.dart';
 
 /// ============================================================
 /// AI SERVICE
 /// Gọi Gemini API để phân tích chi tiêu, dự đoán, chatbot tài chính
 ///
-/// LƯU Ý BẢO MẬT:
-/// Gọi trực tiếp Gemini từ client (như hiện tại) sẽ lộ API key trong app.
-/// Khi lên bản chính thức, nên chuyển sang gọi qua Cloud Functions
-/// (proxy) để giấu API key, tương tự kiến trúc dùng cho các dự án AI khác.
-/// Tạm thời dùng trực tiếp để thuận tiện phát triển & demo khóa luận.
+/// LƯU Ý BẢO MẬT & KIẾN TRÚC SDK:
+/// 1. Gói `google_generative_ai` hiện được giữ cho tương thích ngược nhưng đã
+///    ở trạng thái deprecated; lộ trình sản phẩm là di trú sang `firebase_ai`
+///    (Firebase AI Logic) kết hợp Firebase App Check hoặc Cloud Functions Proxy.
+/// 2. Gọi trực tiếp Gemini từ client trên bản demo/khóa luận có rủi ro lộ API key
+///    trong binary client. Tuyệt đối KHÔNG lưu hoặc truyền Gemini API Key qua
+///    Firestore / Admin Web Config.
 /// ============================================================
 class AiService {
-  // Danh sách model dự phòng, thử lần lượt nếu model chính bị lỗi 404/not found
-  static const List<String> _modelFallbackChain = [
+  // Danh sách model dự phòng mặc định khi chưa có cấu hình động
+  static const List<String> _defaultModelFallbackChain = [
     'gemini-3.5-flash', // model chính, đã xác nhận hoạt động qua Bước 1
     'gemini-3.5-flash-lite', // dự phòng 1
     'gemini-3.6-flash', // dự phòng 2
     'gemini-flash-latest', // dự phòng 3
   ];
 
-  final List<Content> _chatHistory = [];
+  final AiRuntimeConfig? _runtimeConfigOverride;
+  final List<FinancialKnowledgeArticle>? _knowledgeArticlesOverride;
+  final Future<String?> Function(
+    String modelName,
+    List<Content> content,
+    double temperature,
+  )? _contentGeneratorOverride;
 
-  AiService() {
-    debugPrint('🔧 Model fallback chain: $_modelFallbackChain');
-    if (geminiApiKey.isEmpty || geminiApiKey == 'YOUR_GEMINI_API_KEY_HERE') {
+  final List<Content> _chatHistory = [];
+  String _lastModelUsed = '';
+
+  AiService({
+    AiRuntimeConfig? runtimeConfigOverride,
+    List<FinancialKnowledgeArticle>? knowledgeArticlesOverride,
+    bool allowMissingApiKeyForTest = false,
+    Future<String?> Function(
+      String modelName,
+      List<Content> content,
+      double temperature,
+    )? contentGeneratorOverride,
+  })  : _runtimeConfigOverride = runtimeConfigOverride,
+        _knowledgeArticlesOverride = knowledgeArticlesOverride,
+        _contentGeneratorOverride = contentGeneratorOverride {
+    debugPrint('🔧 Model fallback chain: $effectiveModelChain');
+    if (!allowMissingApiKeyForTest &&
+        _contentGeneratorOverride == null &&
+        (geminiApiKey.isEmpty || geminiApiKey == 'YOUR_GEMINI_API_KEY_HERE')) {
       throw Exception(
           'Gemini API key chưa được cấu hình trong config/api_keys.dart');
     }
   }
+
+  /// Cấu hình AI Runtime hiệu lực (ưu tiên override từ Sandbox/Test, sau đó đến Published Config đã đồng bộ)
+  AiRuntimeConfig get effectiveRuntimeConfig =>
+      _runtimeConfigOverride ?? AiConfigSyncService.instance.currentAiRuntime;
+
+  /// Chuỗi model thực thi hiệu lực (Primary + Fallbacks từ AiRuntimeConfig, luôn thuộc Whitelist)
+  List<String> get effectiveModelChain {
+    final chain = effectiveRuntimeConfig.effectiveModelChain;
+    return chain.isNotEmpty ? chain : _defaultModelFallbackChain;
+  }
+
+  /// Model thực tế đã trả lời thành công ở lần gọi gần nhất (phục vụ gắn metadata cho AI Feedback Report & Sandbox)
+  String get lastModelUsed =>
+      _lastModelUsed.isNotEmpty ? _lastModelUsed : effectiveModelChain.first;
+
+  /// Số lượng phần tử hiện tại trong bộ nhớ lịch sử hội thoại (bao gồm System Prompt ở index 0)
+  int get chatHistoryLength => _chatHistory.length;
 
   /// Nhận diện lỗi do MẤT MẠNG (khác với lỗi riêng của 1 model AI).
   /// Khi gặp lỗi loại này, thử tiếp các model dự phòng khác là vô nghĩa
@@ -65,15 +109,50 @@ class AiService {
 
   // Hàm helper gọi generateContent có tự động thử model dự phòng khi gặp lỗi "not found"
   Future<GenerateContentResponse> _generateWithFallback(
-      List<Content> content) async {
+    List<Content> content, {
+    double? temperatureOverride,
+  }) async {
+    final cfg = effectiveRuntimeConfig;
+    if (!cfg.isEnabled) {
+      throw Exception('AI_FEATURES_DISABLED');
+    }
+    final chain = effectiveModelChain;
+    final effectiveTemp =
+        (temperatureOverride ?? cfg.temperature).clamp(0.0, 0.8);
+    final customGen = _contentGeneratorOverride;
+
     Exception? lastError;
-    for (final modelName in _modelFallbackChain) {
+    for (final modelName in chain) {
       try {
-        debugPrint('🚀 Đang gọi Gemini với model: $modelName');
-        final model = GenerativeModel(model: modelName, apiKey: geminiApiKey);
+        debugPrint(
+            '🚀 Đang gọi Gemini với model: $modelName (temp: $effectiveTemp)');
+        if (customGen != null) {
+          final text = await customGen(
+            modelName,
+            content,
+            effectiveTemp,
+          );
+          _lastModelUsed = modelName;
+          return GenerateContentResponse([
+            Candidate(
+              Content.model([TextPart(text ?? '')]),
+              null,
+              null,
+              null,
+              null,
+            ),
+          ], null);
+        }
+
+        final model = GenerativeModel(
+          model: modelName,
+          apiKey: geminiApiKey,
+          generationConfig: GenerationConfig(temperature: effectiveTemp),
+        );
         final response = await model
             .generateContent(content)
             .timeout(const Duration(seconds: 15));
+        _lastModelUsed = modelName;
         return response;
       } catch (e) {
         if (_isNetworkError(e)) {
@@ -127,22 +206,63 @@ gọn bằng tiếng Việt cho người dùng về dự đoán này.
         'Theo tốc độ hiện tại, dự kiến chi tiêu cuối tháng khoảng ${predicted.round()} đồng.';
   }
 
-  /// AI 4: Lập kế hoạch tiết kiệm
+  /// AI 4: Lập kế hoạch tiết kiệm có gắn ngữ cảnh thu nhập & chi tiêu thực tế
   Future<String> generateSavingPlan({
     required String goalName,
     required double targetAmount,
     required int months,
+    double savedAmount = 0,
+    double? monthlyIncome,
+    double? monthlyExpense,
+    List<String>? flexibleCategorySummaries,
   }) async {
-    final monthlyRequired = targetAmount / months;
+    final remaining = (targetAmount - savedAmount).clamp(0.0, double.infinity);
+    final safeMonths = months <= 0 ? 1 : months;
+    final monthlyRequired = remaining / safeMonths;
     final dailyRequired = monthlyRequired / 30;
+    final cfg = effectiveRuntimeConfig;
+
+    final contextBuffer = StringBuffer();
+    if (monthlyIncome != null && monthlyIncome > 0) {
+      final exp = monthlyExpense ?? 0.0;
+      final net = monthlyIncome - exp;
+      contextBuffer.writeln(
+          '- Thu nhập tham chiếu hàng tháng: ${monthlyIncome.round()} đồng');
+      contextBuffer.writeln(
+          '- Tổng chi tiêu hàng tháng hiện tại: ${exp.round()} đồng');
+      contextBuffer.writeln(
+          '- Dòng tiền ròng (Thu - Chi): ${net.round()} đồng/tháng');
+    } else if (monthlyExpense != null && monthlyExpense > 0) {
+      contextBuffer.writeln(
+          '- Chưa có dữ liệu thu nhập; tổng chi tiêu hiện tại: ${monthlyExpense.round()} đồng/tháng');
+    }
+    if (flexibleCategorySummaries != null &&
+        flexibleCategorySummaries.isNotEmpty) {
+      contextBuffer.writeln(
+          '- Các danh mục chi tiêu linh hoạt có thể tối ưu: ${flexibleCategorySummaries.join(", ")}');
+    }
+
+    final advisoryRule = cfg.savingGoalAdvisoryRule.trim();
+    final advisorySlot = advisoryRule.isNotEmpty
+        ? '\nĐịnh hướng tư vấn bổ sung:\n$advisoryRule\n'
+        : '';
+
     final prompt = '''
-Người dùng muốn tiết kiệm để mua "$goalName" với số tiền $targetAmount đồng trong
-$months tháng. Số tiền cần tiết kiệm là khoảng $monthlyRequired đồng/tháng, tương
-đương $dailyRequired đồng/ngày. Hãy viết lời khuyên ngắn gọn, khích lệ bằng tiếng Việt.
+Bạn là Cố vấn Tài chính Cá nhân. Người dùng đang lập kế hoạch cho mục tiêu tiết kiệm:
+- Tên mục tiêu: "$goalName"
+- Tổng số tiền mục tiêu: ${targetAmount.round()} đồng (Đã tích lũy: ${savedAmount.round()} đồng, Còn thiếu: ${remaining.round()} đồng)
+- Thời hạn còn lại: $safeMonths tháng
+- Mức cần tiết kiệm mỗi tháng: ${monthlyRequired.round()} đồng/tháng (~${dailyRequired.round()} đồng/ngày)
+${contextBuffer.isNotEmpty ? '\nNgữ cảnh tài chính thực tế của người dùng:\n$contextBuffer' : ''}$advisorySlot
+Hãy đưa ra kế hoạch thực hiện ngắn gọn, cụ thể bằng tiếng Việt gồm 3 ý:
+1. Đánh giá tính khả thi của mức tiết kiệm ${monthlyRequired.round()} đồng/tháng so với dòng tiền hiện tại (nếu vượt quá khả năng dòng tiền ròng, hãy đề xuất rõ số tháng nên giãn thêm).
+2. Chỉ rõ nên ưu tiên cắt giảm từ danh mục chi tiêu linh hoạt nào bao nhiêu tiền/tháng (không cắt giảm chi phí thiết yếu).
+3. Một hành động cụ thể dễ thực hiện ngay trong tuần này.
+Tuyệt đối không tự bịa số liệu ngoài dữ liệu đã cung cấp.
 ''';
     final response = await _generateWithFallback([Content.text(prompt)]);
     return response.text ??
-        'Bạn cần tiết kiệm khoảng ${monthlyRequired.round()} đồng/tháng để đạt mục tiêu.';
+        'Bạn cần tiết kiệm khoảng ${monthlyRequired.round()} đồng/tháng để đạt mục tiêu "$goalName".';
   }
 
   /// AI 5: Chatbot tài chính - Trợ lý AI tài chính cá nhân dựa trên dữ liệu định lượng
@@ -171,16 +291,44 @@ $months tháng. Số tiền cần tiết kiệm là khoảng $monthlyRequired đ
     required String userQuestion,
     required String contextData,
   }) async* {
+    final cfg = effectiveRuntimeConfig;
+    if (!cfg.isEnabled) {
+      throw Exception('AI_FEATURES_DISABLED');
+    }
+
     _syncSystemPromptAndHistory(contextData, userQuestion);
 
     final accumulatedText = StringBuffer();
     bool streamSucceeded = false;
     Exception? lastError;
+    final chain = effectiveModelChain;
+    final effectiveTemp = cfg.temperature.clamp(0.0, 0.8);
+    final customGen = _contentGeneratorOverride;
 
-    for (final modelName in _modelFallbackChain) {
+    for (final modelName in chain) {
       try {
-        debugPrint('🚀 Đang gọi Gemini Stream với model: $modelName');
-        final model = GenerativeModel(model: modelName, apiKey: geminiApiKey);
+        debugPrint(
+            '🚀 Đang gọi Gemini Stream với model: $modelName (temp: $effectiveTemp)');
+        if (customGen != null) {
+          final text = await customGen(
+            modelName,
+            _chatHistory,
+            effectiveTemp,
+          );
+          _lastModelUsed = modelName;
+          if (text != null && text.isNotEmpty) {
+            accumulatedText.write(text);
+            yield text;
+          }
+          streamSucceeded = true;
+          break;
+        }
+
+        final model = GenerativeModel(
+          model: modelName,
+          apiKey: geminiApiKey,
+          generationConfig: GenerationConfig(temperature: effectiveTemp),
+        );
         final stream = model
             .generateContentStream(_chatHistory)
             .timeout(const Duration(seconds: 25));
@@ -192,6 +340,7 @@ $months tháng. Số tiền cần tiết kiệm là khoảng $monthlyRequired đ
             yield text;
           }
         }
+        _lastModelUsed = modelName;
         streamSucceeded = true;
         break;
       } catch (e) {
@@ -227,8 +376,10 @@ $months tháng. Số tiền cần tiết kiệm là khoảng $monthlyRequired đ
     }
   }
 
-  /// Đồng bộ System Prompt định lượng mới nhất và duy trì Sliding Window lịch sử (tối đa 10 tin gần nhất)
+  /// Đồng bộ System Prompt định lượng mới nhất và duy trì Sliding Window lịch sử theo cấu hình AiRuntimeConfig
   void _syncSystemPromptAndHistory(String contextData, String userQuestion) {
+    final maxMessages =
+        effectiveRuntimeConfig.maxChatHistoryMessages.clamp(4, 20);
     if (_chatHistory.isEmpty) {
       _chatHistory.add(Content.text(_buildSystemCfpPrompt(contextData)));
     } else {
@@ -237,9 +388,9 @@ $months tháng. Số tiền cần tiết kiệm là khoảng $monthlyRequired đ
     }
     _chatHistory.add(Content.text(userQuestion));
 
-    // Duy trì sliding window: Giữ index 0 (System Prompt) và tối đa 10 tin nhắn gần nhất
-    if (_chatHistory.length > 11) {
-      _chatHistory.removeRange(1, _chatHistory.length - 10);
+    // Duy trì sliding window: Giữ index 0 (System Prompt) và tối đa maxMessages tin nhắn gần nhất
+    if (_chatHistory.length > maxMessages + 1) {
+      _chatHistory.removeRange(1, _chatHistory.length - maxMessages);
     }
   }
 
@@ -296,49 +447,88 @@ $monthlySavings đồng. Viết một gợi ý ngắn gọn, thực tế bằng 
   }
 
   /// AI 7: OCR trích xuất thông tin hoá đơn
-  /// Kiến trúc: ML Kit (on-device) → raw text → Gemini (structured extraction)
-  /// Fallback: nếu ML Kit không nhận diện được text → gửi ảnh thẳng cho Gemini
+  /// Kiến trúc: Kết hợp ML Kit (on-device OCR) + Ảnh gốc + Gemini Multimodal
+  /// để vừa đọc chính xác bảng mặt hàng nhiều dòng (Tên món, SL, Đơn giá, Thành tiền),
+  /// vừa suy luận/khôi phục ngữ cảnh khi chữ bị mờ hoặc mất dấu.
   Future<ReceiptInfo?> extractReceiptInfo(Uint8List imageBytes) async {
     try {
-      // Bước 1: Thử nhận diện text on-device bằng ML Kit
+      // Bước 1: Thử nhận diện text on-device bằng ML Kit để làm dữ liệu tham chiếu
       final rawText = await _recognizeTextOnDevice(imageBytes);
 
-      GenerateContentResponse response;
-
-      if (rawText != null && rawText.trim().isNotEmpty) {
-        // Bước 2a: Có raw text từ ML Kit → gửi text cho Gemini parse cấu trúc
-        debugPrint(
-            '🔧 ML Kit OCR thành công, gửi raw text cho Gemini để parse cấu trúc');
-        final prompt = '''
-Dưới đây là văn bản được trích xuất từ ảnh hóa đơn bằng OCR (có thể còn nhiễu/sai sót):
+      final hasRawText = rawText != null && rawText.trim().isNotEmpty;
+      final ocrReferenceBlock = hasRawText
+          ? '''
+Văn bản OCR thô trích xuất sơ bộ từ thiết bị (có thể bị mất dấu tiếng Việt, nhòe chữ hoặc tách dòng trong bảng, hãy đối chiếu trực tiếp với hình ảnh hóa đơn đính kèm):
 ---
 $rawText
 ---
-Hãy phân tích và trả về JSON gồm: merchant (tên cửa hàng), total (tổng tiền, số), date (ngày, ISO string hoặc null), address (địa chỉ nếu có), items (mảng các đối tượng gồm description và amount). Chỉ trả về JSON thuần túy, không markdown fence.''';
-        response = await _generateWithFallback([Content.text(prompt)]);
-      } else {
-        // Bước 2b: ML Kit không nhận diện được → fallback gửi ảnh thẳng cho Gemini
+'''
+          : '';
+
+      final extraOcrHints = effectiveRuntimeConfig.ocrExtraHints.trim();
+      final extraHintsSlot = extraOcrHints.isNotEmpty
+          ? '\nLƯU Ý BỔ SUNG TỪ QUẢN TRỊ VIÊN TRI THỨC:\n$extraOcrHints\n'
+          : '';
+
+      final prompt = '''
+Bạn là trợ lý tài chính thông minh chuyên phân tích hóa đơn/biên lai thanh toán tiếng Việt.
+$ocrReferenceBlock
+Hãy kết hợp hình ảnh hóa đơn và văn bản tham chiếu (nếu có) để phân tích theo cấu trúc thực tế của hóa đơn và trả về JSON với các nguyên tắc sau:
+
+1. CHI TIẾT MẶT HÀNG (`items`):
+- Mỗi phần tử trong mảng `items` gồm:
+  + `description` (string): Tên mặt hàng hoặc dịch vụ đầy đủ nhất có thể. Nếu tên món trong bảng bị ngắt xuống dòng trong cùng một mục (ví dụ dòng trên là "Cà Phê Sữa Đá", dòng dưới là "Máy"), phải ghép lại đầy đủ thành "Cà Phê Sữa Đá Máy".
+  + `quantity` (number hoặc null): Số lượng (SL). Chỉ trích xuất khi hóa đơn có cung cấp thông tin số lượng; tuyệt đối KHÔNG tự suy diễn hoặc tự gán là 1 khi hóa đơn không có (hãy để null).
+  + `unitPrice` (number hoặc null): Đơn giá. Chỉ trích xuất khi hóa đơn có cung cấp đơn giá; KHÔNG tự suy diễn khi hóa đơn không có (hãy để null).
+  + `amount` (number): Thành tiền của mặt hàng đó. Khi có đủ `quantity`, `unitPrice` và `amount`, hãy kiểm tra tính nhất quán (`quantity * unitPrice = amount`) để tránh đọc nhầm cột.
+  + `isInferred` (boolean): `true` nếu tên mặt hàng bị mờ/nhòe/sai dấu và đã được bạn suy luận khôi phục dựa trên ngữ cảnh; `false` nếu đọc rõ ràng.
+
+2. XỬ LÝ ẢNH MỜ & SUY LUẬN NGỮ CẢNH:
+- Nếu chữ trên hóa đơn bị mờ, thiếu nét hoặc OCR thô nhận diện sai dấu (ví dụ "Cà Phê Sữa Đa Máy"), hãy kết hợp các ký tự còn đọc được + ngữ cảnh lĩnh vực (ăn uống, quán cà phê, siêu thị, dịch vụ...) + mối liên hệ trên hóa đơn để khôi phục từ đúng ("Cà Phê Sữa Đá Máy") và đặt `isInferred: true`.
+- Nếu thông tin quá mờ không đủ căn cứ đáng tin cậy để khẳng định, hãy giữ nguyên phần chữ đọc được và đánh dấu `isInferred: true` để người dùng kiểm tra lại, tuyệt đối không bịa đặt tên món hoặc số liệu.
+
+3. ĐỊA ĐIỂM KINH DOANH (`merchant`, `address`, `isLocationInferred`):
+- `merchant` (string): Tên cửa hàng / đơn vị kinh doanh (bao gồm cả tên chi nhánh nếu có, ví dụ "Kang Tea & Coffee - Bạch Đằng").
+- `address` (string hoặc null): Địa chỉ in trên hóa đơn (số nhà, tên đường, phường/xã, quận/huyện/thành phố, tỉnh). Nếu một phần địa chỉ bị mờ, hãy kết hợp phần đọc rõ với ngữ cảnh địa danh để khôi phục phần có căn cứ, hoặc giữ lại phần địa chỉ xác định được; tuyệt đối KHÔNG tự tạo địa chỉ hoàn chỉnh nếu ảnh không đủ căn cứ.
+- `isLocationInferred` (boolean): `true` nếu tên cửa hàng hoặc địa chỉ có phần bị mờ phải suy luận/khôi phục; `false` nếu đọc rõ ràng.
+
+4. CÁC TRƯỜNG KHÁC:
+- `total` (number): Tổng số tiền thanh toán cuối cùng (đồng).
+- `date` (string hoặc null): Ngày giao dịch theo định dạng ISO `yyyy-MM-dd`.
+- `paymentMethod` (string hoặc null): Phương thức thanh toán hoặc tên ví/ngân hàng trên hóa đơn như "Tiền mặt", "MoMo", "ZaloPay", "ShopeePay", "VNPay", "MB Bank", "Vietcombank", "Techcombank", "BIDV", "VietinBank", "ACB", "Chuyển khoản", "Thẻ ngân hàng"... Nếu hóa đơn ghi "Thanh toán tiền mặt" hoặc có "Tiền nhận"/"Tiền khách đưa" và "Tiền thừa"/"Tiền trả lại" thì trả về "Tiền mặt". Nếu không rõ thì để null.
+- `inferredFields` (mảng string): Liệt kê ngắn gọn các nội dung đã được AI suy luận/khôi phục do chữ mờ (ví dụ: ["Tên món: khôi phục 'Cà Phê Sữa Đá Máy' từ chữ mờ"]), hoặc mảng rỗng `[]` nếu tất cả đều đọc rõ.
+$extraHintsSlot
+Chỉ trả về JSON thuần túy gồm các trường: `merchant`, `total`, `date`, `address`, `paymentMethod`, `items`, `isLocationInferred`, `inferredFields`. Không bọc trong markdown code block, không giải thích thêm.''';
+
+      GenerateContentResponse response;
+      try {
         debugPrint(
-            '🔧 ML Kit không nhận diện được text, fallback gửi ảnh cho Gemini');
-        const prompt = '''
-Bạn là trợ lý tài chính. Hãy trích xuất các thông tin sau từ hoá đơn (ngôn ngữ tiếng Việt):
-- Tên cửa hàng/merchant
-- Tổng số tiền (đồng)
-- Ngày giao dịch (dd/MM/yyyy) nếu có
-- Địa chỉ (address) nếu có
-- Các mục (items) dưới dạng mảng, mỗi mục có description và amount
-Chỉ trả về kết quả dưới dạng JSON có các trường: merchant, total, date (ISO string hoặc null), address, items. Không bọc trong markdown code block, không thêm giải thích.''';
+            '🔧 Gửi kết hợp ảnh hóa đơn + ML Kit OCR reference (${hasRawText ? "có rawText" : "không có rawText"}) cho Gemini');
         final content = Content.multi([
           TextPart(prompt),
           DataPart('image/jpeg', imageBytes),
         ]);
-        response = await _generateWithFallback([content]);
+        response =
+            await _generateWithFallback([content], temperatureOverride: 0.1);
+      } catch (multimodalError) {
+        if (hasRawText &&
+            !_isNetworkError(multimodalError) &&
+            !isNoNetworkException(multimodalError)) {
+          debugPrint(
+              '🔧 Multimodal gặp lỗi, fallback sang gửi rawText từ ML Kit: $multimodalError');
+          response = await _generateWithFallback(
+            [Content.text(prompt)],
+            temperatureOverride: 0.1,
+          );
+        } else {
+          rethrow;
+        }
       }
 
       if (response.text == null) return null;
       final cleanedText = _stripMarkdownCodeFence(response.text!);
       final Map<String, dynamic> data = jsonDecode(cleanedText);
-      return ReceiptInfo.fromJson(data);
+      return ReceiptInfo.fromJson(data, rawText: rawText);
     } catch (e) {
       debugPrint('OCR Receipt extraction error: $e');
       if (_isNetworkError(e) || isNoNetworkException(e)) {
@@ -544,6 +734,172 @@ NGUYÊN TẮC QUAN TRỌNG:
     return response.text ?? 'Không thể tải phần giải thích AI lúc này.';
   }
 
+  /// Diễn giải và đề xuất kế hoạch tài chính theo định dạng JSON có cấu trúc,
+  /// tuân thủ chặt chẽ DataSufficiencyTier và có cơ chế hậu kiểm + fallback an toàn.
+  Future<AiStructuredPlanInsight> explainFinancialInsightsStructured({
+    required FinancialInsightSummary summary,
+    required MonthlyFinancialPlan draftPlan,
+  }) async {
+    final tier = draftPlan.dataTierUsed;
+    if (tier == DataSufficiencyTier.empty) {
+      return const AiStructuredPlanInsight(
+        executiveSummary:
+            'Chưa có dữ liệu giao dịch hoặc ngân sách để phân tích. Hãy thêm giao dịch thu chi hoặc thiết lập ngân sách đầu tiên.',
+        behavioralInsights: [],
+        categoryActionTips: {},
+        savingStrategyNote:
+            'Khởi tạo mục tiêu tiết kiệm và nhập thu nhập dự kiến để nhận kế hoạch tháng.',
+        isFromFallback: true,
+      );
+    }
+
+    final allocText = draftPlan.currentAllocations
+        .map((a) =>
+            '- ${a.categoryName} (${a.isEssential ? "Thiết yếu" : "Linh hoạt"}): Thực chi ${a.sourceMonthSpent.round()}đ -> Hạn mức kế hoạch ${a.recommendedLimit.round()}đ (${a.calculationBasis})')
+        .join('\n');
+
+    final tierConstraintNote = switch (tier) {
+      DataSufficiencyTier.preliminary =>
+        'CẤP ĐỘ DỮ LIỆU: SƠ BỘ (PRELIMINARY). BẮT BUỘC nêu rõ dữ liệu trong tháng còn ít, chỉ nhận xét sơ bộ cơ cấu hiện tại, TUYỆT ĐỐI KHÔNG kết luận xu hướng hay dự báo cuối tháng.',
+      DataSufficiencyTier.currentMonthAnalysis =>
+        'CẤP ĐỘ DỮ LIỆU: ĐỦ TRONG THÁNG (CURRENT_MONTH_ONLY). Chỉ phân tích trong tháng và lập kế hoạch tháng tới, TUYỆT ĐỐI KHÔNG so sánh tăng/giảm với tháng trước.',
+      DataSufficiencyTier.monthOverMonthComparison =>
+        'CẤP ĐỘ DỮ LIỆU: SO SÁNH 2 THÁNG (MOM_COMPARISON). Được phép so sánh với tháng liền trước, nhưng KHÔNG gọi là xu hướng nhiều tháng.',
+      DataSufficiencyTier.multiMonthTrend =>
+        'CẤP ĐỘ DỮ LIỆU: ĐỦ XU HƯỚNG ĐA THÁNG (MULTI_MONTH_TREND). Được phép phân tích xu hướng và thói quen qua nhiều tháng.',
+      DataSufficiencyTier.empty => '',
+    };
+
+    final incomeConstraintNote =
+        draftPlan.incomeMode == IncomeStabilityMode.noIncomeBasis
+            ? 'LƯU Ý THU NHẬP: Chưa có dữ liệu thu nhập. Tuyệt đối không tự suy đoán thu nhập và không tính tỷ lệ tiết kiệm trên thu nhập.'
+            : 'Thu nhập tham chiếu (${draftPlan.incomeMode.name}): ${draftPlan.referenceIncome.round()}đ.';
+
+    final planAdvisoryRule =
+        effectiveRuntimeConfig.monthlyPlanAdvisoryRule.trim();
+    final planAdvisorySlot = planAdvisoryRule.isNotEmpty
+        ? '\nĐỊNH HƯỚNG TƯ VẤN KẾ HOẠCH THÁNG:\n- $planAdvisoryRule\n'
+        : '';
+
+    final prompt = '''
+Bạn là Cố vấn Lập kế hoạch Tài chính Cá nhân AI.
+Dưới đây là các chỉ số tài chính và KẾ HOẠCH THÁNG ${draftPlan.targetMonth} ĐÃ ĐƯỢC THUẬT TOÁN DART TÍNH TOÁN CHÍNH XÁC:
+- Điểm sức khỏe tài chính: ${summary.healthScore}/100
+- $tierConstraintNote
+- $incomeConstraintNote
+- Tổng hạn mức Chi phí Thiết yếu: ${draftPlan.essentialExpenseCap.round()}đ
+- Tổng hạn mức Chi phí Linh hoạt: ${draftPlan.flexibleExpenseCap.round()}đ
+- Mục tiêu tiết kiệm khả thi trong tháng: ${draftPlan.targetSavingAmount.round()}đ (Khả thi với mục tiêu gốc: ${draftPlan.isSavingGoalFeasible ? "CÓ" : "KHÔNG, thiếu ${draftPlan.infeasibleSavingGap.round()}đ/tháng"})
+- Chi tiết phân bổ từng danh mục:
+$allocText$planAdvisorySlot
+Hãy trả về DUY NHẤT một chuỗi JSON hợp lệ (không bọc trong markdown ```json) theo đúng cấu trúc sau:
+{
+  "executiveSummary": "Đánh giá tổng quan 2-3 câu bám sát đúng số liệu và cấp độ dữ liệu ở trên.",
+  "behavioralInsights": [
+    "Nhận định hành vi chi tiêu số 1 có dẫn chứng số liệu thực tế",
+    "Nhận định hành vi chi tiêu số 2 (hoặc giới hạn phân tích nếu dữ liệu sơ bộ)"
+  ],
+  "categoryActionTips": {
+    "Tên danh mục": "1 hành động cụ thể, thực tế để giữ chi tiêu trong hạn mức kế hoạch"
+  },
+  "savingStrategyNote": "Chiến lược thực hiện mục tiêu tiết kiệm tháng này"
+}
+NGUYÊN TẮC BẮT BUỘC:
+- Giữ nguyên 100% các con số từ dữ liệu đầu vào, không tự tạo số tiền mới.
+- Không đề xuất cắt giảm các danh mục Thiết yếu.
+''';
+
+    try {
+      final response = await _generateWithFallback([Content.text(prompt)]);
+      final rawText = response.text ?? '';
+      final parsed = parseAndValidateStructuredInsight(
+        rawText: rawText,
+        draftPlan: draftPlan,
+      );
+      if (parsed != null) {
+        return parsed;
+      }
+    } catch (e) {
+      debugPrint('⚠️ Lỗi gọi/parse explainFinancialInsightsStructured: $e');
+    }
+
+    return buildDeterministicFallbackInsight(draftPlan);
+  }
+
+  /// Parse và kiểm duyệt JSON trả về từ Gemini; trả về null nếu JSON sai cấu trúc.
+  static AiStructuredPlanInsight? parseAndValidateStructuredInsight({
+    required String rawText,
+    required MonthlyFinancialPlan draftPlan,
+  }) {
+    try {
+      String cleaned = rawText.trim();
+      final firstBrace = cleaned.indexOf('{');
+      final lastBrace = cleaned.lastIndexOf('}');
+      if (firstBrace == -1 || lastBrace == -1 || lastBrace <= firstBrace) {
+        return null;
+      }
+      cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+      final decoded = jsonDecode(cleaned);
+      if (decoded is! Map) return null;
+
+      final map = Map<String, dynamic>.from(decoded);
+      final execSummary = (map['executiveSummary'] ?? '').toString().trim();
+      if (execSummary.isEmpty) return null;
+
+      final rawInsights = (map['behavioralInsights'] as List<dynamic>?) ?? [];
+      final insights = rawInsights
+          .map((e) => e.toString().trim())
+          .where((s) => s.isNotEmpty)
+          .toList();
+
+      final Map<String, String> tips = {};
+      if (map['categoryActionTips'] is Map) {
+        final rawTips = Map<String, dynamic>.from(map['categoryActionTips']);
+        for (final entry in rawTips.entries) {
+          final val = entry.value.toString().trim();
+          if (val.isNotEmpty) {
+            tips[entry.key.trim()] = val;
+          }
+        }
+      }
+
+      final savingNote = (map['savingStrategyNote'] ?? '').toString().trim();
+
+      return AiStructuredPlanInsight(
+        executiveSummary: execSummary,
+        behavioralInsights:
+            insights.isNotEmpty ? insights : draftPlan.behavioralInsights,
+        categoryActionTips: tips,
+        savingStrategyNote: savingNote.isNotEmpty
+            ? savingNote
+            : (draftPlan.targetSavingAmount > 0
+                ? 'Ưu tiên trích trước ${draftPlan.targetSavingAmount.round()}đ vào mục tiêu tiết kiệm ngay khi nhận thu nhập.'
+                : 'Cập nhật thu nhập để thiết lập mức trích tiết kiệm hàng tháng.'),
+        isFromFallback: false,
+      );
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Bản diễn giải định lượng dự phòng (Deterministic Fallback) khi mất mạng hoặc JSON lỗi.
+  static AiStructuredPlanInsight buildDeterministicFallbackInsight(
+      MonthlyFinancialPlan draftPlan) {
+    final Map<String, String> tips = {};
+    for (final a in draftPlan.currentAllocations) {
+      tips[a.categoryName] = a.aiActionTip;
+    }
+    return AiStructuredPlanInsight(
+      executiveSummary: draftPlan.aiExecutiveSummary,
+      behavioralInsights: draftPlan.behavioralInsights,
+      categoryActionTips: tips,
+      savingStrategyNote: draftPlan.targetSavingAmount > 0
+          ? 'Trích riêng khoản tiết kiệm mục tiêu ${draftPlan.targetSavingAmount.round()}đ/tháng và theo dõi hạn mức các danh mục linh hoạt.'
+          : 'Hãy bổ sung thông tin thu nhập hoặc điều chỉnh cơ cấu chi phí thiết yếu để tạo thặng dư tiết kiệm.',
+      isFromFallback: true,
+    );
+  }
+
   /// Giải thích khoản chi bất thường dựa trên số liệu Dart đã tính sẵn.
   /// Tuyệt đối KHÔNG gửi UID, email, note đầy đủ, vị trí hoặc ảnh.
   Future<String> explainTransactionAnomaly({
@@ -554,13 +910,18 @@ NGUYÊN TẮC QUAN TRỌNG:
     required int historySampleSize,
   }) async {
     final ratioFormatted = ratio.toStringAsFixed(1).replaceAll('.0', '');
+    final anomalyRule = effectiveRuntimeConfig.anomalyAdvisoryRule.trim();
+    final anomalyAdvisorySlot = anomalyRule.isNotEmpty
+        ? '\nĐịnh hướng giọng điệu tư vấn:\n- $anomalyRule\n'
+        : '';
+
     final prompt = '''
 Bạn là trợ lý tài chính cá nhân. Hệ thống đã phát hiện một khoản chi bất thường dựa trên thuật toán Dart xác định:
 - Danh mục: $categoryName
 - Số tiền chi giao dịch này: ${currentAmount.round()} VNĐ
 - Mức chi trung vị thông thường (90 ngày qua, $historySampleSize mẫu): ${expectedAmount.round()} VNĐ
 - Tỷ lệ chênh lệch: khoảng $ratioFormatted lần mức thông thường.
-
+$anomalyAdvisorySlot
 Hãy viết giải thích ngắn gọn bằng tiếng Việt, TỐI ĐA 2 CÂU:
 1. Nhận xét về lý do vì sao hệ thống đưa ra cảnh báo này dựa trên số liệu.
 2. Lời khuyên nhẹ nhàng để người dùng xem xét kiểm tra lại giao dịch (vẫn khẳng định người dùng có toàn quyền lưu nếu đây là khoản chi hợp lý).
@@ -572,7 +933,6 @@ LƯU Ý: Tuyệt đối không kết luận gian lận, không tư vấn đầu 
     return response.text ??
         'Khoản chi này cao hơn khoảng $ratioFormatted lần mức chi thông thường của bạn cho $categoryName.';
   }
-
 
   String _stripMarkdownCodeFence(String text) {
     final trimmed = text.trim();
@@ -591,10 +951,12 @@ LƯU Ý: Tuyệt đối không kết luận gian lận, không tư vấn đầu 
     required String contextData,
     required List<Map<String, dynamic>> previousMessages,
   }) {
+    final maxMessages =
+        effectiveRuntimeConfig.maxChatHistoryMessages.clamp(4, 20);
     _chatHistory.clear();
     _chatHistory.add(Content.text(_buildSystemCfpPrompt(contextData)));
-    final recent = previousMessages.length > 10
-        ? previousMessages.sublist(previousMessages.length - 10)
+    final recent = previousMessages.length > maxMessages
+        ? previousMessages.sublist(previousMessages.length - maxMessages)
         : previousMessages;
     for (final m in recent) {
       final isUser = m['isUser'] == true;
@@ -608,7 +970,62 @@ LƯU Ý: Tuyệt đối không kết luận gian lận, không tư vấn đầu 
     }
   }
 
-  String _buildSystemCfpPrompt(String contextData) {
+  /// Xây dựng System Prompt hoàn chỉnh cho AI Chat & AI Sandbox, kết hợp:
+  /// - Khối số liệu định lượng cố định từ Dart
+  /// - Nguyên tắc DATA GROUNDING và STRICT DOMAIN SCOPE cố định (không thể bị ghi đè)
+  /// - Khối chỉ dẫn phong cách từ AiRuntimeConfig (nếu có)
+  /// - Tối đa 3 snippet từ FinancialKnowledgeArticle (mỗi snippet <= 300 ký tự)
+  String buildSystemCfpPromptForContext(
+    String contextData, {
+    bool? isLowSavingRate,
+    bool? isEssentialDeficit,
+    bool? isVariableIncome,
+    bool? hasBudgetOverrun,
+    bool? isGoalInfeasible,
+  }) {
+    final cfg = effectiveRuntimeConfig;
+    final lowerCtx = contextData.toLowerCase();
+
+    final detectedLowSaving = isLowSavingRate ??
+        (contextData.contains('Tỷ lệ tiết kiệm: 0%') ||
+            lowerCtx.contains('tỷ lệ tiết kiệm thấp'));
+    final detectedDeficit = isEssentialDeficit ??
+        (contextData.contains('(THÂM HỤT)') ||
+            lowerCtx.contains('chi vượt thu'));
+    final detectedVariableIncome =
+        isVariableIncome ?? lowerCtx.contains('variable');
+    final detectedOverrun =
+        hasBudgetOverrun ?? contextData.contains('VƯỢT NGÂN SÁCH');
+    final detectedGoalInfeasible = isGoalInfeasible ??
+        (lowerCtx.contains('không khả thi') || contextData.contains('còn thiếu'));
+
+    final knowledgeSnippets =
+        AiConfigSyncService.instance.selectKnowledgeSnippetsForPrompt(
+      isLowSavingRate: detectedLowSaving,
+      isEssentialDeficit: detectedDeficit,
+      isVariableIncome: detectedVariableIncome,
+      hasBudgetOverrun: detectedOverrun,
+      isGoalInfeasible: detectedGoalInfeasible,
+      overrideArticles: _knowledgeArticlesOverride,
+    );
+
+    final knowledgeBlock = knowledgeSnippets.isNotEmpty
+        ? '''
+
+CƠ SỞ TRI THỨC TÀI CHÍNH CHUẨN HÓA (Áp dụng tối đa 3 nguyên tắc phù hợp nhất bên dưới vào lời khuyên):
+${knowledgeSnippets.join('\n')}
+'''
+        : '';
+
+    final adminChatInstruction = cfg.chatSystemInstruction.trim();
+    final adminInstructionBlock = adminChatInstruction.isNotEmpty
+        ? '''
+
+CHỈ DẪN PHONG CÁCH & TRỌNG TÂM TƯ VẤN (Chỉ áp dụng cho cách diễn đạt, TUYỆT ĐỐI KHÔNG ghi đè nguyên tắc 1 và 2):
+$adminChatInstruction
+'''
+        : '';
+
     return '''
 Bạn là Trợ lý AI Tài chính Cá nhân thông minh và tận tâm (đóng vai trò Cố vấn Tài chính Cá nhân - CFP AI), được tích hợp trong ứng dụng quản lý tài chính Flutter.
 
@@ -636,8 +1053,12 @@ CÁC NGUYÊN TẮC BẮT BUỘC KHI TRẢ LỜI:
 
 4. GIỌNG VĂN & ĐỊNH DẠNG:
    - Sử dụng tiếng Việt chuẩn mực, xưng hô "mình" và "bạn", thân thiện, tôn trọng, mang tính đồng hành và khích lệ.
-   - Trình bày dạng Markdown với gạch đầu dòng rõ ràng, in đậm các con số quan trọng (**số tiền**, **tỷ lệ %**) để người dùng dễ theo dõi trên màn hình di động.
+   - Trình bày dạng Markdown với gạch đầu dòng rõ ràng, in đậm các con số quan trọng (**số tiền**, **tỷ lệ %**) để người dùng dễ theo dõi trên màn hình di động.$knowledgeBlock$adminInstructionBlock
 ''';
+  }
+
+  String _buildSystemCfpPrompt(String contextData) {
+    return buildSystemCfpPromptForContext(contextData);
   }
 
   String _buildCategorySummary(
