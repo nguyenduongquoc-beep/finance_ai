@@ -13,19 +13,25 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/users/$(request.auth.uid));
     }
 
-    // Helper: Tài khoản không bị khóa (status != 'locked')
+    // Helper: Tài khoản người dùng thường không bị khóa (status != 'locked').
+    // Giữ cơ chế tương thích cho tài khoản User mới đăng ký nếu document `users/{uid}`
+    // chưa được tạo xong ở client.
     function isActiveUser() {
       return isSignedIn() &&
         (!exists(/databases/$(database)/documents/users/$(request.auth.uid)) ||
          currentUserDoc().data.get('status', 'active') == 'active');
     }
 
-    // Helper: Kiểm tra quyền Admin ở tầng Backend
+    // Helper: Kiểm tra quyền Admin ở tầng Backend.
+    // Bắt buộc document `users/{uid}` phải tồn tại và có `status == 'active'`
+    // (không kế thừa ngoại lệ `!exists(...)` của `isActiveUser()`, kể cả khi
+    // Custom Claim `admin: true` vẫn còn trên Firebase ID Token).
     function isAdmin() {
-      return isActiveUser() &&
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        currentUserDoc().data.get('status', '') == 'active' &&
         (request.auth.token.admin == true ||
-         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-          currentUserDoc().data.get('role', 'user') == 'admin'));
+         currentUserDoc().data.get('role', 'user') == 'admin');
     }
 
     // 1. Hồ sơ người dùng (users/{uid})

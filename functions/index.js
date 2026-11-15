@@ -8,6 +8,7 @@ const {
   computeCanonicalConfigHash,
   validateConfigPayloadServerSide,
   verifyAdminCallerWithDeps,
+  applyAdminCorsPolicy,
   createAdminEndpointHandlers,
 } = require("./admin_helpers");
 
@@ -327,14 +328,10 @@ exports.resetPasswordWithOtp = functions.https.onRequest(async (req, res) => {
 // ======================================================================
 
 function applyAdminCors(req, res) {
-  res.set("Access-Control-Allow-Origin", "*");
-  res.set("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-  res.set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Firebase-AppCheck");
-  if (req.method === "OPTIONS") {
-    res.status(204).send("");
-    return true;
-  }
-  return false;
+  return applyAdminCorsPolicy(req, res, {
+    allowedOriginsEnv: process.env.ADMIN_ALLOWED_ORIGINS || "",
+    allowLocalhost: process.env.ADMIN_ALLOW_LOCALHOST_CORS !== "false",
+  });
 }
 
 /**
@@ -1124,85 +1121,7 @@ exports.submitAiFeedback = functions.https.onRequest(async (req, res) => {
  */
 exports.adminResolveAiFeedback = functions.https.onRequest(async (req, res) => {
   if (applyAdminCors(req, res)) return;
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method Not Allowed" });
-    return;
-  }
-
-  try {
-    const caller = await verifyAdminCaller(req);
-    const { reportId, status, adminResolutionNote, appliedAction } = req.body || {};
-
-    if (!reportId || (status !== "resolved" && status !== "ignored")) {
-      res.status(400).json({ error: "Tham số reportId hoặc status không hợp lệ." });
-      return;
-    }
-
-    const nowIso = new Date().toISOString();
-    const reportRef = db.collection("ai_feedback_reports").doc(reportId);
-    const linkRef = db.collection("_feedback_notification_links").doc(reportId);
-
-    await db.runTransaction(async (tx) => {
-      const [reportSnap, linkSnap] = await Promise.all([
-        tx.get(reportRef),
-        tx.get(linkRef),
-      ]);
-
-      if (!reportSnap.exists) {
-        const err = new Error("Không tìm thấy phiếu phản hồi AI.");
-        err.statusCode = 404;
-        throw err;
-      }
-
-      tx.update(reportRef, {
-        status: status,
-        adminResolutionNote: String(adminResolutionNote || "").trim().substring(0, 300),
-        appliedAction: String(appliedAction || "reviewed").trim().substring(0, 80),
-        resolvedBy: caller.uid,
-        resolvedAt: nowIso,
-      });
-
-      if (status === "resolved" && linkSnap.exists && linkSnap.data().uid) {
-        const notifRef = db.collection("notifications").doc();
-        tx.set(notifRef, {
-          notificationId: notifRef.id,
-          userId: linkSnap.data().uid,
-          title: "Đóng góp cải thiện AI đã được áp dụng",
-          body: "Cảm ơn bạn! Phản hồi chất lượng AI của bạn đã được Quản trị viên xem xét và cập nhật vào hệ thống.",
-          type: "system",
-          isRead: false,
-          createdAt: nowIso,
-        });
-        tx.delete(linkRef);
-      }
-
-      const logRef = db.collection("admin_logs").doc();
-      tx.set(logRef, {
-        adminId: caller.uid,
-        adminEmail: caller.email,
-        action: "RESOLVE_AI_FEEDBACK",
-        targetType: "ai_feedback",
-        targetId: reportId,
-        targetLabel: reportId,
-        result: "success",
-        details: `Xử lý phản hồi AI (${status}): ${String(adminResolutionNote || "").trim()}`,
-        source: "cloud_function",
-        createdAt: nowIso,
-      });
-    });
-
-    res.status(200).json({
-      success: true,
-      reportId: reportId,
-      status: status,
-    });
-  } catch (error) {
-    functions.logger.error("Lỗi adminResolveAiFeedback:", error);
-    const code = error.statusCode || 500;
-    res.status(code).json({
-      error: error.message || "Không thể cập nhật trạng thái phản hồi AI.",
-    });
-  }
+  return adminHandlers.adminResolveAiFeedback(req, res);
 });
 
 // ======================================================================

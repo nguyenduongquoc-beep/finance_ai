@@ -3,6 +3,9 @@ const assert = require("node:assert/strict");
 const {
   validateConfigPayloadServerSide,
   validateKnowledgeArticleServerSide,
+  parseAllowedAdminOrigins,
+  isAllowedAdminOrigin,
+  applyAdminCorsPolicy,
   verifyAdminCallerWithDeps,
   createAdminEndpointHandlers,
 } = require("../admin_helpers");
@@ -115,12 +118,24 @@ function createFakeAuth({ verifiedTokens = {}, users = {} } = {}) {
 function createMockRes() {
   const res = {
     statusCode: 200,
+    headers: {},
     body: null,
+    set(name, value) {
+      this.headers[String(name).toLowerCase()] = value;
+      return this;
+    },
+    getHeader(name) {
+      return this.headers[String(name).toLowerCase()];
+    },
     status(code) {
       this.statusCode = code;
       return this;
     },
     json(payload) {
+      this.body = payload;
+      return this;
+    },
+    send(payload) {
       this.body = payload;
       return this;
     },
@@ -573,4 +588,282 @@ test("adminManageSystemCategory & adminManageAnnouncement: ghi CRUD + admin_logs
   assert.equal(logs.length, 2);
   assert.equal(logs[0].action, "CREATE_SYSTEM_CATEGORY");
   assert.equal(logs[1].action, "CREATE_ANNOUNCEMENT");
+});
+
+test("Giai đoạn 4A CORS: siết allowlist ADMIN_ALLOWED_ORIGINS, localhost dev, chặn origin lạ và đúng preflight OPTIONS", async () => {
+  const parsed = parseAllowedAdminOrigins("https://admin.finance-ai.test/, *, invalid-url, https://staging-web.example.com");
+  assert.deepEqual(parsed, ["https://admin.finance-ai.test", "https://staging-web.example.com"]);
+
+  // 1. Origin hợp lệ trong ADMIN_ALLOWED_ORIGINS được cấp đúng ACAO (không dùng `*`) và đi tiếp
+  const resValid = createMockRes();
+  const blockedValid = applyAdminCorsPolicy(
+    {
+      method: "POST",
+      headers: { origin: "https://admin.finance-ai.test" },
+    },
+    resValid,
+    { allowedOriginsEnv: "https://admin.finance-ai.test", allowLocalhost: false }
+  );
+  assert.equal(blockedValid, false);
+  assert.equal(resValid.getHeader("access-control-allow-origin"), "https://admin.finance-ai.test");
+  assert.equal(resValid.getHeader("vary"), "Origin");
+  assert.ok(resValid.getHeader("access-control-allow-headers").includes("Authorization"));
+  assert.ok(resValid.getHeader("access-control-allow-headers").includes("X-Firebase-AppCheck"));
+
+  // 2. Preflight OPTIONS từ origin hợp lệ (hoặc localhost dev) trả 204 với đủ header Authorization & X-Firebase-AppCheck
+  const resPreflight = createMockRes();
+  const endedPreflight = applyAdminCorsPolicy(
+    {
+      method: "OPTIONS",
+      headers: { origin: "http://localhost:5173" },
+    },
+    resPreflight,
+    { allowedOriginsEnv: "", allowLocalhost: true }
+  );
+  assert.equal(endedPreflight, true);
+  assert.equal(resPreflight.statusCode, 204);
+  assert.equal(resPreflight.getHeader("access-control-allow-origin"), "http://localhost:5173");
+  assert.equal(resPreflight.getHeader("access-control-allow-methods"), "GET, POST, OPTIONS");
+  assert.equal(
+    resPreflight.getHeader("access-control-allow-headers"),
+    "Content-Type, Authorization, X-Firebase-AppCheck"
+  );
+
+  // 3. Origin lạ trên cả OPTIONS lẫn POST bị từ chối 403 và KHÔNG được cấp Access-Control-Allow-Origin
+  for (const method of ["OPTIONS", "POST"]) {
+    const resEvil = createMockRes();
+    const endedEvil = applyAdminCorsPolicy(
+      {
+        method,
+        headers: { origin: "https://evil.attacker.example" },
+      },
+      resEvil,
+      { allowedOriginsEnv: "https://admin.finance-ai.test", allowLocalhost: true }
+    );
+    assert.equal(endedEvil, true);
+    assert.equal(resEvil.statusCode, 403);
+    assert.equal(resEvil.getHeader("access-control-allow-origin"), undefined);
+    assert.equal(resEvil.getHeader("vary"), "Origin");
+  }
+
+  // Khi tắt localhost dev mode thì localhost cũng bị từ chối
+  const resLocalOff = createMockRes();
+  const endedLocalOff = applyAdminCorsPolicy(
+    { method: "GET", headers: { origin: "http://127.0.0.1:8080" } },
+    resLocalOff,
+    { allowedOriginsEnv: "https://admin.finance-ai.test", allowLocalhost: false }
+  );
+  assert.equal(endedLocalOff, true);
+  assert.equal(resLocalOff.statusCode, 403);
+  assert.equal(resLocalOff.getHeader("access-control-allow-origin"), undefined);
+
+  // 4. Request không gửi Origin (CLI / native) đi qua CORS nhưng KHÔNG cấp `*`, và vẫn bị verifyAdminCaller chặn nếu thiếu Token
+  const resNoOrigin = createMockRes();
+  const endedNoOrigin = applyAdminCorsPolicy(
+    { method: "POST", headers: {} },
+    resNoOrigin,
+    { allowedOriginsEnv: "https://admin.finance-ai.test", allowLocalhost: false }
+  );
+  assert.equal(endedNoOrigin, false);
+  assert.equal(resNoOrigin.getHeader("access-control-allow-origin"), undefined);
+
+  // 5. Không coi CORS là cơ chế thay thế xác thực Token + X-Firebase-AppCheck
+  const db = new FakeFirestore({
+    users: { admin1: { email: "admin@app.vn", role: "admin", status: "active" } },
+  });
+  const auth = createFakeAuth({
+    verifiedTokens: { tok_admin: { uid: "admin1", email: "admin@app.vn", admin: true } },
+  });
+  const checkedAppCheck = [];
+  const handlers = createAdminEndpointHandlers({
+    db,
+    auth,
+    verifyAppCheckFn: async (r) => {
+      checkedAppCheck.push(r.headers["x-firebase-appcheck"] || "");
+    },
+    logger: { error() {}, warn() {} },
+  });
+
+  // Origin hợp lệ nhưng thiếu Bearer token -> vẫn 401
+  const resUnauth = createMockRes();
+  await handlers.adminVerifySession(
+    { method: "GET", headers: { origin: "http://localhost:5000" } },
+    resUnauth
+  );
+  assert.equal(resUnauth.statusCode, 401);
+
+  // Origin hợp lệ + Bearer token + X-Firebase-AppCheck -> 200
+  const resAuth = createMockRes();
+  await handlers.adminVerifySession(
+    {
+      method: "GET",
+      headers: {
+        origin: "http://localhost:5000",
+        authorization: "Bearer tok_admin",
+        "x-firebase-appcheck": "appcheck_tok_123",
+      },
+    },
+    resAuth
+  );
+  assert.equal(resAuth.statusCode, 200);
+  assert.equal(resAuth.body.verifiedByServer, true);
+  assert.equal(checkedAppCheck.includes("appcheck_tok_123"), true);
+});
+
+test("Giai đoạn 4A verifyAdminCallerWithDeps: từ chối 403 nếu tài khoản có claim admin nhưng users/{uid} bị xóa hoặc không active", async () => {
+  const db = new FakeFirestore({
+    users: {
+      admin_no_status: { email: "nostatus@app.vn", role: "admin" },
+      admin_active: { email: "ok@app.vn", role: "admin", status: "active" },
+    },
+  });
+  const auth = createFakeAuth({
+    verifiedTokens: {
+      tok_deleted: { uid: "admin_deleted", email: "deleted@app.vn", admin: true },
+      tok_no_status: { uid: "admin_no_status", email: "nostatus@app.vn", admin: true },
+      tok_ok: { uid: "admin_active", email: "ok@app.vn", admin: true },
+    },
+  });
+  const handlers = createAdminEndpointHandlers({ db, auth, logger: { error() {}, warn() {} } });
+
+  const resDeleted = createMockRes();
+  await handlers.adminVerifySession(
+    { method: "GET", headers: { authorization: "Bearer tok_deleted" } },
+    resDeleted
+  );
+  assert.equal(resDeleted.statusCode, 403);
+
+  const resNoStatus = createMockRes();
+  await handlers.adminVerifySession(
+    { method: "GET", headers: { authorization: "Bearer tok_no_status" } },
+    resNoStatus
+  );
+  assert.equal(resNoStatus.statusCode, 403);
+
+  const resOk = createMockRes();
+  await handlers.adminVerifySession(
+    { method: "GET", headers: { authorization: "Bearer tok_ok" } },
+    resOk
+  );
+  assert.equal(resOk.statusCode, 200);
+});
+
+test("Giai đoạn 4A adminResolveAiFeedback: ghi notification đúng schema content+status, giữ ẩn danh tuyệt đối cho anonymous & không lộ UID", async () => {
+  const SECRET_REPORTER_UID = "user_secret_reporter_999";
+  const SECRET_HASH = "hmac_hash_never_in_notif";
+  const db = new FakeFirestore({
+    users: {
+      admin1: { email: "admin@app.vn", role: "admin", status: "active" },
+    },
+    ai_feedback_reports: {
+      fb_pseudo: {
+        reportId: "fb_pseudo",
+        targetFeature: "ocr_suggestion",
+        rating: "negative",
+        feedbackMode: "pseudonymous",
+        reporterHash: SECRET_HASH,
+        status: "open",
+      },
+      fb_anon: {
+        reportId: "fb_anon",
+        targetFeature: "ai_chat",
+        rating: "negative",
+        feedbackMode: "anonymous",
+        status: "open",
+      },
+      fb_pseudo_ignored: {
+        reportId: "fb_pseudo_ignored",
+        targetFeature: "monthly_plan",
+        rating: "negative",
+        feedbackMode: "pseudonymous",
+        reporterHash: SECRET_HASH,
+        status: "open",
+      },
+    },
+    _feedback_notification_links: {
+      fb_pseudo: { reportId: "fb_pseudo", uid: SECRET_REPORTER_UID },
+      fb_pseudo_ignored: { reportId: "fb_pseudo_ignored", uid: SECRET_REPORTER_UID },
+    },
+  });
+  const auth = createFakeAuth({
+    verifiedTokens: { tok_a: { uid: "admin1", email: "admin@app.vn", admin: true } },
+  });
+  const handlers = createAdminEndpointHandlers({ db, auth, logger: { error() {}, warn() {} } });
+
+  // 1. Resolve pseudonymous feedback -> tạo đúng 1 notification với content + status: 'unread', xóa link, không lộ UID
+  const resPseudo = createMockRes();
+  await handlers.adminResolveAiFeedback(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_a" },
+      body: {
+        reportId: "fb_pseudo",
+        status: "resolved",
+        adminResolutionNote: "Đã cập nhật từ khóa hóa đơn.",
+        appliedAction: "ocr_dictionary_updated",
+      },
+    },
+    resPseudo
+  );
+  assert.equal(resPseudo.statusCode, 200);
+  assert.equal(resPseudo.body.notificationSent, true);
+  assert.equal(JSON.stringify(resPseudo.body).includes(SECRET_REPORTER_UID), false);
+  assert.equal(JSON.stringify(resPseudo.body).includes(SECRET_HASH), false);
+
+  const notifs = Array.from(db._getCol("notifications").values());
+  assert.equal(notifs.length, 1);
+  assert.equal(notifs[0].userId, SECRET_REPORTER_UID);
+  assert.equal(typeof notifs[0].content, "string");
+  assert.ok(notifs[0].content.trim().length > 0);
+  assert.equal(notifs[0].status, "unread");
+  assert.equal(notifs[0].type, "ai_insight");
+  assert.equal(Object.prototype.hasOwnProperty.call(notifs[0], "body"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(notifs[0], "isRead"), false);
+  assert.equal(notifs[0].content.includes(SECRET_REPORTER_UID), false);
+  assert.equal(notifs[0].content.includes(SECRET_HASH), false);
+  assert.equal(
+    (await db.collection("_feedback_notification_links").doc("fb_pseudo").get()).exists,
+    false
+  );
+
+  // 2. Resolve anonymous feedback -> không có link, không tạo thêm notification nào
+  const resAnon = createMockRes();
+  await handlers.adminResolveAiFeedback(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_a" },
+      body: {
+        reportId: "fb_anon",
+        status: "resolved",
+        adminResolutionNote: "Đã điều chỉnh prompt hệ thống.",
+      },
+    },
+    resAnon
+  );
+  assert.equal(resAnon.statusCode, 200);
+  assert.equal(resAnon.body.notificationSent, false);
+  assert.equal(db._getCol("notifications").size, 1);
+
+  // 3. Ignored pseudonymous feedback -> không gửi notification
+  const resIgnored = createMockRes();
+  await handlers.adminResolveAiFeedback(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_a" },
+      body: {
+        reportId: "fb_pseudo_ignored",
+        status: "ignored",
+        adminResolutionNote: "Không đủ ngữ cảnh.",
+      },
+    },
+    resIgnored
+  );
+  assert.equal(resIgnored.statusCode, 200);
+  assert.equal(resIgnored.body.notificationSent, false);
+  assert.equal(db._getCol("notifications").size, 1);
+
+  // 4. Nhật ký admin_logs không chứa UID hay reporterHash của người gửi feedback
+  const logsJson = JSON.stringify(Array.from(db._getCol("admin_logs").values()));
+  assert.equal(logsJson.includes(SECRET_REPORTER_UID), false);
+  assert.equal(logsJson.includes(SECRET_HASH), false);
 });

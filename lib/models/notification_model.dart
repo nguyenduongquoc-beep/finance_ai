@@ -48,11 +48,20 @@ class AppNotification {
       resolvedStatus = (map['isRead'] as bool) ? 'read' : 'unread';
     }
 
+    final rawContent = map['content'];
+    final legacyBody = map['body'];
+    final resolvedContent =
+        (rawContent is String && rawContent.trim().isNotEmpty)
+            ? rawContent
+            : (legacyBody is String
+                ? legacyBody
+                : (rawContent?.toString() ?? ''));
+
     return AppNotification(
       notificationId: id,
       userId: map['userId'] ?? '',
       title: map['title'] ?? '',
-      content: map['content'] ?? '',
+      content: resolvedContent,
       status: resolvedStatus,
       type: map['type'] ?? 'reminder',
       createdAt: parsedDate,

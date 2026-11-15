@@ -741,7 +741,168 @@ function validateKnowledgeArticleServerSide(article, expectedArticleId) {
 }
 
 /**
+ * Chuẩn hóa danh sách origin hợp lệ từ biến môi trường (phân tách bởi dấu phẩy).
+ * Tuyệt đối bỏ qua wildcard `*` và các chuỗi không đúng chuẩn origin HTTP(S).
+ */
+function parseAllowedAdminOrigins(allowedOriginsEnv = "") {
+  const result = new Set();
+  const rawList = String(allowedOriginsEnv || "").split(",");
+  for (const rawItem of rawList) {
+    const trimmed = rawItem.trim().replace(/\/+$/, "");
+    if (!trimmed || trimmed === "*") continue;
+    try {
+      const parsed = new URL(trimmed);
+      if (
+        (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+        parsed.origin === trimmed
+      ) {
+        result.add(parsed.origin);
+      }
+    } catch (_) {
+      // Bỏ qua origin cấu hình sai cú pháp thay vì mở rộng phạm vi ngoài ý muốn
+    }
+  }
+  return Array.from(result);
+}
+
+/**
+ * Kiểm tra một HTTP Origin header có nằm trong allowlist của Admin Portal hay không.
+ * Hỗ trợ `ADMIN_ALLOWED_ORIGINS` (chuẩn URL origin) và localhost/127.0.0.1 cho môi trường dev.
+ */
+function isAllowedAdminOrigin(
+  originHeader,
+  {
+    allowedOriginsEnv = process.env.ADMIN_ALLOWED_ORIGINS || "",
+    allowLocalhost = process.env.ADMIN_ALLOW_LOCALHOST_CORS !== "false",
+  } = {}
+) {
+  if (typeof originHeader !== "string" || !originHeader.trim()) {
+    return { valid: false, allowed: false, normalizedOrigin: "", matchedBy: "missing" };
+  }
+  const trimmed = originHeader.trim().replace(/\/+$/, "");
+  if (!trimmed || trimmed === "*" || trimmed.toLowerCase() === "null") {
+    return { valid: false, allowed: false, normalizedOrigin: "", matchedBy: "invalid" };
+  }
+
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch (_) {
+    return { valid: false, allowed: false, normalizedOrigin: "", matchedBy: "invalid" };
+  }
+
+  if (
+    (parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+    parsed.origin !== trimmed
+  ) {
+    return { valid: false, allowed: false, normalizedOrigin: "", matchedBy: "invalid" };
+  }
+
+  const configuredOrigins = parseAllowedAdminOrigins(allowedOriginsEnv);
+  if (configuredOrigins.includes(parsed.origin)) {
+    return {
+      valid: true,
+      allowed: true,
+      normalizedOrigin: parsed.origin,
+      matchedBy: "env_allowlist",
+    };
+  }
+
+  if (
+    allowLocalhost &&
+    (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1")
+  ) {
+    return {
+      valid: true,
+      allowed: true,
+      normalizedOrigin: parsed.origin,
+      matchedBy: "localhost_dev",
+    };
+  }
+
+  return {
+    valid: true,
+    allowed: false,
+    normalizedOrigin: parsed.origin,
+    matchedBy: "denied",
+  };
+}
+
+/**
+ * Áp dụng chính sách CORS an toàn cho Admin Cloud Functions (không dùng `*`).
+ * - CORS KHÔNG thay thế cơ chế xác thực Bearer ID Token + Admin Claims/Firestore ở backend.
+ * - Request không gửi `Origin` (mobile native/server/CLI) vẫn đi qua bình thường
+ *   (không cấp `Access-Control-Allow-Origin`) và phải tự vượt qua `verifyAdminCaller`.
+ * - Request từ trình duyệt có `Origin` nằm trong allowlist được phản hồi chính xác
+ *   origin đó kèm header `Authorization`, `X-Firebase-AppCheck`.
+ * - Origin lạ bị từ chối với HTTP 403 và KHÔNG được cấp `Access-Control-Allow-Origin`.
+ */
+function applyAdminCorsPolicy(
+  req,
+  res,
+  {
+    allowedOriginsEnv = process.env.ADMIN_ALLOWED_ORIGINS || "",
+    allowLocalhost = process.env.ADMIN_ALLOW_LOCALHOST_CORS !== "false",
+  } = {}
+) {
+  const setHeader = (name, value) => {
+    if (typeof res.set === "function") {
+      res.set(name, value);
+    } else if (typeof res.setHeader === "function") {
+      res.setHeader(name, value);
+    }
+  };
+
+  setHeader("Vary", "Origin");
+
+  const method = String((req && req.method) || "GET").toUpperCase();
+  const originHeader =
+    req && req.headers ? req.headers.origin || req.headers.Origin || "" : "";
+
+  if (!originHeader || !String(originHeader).trim()) {
+    if (method === "OPTIONS") {
+      setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+      setHeader(
+        "Access-Control-Allow-Headers",
+        "Content-Type, Authorization, X-Firebase-AppCheck"
+      );
+      res.status(204).send("");
+      return true;
+    }
+    return false;
+  }
+
+  const check = isAllowedAdminOrigin(originHeader, {
+    allowedOriginsEnv,
+    allowLocalhost,
+  });
+
+  if (!check.allowed) {
+    res.status(403).json({
+      error: "Origin không được phép truy cập Admin Cloud Functions.",
+    });
+    return true;
+  }
+
+  setHeader("Access-Control-Allow-Origin", check.normalizedOrigin);
+  setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, X-Firebase-AppCheck"
+  );
+  setHeader("Access-Control-Max-Age", "3600");
+
+  if (method === "OPTIONS") {
+    res.status(204).send("");
+    return true;
+  }
+  return false;
+}
+
+/**
  * Xác thực Firebase ID Token + hồ sơ Firestore ở Backend.
+ * Bắt buộc tài khoản Admin phải có document `users/{uid}` tồn tại với `status === 'active'`
+ * để đồng bộ chặt chẽ với Firestore Security Rules `isAdmin()`.
  * Bảo toàn toàn bộ Custom Claims sẵn có khi tự động đồng bộ `{ admin: true }`.
  */
 async function verifyAdminCallerWithDeps({
@@ -770,10 +931,22 @@ async function verifyAdminCallerWithDeps({
   }
 
   const adminUserDoc = await db.collection("users").doc(decoded.uid).get();
-  const userData = adminUserDoc.exists ? adminUserDoc.data() || {} : {};
+  if (!adminUserDoc.exists) {
+    throw createHttpError(
+      403,
+      "Truy cập bị từ chối: Không tìm thấy hồ sơ users/{uid} hợp lệ cho tài khoản quản trị."
+    );
+  }
+  const userData = adminUserDoc.data() || {};
 
   if (userData.status === "locked") {
     throw createHttpError(403, "Tài khoản quản trị viên này đã bị khóa.");
+  }
+  if (userData.status !== "active") {
+    throw createHttpError(
+      403,
+      "Truy cập bị từ chối: Tài khoản quản trị viên không ở trạng thái active."
+    );
   }
 
   const hasClaim = decoded.admin === true;
@@ -895,11 +1068,16 @@ function createAdminEndpointHandlers({
       };
       await auth.setCustomUserClaims(targetUid, mergedClaims);
 
-      // 2. Đồng bộ role trên Firestore
+      // 2. Đồng bộ role trên Firestore (giữ nguyên status hiện có, mặc định 'active' nếu tạo mới)
       const nowIso = new Date(nowProvider()).toISOString();
+      const preservedStatus =
+        targetSnap.exists && targetSnap.data().status
+          ? targetSnap.data().status
+          : "active";
       await targetDocRef.set(
         {
           role: role,
+          status: preservedStatus,
           updatedAt: nowIso,
         },
         { merge: true }
@@ -1686,6 +1864,88 @@ function createAdminEndpointHandlers({
     }
   }
 
+  async function adminResolveAiFeedback(req, res) {
+    if (req.method !== "POST") {
+      res.status(405).json({ error: "Method Not Allowed" });
+      return;
+    }
+
+    try {
+      const caller = await verifyCaller(req);
+      const { reportId, status, adminResolutionNote, appliedAction } = req.body || {};
+
+      if (!reportId || (status !== "resolved" && status !== "ignored")) {
+        throw createHttpError(400, "Tham số reportId hoặc status không hợp lệ.");
+      }
+
+      const nowIso = new Date(nowProvider()).toISOString();
+      const reportRef = db.collection("ai_feedback_reports").doc(reportId);
+      const linkRef = db.collection("_feedback_notification_links").doc(reportId);
+      let notificationSent = false;
+
+      await db.runTransaction(async (tx) => {
+        const [reportSnap, linkSnap] = await Promise.all([
+          tx.get(reportRef),
+          tx.get(linkRef),
+        ]);
+
+        if (!reportSnap.exists) {
+          throw createHttpError(404, "Không tìm thấy phiếu phản hồi AI.");
+        }
+
+        tx.update(reportRef, {
+          status: status,
+          adminResolutionNote: String(adminResolutionNote || "").trim().substring(0, 300),
+          appliedAction: String(appliedAction || "reviewed").trim().substring(0, 80),
+          resolvedBy: caller.uid,
+          resolvedAt: nowIso,
+        });
+
+        if (status === "resolved" && linkSnap.exists && linkSnap.data().uid) {
+          const notifRef = db.collection("notifications").doc();
+          tx.set(notifRef, {
+            notificationId: notifRef.id,
+            userId: linkSnap.data().uid,
+            title: "Đóng góp cải thiện AI đã được áp dụng",
+            content:
+              "Cảm ơn bạn! Phản hồi chất lượng AI của bạn đã được Quản trị viên xem xét và cập nhật vào hệ thống.",
+            type: "ai_insight",
+            status: "unread",
+            createdAt: nowIso,
+          });
+          tx.delete(linkRef);
+          notificationSent = true;
+        }
+
+        const logRef = db.collection("admin_logs").doc();
+        tx.set(logRef, {
+          adminId: caller.uid,
+          adminEmail: caller.email,
+          action: "RESOLVE_AI_FEEDBACK",
+          targetType: "ai_feedback",
+          targetId: reportId,
+          targetLabel: reportId,
+          result: "success",
+          details: `Xử lý phản hồi AI (${status}): ${String(adminResolutionNote || "").trim()}`,
+          source: "cloud_function",
+          createdAt: nowIso,
+        });
+      });
+
+      res.status(200).json({
+        success: true,
+        reportId: reportId,
+        status: status,
+        notificationSent: notificationSent,
+      });
+    } catch (error) {
+      if (logger && typeof logger.error === "function") {
+        logger.error("Lỗi adminResolveAiFeedback:", error.message || error);
+      }
+      sendErrorResponse(res, error, "Không thể cập nhật trạng thái phản hồi AI.");
+    }
+  }
+
   return {
     adminVerifySession,
     adminSetUserRole,
@@ -1693,6 +1953,7 @@ function createAdminEndpointHandlers({
     adminRunSandbox,
     adminManageSystemCategory,
     adminManageAnnouncement,
+    adminResolveAiFeedback,
   };
 }
 
@@ -1717,6 +1978,9 @@ module.exports = {
   computeCanonicalConfigHash,
   validateConfigPayloadServerSide,
   validateKnowledgeArticleServerSide,
+  parseAllowedAdminOrigins,
+  isAllowedAdminOrigin,
+  applyAdminCorsPolicy,
   verifyAdminCallerWithDeps,
   createAdminEndpointHandlers,
 };

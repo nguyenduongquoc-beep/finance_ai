@@ -10,6 +10,7 @@ import 'package:finance_ai_app/models/admin_audit_log_model.dart';
 import 'package:finance_ai_app/models/ai_runtime_config_model.dart';
 import 'package:finance_ai_app/models/category_model.dart';
 import 'package:finance_ai_app/models/monthly_financial_plan.dart';
+import 'package:finance_ai_app/models/notification_model.dart';
 import 'package:finance_ai_app/models/wallet_model.dart';
 import 'package:finance_ai_app/services/ai_prompt_builder.dart';
 import 'package:finance_ai_app/services/ai_service.dart';
@@ -772,6 +773,55 @@ void main() {
         expect(label, isNot(equals(action)));
         expect(label.trim(), isNotEmpty);
       }
+    });
+
+    test(
+        'AppNotification.fromMap đọc đúng schema mới (content + status) và fallback dữ liệu cũ (body + isRead)',
+        () {
+      final newNotif = AppNotification.fromMap({
+        'userId': 'u_pseudo',
+        'title': 'Đóng góp cải thiện AI đã được áp dụng',
+        'content':
+            'Cảm ơn bạn! Phản hồi chất lượng AI của bạn đã được Quản trị viên xem xét và cập nhật vào hệ thống.',
+        'type': 'ai_insight',
+        'status': 'unread',
+        'createdAt': '2026-11-15T04:00:00.000Z',
+      }, 'n_new');
+
+      expect(newNotif.notificationId, 'n_new');
+      expect(newNotif.title, 'Đóng góp cải thiện AI đã được áp dụng');
+      expect(
+        newNotif.content,
+        'Cảm ơn bạn! Phản hồi chất lượng AI của bạn đã được Quản trị viên xem xét và cập nhật vào hệ thống.',
+      );
+      expect(newNotif.status, 'unread');
+      expect(newNotif.isUnread, isTrue);
+      expect(newNotif.type, 'ai_insight');
+
+      // Dữ liệu cũ trước Giai đoạn 4A chỉ có `body` + `isRead` (kể cả khi `content` rỗng/null)
+      final legacyUnread = AppNotification.fromMap({
+        'userId': 'u_legacy',
+        'title': 'Cũ chưa đọc',
+        'content': '',
+        'body': 'Nội dung legacy từ body',
+        'type': 'system',
+        'isRead': false,
+        'createdAt': '2026-11-14T10:00:00.000Z',
+      }, 'n_legacy_1');
+      expect(legacyUnread.content, 'Nội dung legacy từ body');
+      expect(legacyUnread.status, 'unread');
+      expect(legacyUnread.isUnread, isTrue);
+
+      final legacyRead = AppNotification.fromMap({
+        'userId': 'u_legacy',
+        'title': 'Cũ đã đọc',
+        'body': 'Đã đọc legacy',
+        'isRead': true,
+        'createdAt': '2026-11-14T09:00:00.000Z',
+      }, 'n_legacy_2');
+      expect(legacyRead.content, 'Đã đọc legacy');
+      expect(legacyRead.status, 'read');
+      expect(legacyRead.isUnread, isFalse);
     });
   });
 }
