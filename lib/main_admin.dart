@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
@@ -13,16 +14,46 @@ import 'utils/constants.dart';
 
 /// ============================================================================
 /// ENTRYPOINT DÀNH RIÊNG CHO TRANG QUẢN TRỊ WEB (ADMIN WEB PORTAL)
-/// Chạy thử nghiệm trên trình duyệt:
-///   flutter run -d chrome -t lib/main_admin.dart
+/// Chạy thử nghiệm với Firebase Emulators cục bộ (Auth + Firestore + Functions):
+///   flutter run -d chrome -t lib/main_admin.dart --web-port=5050 --dart-define=USE_FIREBASE_EMULATOR=true
+/// Chạy trỏ vào Staging Cloud Functions URL tùy chỉnh:
+///   flutter run -d chrome -t lib/main_admin.dart --dart-define=CLOUD_FUNCTIONS_BASE_URL=https://us-central1-<staging-id>.cloudfunctions.net
 /// Build bản Web Production:
 ///   flutter build web -t lib/main_admin.dart
 /// ============================================================================
+Future<void> configureAdminFirebaseEmulatorsIfEnabled() async {
+  const useFirebaseEmulator = bool.fromEnvironment(
+    'USE_FIREBASE_EMULATOR',
+    defaultValue: false,
+  );
+  if (!useFirebaseEmulator) return;
+
+  const emulatorHost = String.fromEnvironment(
+    'FIREBASE_EMULATOR_HOST',
+    defaultValue: '127.0.0.1',
+  );
+  const authPort = int.fromEnvironment(
+    'AUTH_EMULATOR_PORT',
+    defaultValue: 9099,
+  );
+  const firestorePort = int.fromEnvironment(
+    'FIRESTORE_EMULATOR_PORT',
+    defaultValue: 8080,
+  );
+
+  await FirebaseAuth.instance.useAuthEmulator(emulatorHost, authPort);
+  FirebaseFirestore.instance.useFirestoreEmulator(
+    emulatorHost,
+    firestorePort,
+  );
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+  await configureAdminFirebaseEmulatorsIfEnabled();
   await initializeDateFormatting('vi_VN', null);
   await initializeDateFormatting('en_US', null);
   await LanguageController.loadSavedLanguage();

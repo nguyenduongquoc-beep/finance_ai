@@ -823,5 +823,21 @@ void main() {
       expect(legacyRead.status, 'read');
       expect(legacyRead.isUnread, isFalse);
     });
+
+    test('AdminWebService hỗ trợ base URL mặc định & chuẩn hóa dấu / cuối URL',
+        () {
+      expect(
+        AdminWebService.defaultCloudFunctionsBaseUrl,
+        startsWith('https://us-central1-finance-ai-app-6df28.cloudfunctions.net'),
+      );
+      final service = AdminWebService(
+        cloudFunctionsBaseUrl:
+            'http://127.0.0.1:5001/finance-ai-app-6df28/us-central1/',
+      );
+      expect(
+        service.cloudFunctionsBaseUrl,
+        'http://127.0.0.1:5001/finance-ai-app-6df28/us-central1/',
+      );
+    });
   });
 }

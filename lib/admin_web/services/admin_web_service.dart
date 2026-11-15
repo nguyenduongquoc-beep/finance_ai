@@ -204,8 +204,33 @@ class AdminPermissionException implements Exception {
 /// Mọi thao tác thay đổi dữ liệu và ghi `admin_logs` đều đi qua Backend Cloud Functions.
 /// Bảo mật: Không chứa API Key Gemini và không đọc/ghi dữ liệu tài chính cá nhân của người dùng.
 class AdminWebService {
+  static const String _envCloudFunctionsBaseUrl = String.fromEnvironment(
+    'CLOUD_FUNCTIONS_BASE_URL',
+    defaultValue: '',
+  );
+  static const bool _useFirebaseEmulator = bool.fromEnvironment(
+    'USE_FIREBASE_EMULATOR',
+    defaultValue: false,
+  );
+  static const String _firebaseEmulatorHost = String.fromEnvironment(
+    'FIREBASE_EMULATOR_HOST',
+    defaultValue: '127.0.0.1',
+  );
+  static const int _functionsEmulatorPort = int.fromEnvironment(
+    'FUNCTIONS_EMULATOR_PORT',
+    defaultValue: 5001,
+  );
+  static const String _firebaseProjectId = String.fromEnvironment(
+    'FIREBASE_PROJECT_ID',
+    defaultValue: 'finance-ai-app-6df28',
+  );
+
   static const String defaultCloudFunctionsBaseUrl =
-      'https://us-central1-finance-ai-app-6df28.cloudfunctions.net';
+      _envCloudFunctionsBaseUrl != ''
+          ? _envCloudFunctionsBaseUrl
+          : (_useFirebaseEmulator
+              ? 'http://$_firebaseEmulatorHost:$_functionsEmulatorPort/$_firebaseProjectId/us-central1'
+              : 'https://us-central1-finance-ai-app-6df28.cloudfunctions.net');
 
   final FirestoreService _firestoreService;
   final FirebaseAuth? _firebaseAuth;
@@ -431,9 +456,11 @@ class AdminWebService {
       );
     }
 
+    final normalizedBaseUrl =
+        cloudFunctionsBaseUrl.replaceFirst(RegExp(r'/+$'), '');
     final response = await sendAdminCloudRequest(
       method: method,
-      url: '$cloudFunctionsBaseUrl/$functionName',
+      url: '$normalizedBaseUrl/$functionName',
       idToken: idToken,
       body: method.toUpperCase() == 'GET' ? null : payload,
       client: _httpClient,
