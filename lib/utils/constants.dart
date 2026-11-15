@@ -128,13 +128,48 @@ class DefaultIncomeCategories {
 /// Danh mục mặc định - Chi
 class DefaultExpenseCategories {
   static const List<Map<String, dynamic>> categories = [
-    {'name': 'Ăn uống', 'icon': 'restaurant', 'color': 0xFFEF4444},
-    {'name': 'Mua sắm', 'icon': 'shopping_bag', 'color': 0xFFF97316},
-    {'name': 'Xăng xe', 'icon': 'local_gas_station', 'color': 0xFF84CC16},
-    {'name': 'Học tập', 'icon': 'school', 'color': 0xFF3B82F6},
-    {'name': 'Giải trí', 'icon': 'movie', 'color': 0xFF8B5CF6},
-    {'name': 'Du lịch', 'icon': 'flight', 'color': 0xFF06B6D4},
-    {'name': 'Y tế', 'icon': 'local_hospital', 'color': 0xFFEC4899},
+    {
+      'name': 'Ăn uống',
+      'icon': 'restaurant',
+      'color': 0xFFEF4444,
+      'isEssential': false,
+    },
+    {
+      'name': 'Mua sắm',
+      'icon': 'shopping_bag',
+      'color': 0xFFF97316,
+      'isEssential': false,
+    },
+    {
+      'name': 'Xăng xe',
+      'icon': 'local_gas_station',
+      'color': 0xFF84CC16,
+      'isEssential': true,
+    },
+    {
+      'name': 'Học tập',
+      'icon': 'school',
+      'color': 0xFF3B82F6,
+      'isEssential': true,
+    },
+    {
+      'name': 'Giải trí',
+      'icon': 'movie',
+      'color': 0xFF8B5CF6,
+      'isEssential': false,
+    },
+    {
+      'name': 'Du lịch',
+      'icon': 'flight',
+      'color': 0xFF06B6D4,
+      'isEssential': false,
+    },
+    {
+      'name': 'Y tế',
+      'icon': 'local_hospital',
+      'color': 0xFFEC4899,
+      'isEssential': true,
+    },
   ];
 }
 
