@@ -5,6 +5,7 @@ import '../../models/admin_audit_log_model.dart';
 import '../../models/ai_runtime_config_model.dart';
 import '../../models/monthly_financial_plan.dart';
 import '../../models/user_model.dart';
+import '../../services/ai_config_sync_service.dart';
 import '../../services/firestore_service.dart';
 import '../../utils/constants.dart';
 import 'admin_http_helper.dart';
@@ -77,6 +78,67 @@ class AdminSandboxRunResult {
       logId: map['logId']?.toString(),
       draftVerificationNote:
           (map['draftVerificationNote'] ?? '').toString(),
+    );
+  }
+}
+
+/// Bản ghi nháp Kho tri thức Tài chính (`financial_knowledge_drafts`) kèm metadata xuất bản gần nhất.
+class AdminKnowledgeDraftRecord {
+  final FinancialKnowledgeArticle article;
+  final int? lastPublishedVersion;
+  final DateTime? lastPublishedAt;
+  final String? lastPublishedBy;
+
+  const AdminKnowledgeDraftRecord({
+    required this.article,
+    this.lastPublishedVersion,
+    this.lastPublishedAt,
+    this.lastPublishedBy,
+  });
+
+  factory AdminKnowledgeDraftRecord.fromMap(
+    Map<String, dynamic> map, {
+    String? docId,
+  }) {
+    return AdminKnowledgeDraftRecord(
+      article: FinancialKnowledgeArticle.fromMap(map, docId: docId),
+      lastPublishedVersion: (map['lastPublishedVersion'] as num?)?.toInt(),
+      lastPublishedAt: map['lastPublishedAt'] != null
+          ? DateTime.tryParse(map['lastPublishedAt'].toString())
+          : null,
+      lastPublishedBy: map['lastPublishedBy'] as String?,
+    );
+  }
+}
+
+/// Bản ghi đã xuất bản Kho tri thức Tài chính (`financial_knowledge_published`).
+class AdminKnowledgePublishedRecord {
+  final FinancialKnowledgeArticle article;
+  final int publishedVersion;
+  final DateTime? publishedAt;
+  final String? publishedByEmail;
+  final String changeNote;
+
+  const AdminKnowledgePublishedRecord({
+    required this.article,
+    required this.publishedVersion,
+    this.publishedAt,
+    this.publishedByEmail,
+    this.changeNote = '',
+  });
+
+  factory AdminKnowledgePublishedRecord.fromMap(
+    Map<String, dynamic> map, {
+    String? docId,
+  }) {
+    return AdminKnowledgePublishedRecord(
+      article: FinancialKnowledgeArticle.fromMap(map, docId: docId),
+      publishedVersion: (map['publishedVersion'] as num?)?.toInt() ?? 1,
+      publishedAt: map['publishedAt'] != null
+          ? DateTime.tryParse(map['publishedAt'].toString())
+          : null,
+      publishedByEmail: map['publishedByEmail'] as String?,
+      changeNote: (map['changeNote'] ?? '').toString(),
     );
   }
 }
@@ -818,6 +880,137 @@ class AdminWebService {
       timeout: const Duration(seconds: 32),
     );
     return AdminSandboxRunResult.fromMap(res);
+  }
+
+  // ===========================================================================
+  // QUẢN TRỊ BẢN NHÁP, XUẤT BẢN, KHO TRI THỨC & PHẢN HỒI AI
+  // ===========================================================================
+
+  Stream<Map<String, dynamic>?> streamPublishedConfigMap(String configType) {
+    return _firestoreService.streamPublishedConfigMap(configType);
+  }
+
+  Stream<DraftConfigEnvelope?> streamDraftConfigEnvelope(String configType) {
+    return _firestoreService.streamDraftConfigEnvelope(configType);
+  }
+
+  Stream<List<ConfigVersionSnapshot>> streamConfigVersions(String configType) {
+    return _firestoreService.streamConfigVersions(configType);
+  }
+
+  Stream<List<AdminKnowledgeDraftRecord>> streamKnowledgeDrafts() {
+    return _firestoreService.streamKnowledgeDraftDocs().map((docs) {
+      final list = docs
+          .map((d) => AdminKnowledgeDraftRecord.fromMap(
+                d,
+                docId: d['articleId']?.toString(),
+              ))
+          .toList();
+      list.sort((a, b) {
+        final byPriority = b.article.priority.compareTo(a.article.priority);
+        if (byPriority != 0) return byPriority;
+        return a.article.title.compareTo(b.article.title);
+      });
+      return list;
+    });
+  }
+
+  Stream<List<AdminKnowledgePublishedRecord>> streamKnowledgePublished() {
+    return _firestoreService.streamKnowledgePublishedDocs().map((docs) {
+      final list = docs
+          .map((d) => AdminKnowledgePublishedRecord.fromMap(
+                d,
+                docId: d['articleId']?.toString(),
+              ))
+          .toList();
+      list.sort((a, b) {
+        final byPriority = b.article.priority.compareTo(a.article.priority);
+        if (byPriority != 0) return byPriority;
+        return a.article.title.compareTo(b.article.title);
+      });
+      return list;
+    });
+  }
+
+  Stream<List<AiFeedbackReport>> streamAiFeedbackReports({int limit = 200}) {
+    return _firestoreService.streamAiFeedbackReports(limit: limit);
+  }
+
+  /// Kiểm tra hợp lệ client-side khớp 1:1 với Server rồi lưu bản nháp (`draft_configs/{configType}`).
+  /// Tự động tính Canonical SHA-256 `draftHash`. Nếu payload đổi so với hash đã xác minh Sandbox,
+  /// Admin bắt buộc phải xác minh lại trên AI Sandbox trước khi Publish.
+  Future<String> saveConfigDraft({
+    required String adminUid,
+    required String configType,
+    required Map<String, dynamic> payload,
+    String? changeNote,
+    Map<String, dynamic>? tokenClaimsOverride,
+  }) async {
+    await _requireActiveAdmin(
+      adminUid,
+      tokenClaimsOverride: tokenClaimsOverride,
+    );
+
+    final List<String> errors;
+    switch (configType) {
+      case AiConfigSyncService.kDocAiRuntime:
+        errors = AiRuntimeConfig.validateRawInput(payload);
+        break;
+      case AiConfigSyncService.kDocFinancialHeuristics:
+        errors = FinancialHeuristicsConfig.validateRawInput(payload);
+        break;
+      case AiConfigSyncService.kDocTransactionRules:
+        errors = TransactionIntelligenceConfig.validateRawInput(payload);
+        break;
+      default:
+        errors = ['Loại cấu hình "$configType" không được hỗ trợ.'];
+    }
+
+    if (errors.isNotEmpty) {
+      throw AdminCloudCallException(
+        statusCode: 400,
+        kind: AdminCloudErrorKind.validation,
+        message: 'Dữ liệu bản nháp chưa hợp lệ.',
+        validationErrors: errors,
+      );
+    }
+
+    final draftHash = computeCanonicalConfigHash(payload);
+    await _firestoreService.saveDraftConfigDoc(
+      configType: configType,
+      draftPayload: payload,
+      draftHash: draftHash,
+      updatedBy: adminUid,
+      changeNote: changeNote,
+    );
+    return draftHash;
+  }
+
+  /// Kiểm tra schema và lưu bản nháp bài viết Tri thức Tài chính (`financial_knowledge_drafts`).
+  Future<void> saveKnowledgeDraft({
+    required String adminUid,
+    required FinancialKnowledgeArticle article,
+    Map<String, dynamic>? tokenClaimsOverride,
+  }) async {
+    await _requireActiveAdmin(
+      adminUid,
+      tokenClaimsOverride: tokenClaimsOverride,
+    );
+
+    final errors = FinancialKnowledgeArticle.validateRawInput(article.toMap());
+    if (errors.isNotEmpty) {
+      throw AdminCloudCallException(
+        statusCode: 400,
+        kind: AdminCloudErrorKind.validation,
+        message: 'Nội dung bài viết Tri thức Tài chính chưa đạt chuẩn schema.',
+        validationErrors: errors,
+      );
+    }
+
+    await _firestoreService.saveKnowledgeDraftDoc(
+      article: article,
+      updatedBy: adminUid,
+    );
   }
 
   /// Tính toán số liệu Dashboard thực tế 100% từ danh sách User, Danh mục hệ thống và Nhật ký quản trị.

@@ -13,7 +13,9 @@ import '../models/recurring_transaction_model.dart';
 import '../models/recurring_transaction_occurrence_model.dart';
 import '../models/monthly_financial_plan.dart';
 import '../models/admin_audit_log_model.dart';
+import '../models/ai_runtime_config_model.dart';
 import '../utils/formatters.dart';
+import 'ai_config_sync_service.dart';
 import 'financial_context_revision_tracker.dart';
 import 'local_notification_service.dart';
 import 'recurring_transaction_service.dart';
@@ -2794,6 +2796,202 @@ class FirestoreService {
         },
       ),
     );
+  }
+
+  // ---------------- ADMIN AI & KNOWLEDGE GOVERNANCE ----------------
+
+  /// Theo dõi bản cấu hình đã xuất bản (`published_configs/{configType}`).
+  /// Trả về `null` nếu tài liệu chưa tồn tại trên Firestore.
+  Stream<Map<String, dynamic>?> streamPublishedConfigMap(String configType) {
+    return _db
+        .collection(AiConfigSyncService.kPublishedConfigsCollection)
+        .doc(configType)
+        .snapshots()
+        .map((snap) {
+      if (!snap.exists || snap.data() == null) return null;
+      return Map<String, dynamic>.from(snap.data()!);
+    });
+  }
+
+  /// Kết hợp realtime `draft_configs/{configType}` và `_sandbox_verifications/{configType}`
+  /// thành một [DraftConfigEnvelope] để kiểm tra trạng thái Hash/HMAC.
+  Stream<DraftConfigEnvelope?> streamDraftConfigEnvelope(String configType) {
+    late final StreamController<DraftConfigEnvelope?> controller;
+    StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? draftSub;
+    StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? verifySub;
+
+    Map<String, dynamic>? latestDraft;
+    bool hasDraftEmission = false;
+    Map<String, dynamic>? latestVerification;
+
+    void emitCombined() {
+      if (!hasDraftEmission || controller.isClosed) return;
+      if (latestDraft == null) {
+        controller.add(null);
+        return;
+      }
+      controller.add(
+        DraftConfigEnvelope.fromMap(
+          latestDraft!,
+          configType: configType,
+          verificationDoc: latestVerification,
+        ),
+      );
+    }
+
+    controller = StreamController<DraftConfigEnvelope?>(
+      onListen: () {
+        draftSub = _db
+            .collection(AiConfigSyncService.kDraftConfigsCollection)
+            .doc(configType)
+            .snapshots()
+            .listen(
+          (snap) {
+            latestDraft = (snap.exists && snap.data() != null)
+                ? Map<String, dynamic>.from(snap.data()!)
+                : null;
+            hasDraftEmission = true;
+            emitCombined();
+          },
+          onError: (Object err, StackTrace st) {
+            if (!controller.isClosed) {
+              controller.addError(err, st);
+            }
+          },
+        );
+
+        verifySub = _db
+            .collection('_sandbox_verifications')
+            .doc(configType)
+            .snapshots()
+            .listen(
+          (snap) {
+            latestVerification = (snap.exists && snap.data() != null)
+                ? Map<String, dynamic>.from(snap.data()!)
+                : null;
+            emitCombined();
+          },
+          onError: (Object err, StackTrace st) {
+            // Không chặn toàn bộ Draft nếu _sandbox_verifications lỗi quyền tạm thời,
+            // nhưng chỉ ghi log; riêng lỗi permission-denied trên draft_configs vẫn nổi lên.
+            debugPrint('[streamDraftConfigEnvelope] verify sub error: $err');
+          },
+        );
+      },
+      onCancel: () async {
+        await draftSub?.cancel();
+        await verifySub?.cancel();
+      },
+    );
+
+    return controller.stream;
+  }
+
+  /// Lưu bản nháp cấu hình (`draft_configs/{configType}`) tuân thủ nghiêm ngặt Rules `hasAll`/`hasOnly`.
+  Future<void> saveDraftConfigDoc({
+    required String configType,
+    required Map<String, dynamic> draftPayload,
+    required String draftHash,
+    required String updatedBy,
+    String? changeNote,
+  }) async {
+    final cleanNote = changeNote?.trim();
+    await _db
+        .collection(AiConfigSyncService.kDraftConfigsCollection)
+        .doc(configType)
+        .set({
+      'configType': configType,
+      'draftPayload': draftPayload,
+      'draftHash': draftHash,
+      'updatedAt': DateTime.now().toIso8601String(),
+      'updatedBy': updatedBy,
+      if (cleanNote != null && cleanNote.isNotEmpty) 'changeNote': cleanNote,
+    });
+  }
+
+  /// Theo dõi lịch sử phiên bản cấu hình (`config_versions`) theo từng loại.
+  Stream<List<ConfigVersionSnapshot>> streamConfigVersions(String configType) {
+    return _db
+        .collection(AiConfigSyncService.kConfigVersionsCollection)
+        .where('configType', isEqualTo: configType)
+        .snapshots()
+        .map((snap) {
+      final list = snap.docs
+          .map((d) => ConfigVersionSnapshot.fromMap(d.data(), docId: d.id))
+          .toList();
+      list.sort((a, b) => b.versionNumber.compareTo(a.versionNumber));
+      return list;
+    });
+  }
+
+  /// Đọc danh sách tài liệu nháp Kho tri thức Tài chính (`financial_knowledge_drafts`).
+  Stream<List<Map<String, dynamic>>> streamKnowledgeDraftDocs() {
+    return _db
+        .collection(AiConfigSyncService.kDraftKnowledgeCollection)
+        .snapshots()
+        .map((snap) {
+      return snap.docs.map((d) {
+        final data = Map<String, dynamic>.from(d.data());
+        data['articleId'] ??= d.id;
+        return data;
+      }).toList();
+    });
+  }
+
+  /// Đọc danh sách tài liệu đã xuất bản Kho tri thức Tài chính (`financial_knowledge_published`).
+  Stream<List<Map<String, dynamic>>> streamKnowledgePublishedDocs() {
+    return _db
+        .collection(AiConfigSyncService.kPublishedKnowledgeCollection)
+        .snapshots()
+        .map((snap) {
+      return snap.docs.map((d) {
+        final data = Map<String, dynamic>.from(d.data());
+        data['articleId'] ??= d.id;
+        return data;
+      }).toList();
+    });
+  }
+
+  /// Lưu bản nháp bài viết Tri thức Tài chính (`financial_knowledge_drafts/{articleId}`).
+  /// Sử dụng merge để giữ nguyên metadata `lastPublishedVersion`/`lastPublishedAt` từ Server.
+  Future<void> saveKnowledgeDraftDoc({
+    required FinancialKnowledgeArticle article,
+    required String updatedBy,
+  }) async {
+    final docData = <String, dynamic>{
+      'articleId': article.articleId.trim(),
+      'title': article.title.trim(),
+      'topic': article.topic.trim(),
+      'triggerCondition': article.triggerCondition.code,
+      'priority': article.priority.clamp(1, 10),
+      'summaryForUser': article.summaryForUser.trim(),
+      'aiGroundingSnippet': article.aiGroundingSnippet.trim(),
+      'suggestedPrompts': article.suggestedPrompts,
+      'isActive': article.isActive,
+      'updatedAt': DateTime.now().toIso8601String(),
+      'updatedBy': updatedBy,
+    };
+    await _db
+        .collection(AiConfigSyncService.kDraftKnowledgeCollection)
+        .doc(article.articleId.trim())
+        .set(docData, SetOptions(merge: true));
+  }
+
+  /// Theo dõi danh sách phản hồi chất lượng AI (`ai_feedback_reports`).
+  Stream<List<AiFeedbackReport>> streamAiFeedbackReports({int limit = 200}) {
+    return _db
+        .collection(AiConfigSyncService.kFeedbackReportsCollection)
+        .snapshots()
+        .map((snap) {
+      final list = snap.docs
+          .map((d) => AiFeedbackReport.fromMap(d.data(), docId: d.id))
+          .toList();
+      list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      if (list.length > limit) {
+        return list.sublist(0, limit);
+      }
+      return list;
+    });
   }
 }
 
