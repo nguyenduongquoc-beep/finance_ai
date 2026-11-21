@@ -1,14 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../../l10n/app_localizations.dart';
 import '../../models/transaction_model.dart';
 import '../../models/category_model.dart';
 import '../../models/wallet_model.dart';
 import '../../services/firestore_service.dart';
 import '../../services/financial_export_service.dart';
 import '../../services/transaction_intelligence_service.dart';
+import '../../utils/category_localization_helper.dart';
 import '../../utils/constants.dart';
 import '../../utils/formatters.dart';
+import '../../utils/transaction_note_localization_helper.dart';
+import '../../utils/wallet_localization_helper.dart';
 import '../../widgets/app_empty_state.dart';
 import '../../widgets/app_snackbar.dart';
 import '../../widgets/transaction_card.dart';
@@ -60,14 +64,30 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
   @override
   void initState() {
     super.initState();
-    _uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-    _categoriesStream = _firestoreService.streamCategories(_uid);
-    _walletsStream = _firestoreService.streamWallets(_uid);
-    _transactionsStream = _firestoreService.streamTransactions(_uid);
+    try {
+      _uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    } catch (_) {
+      _uid = '';
+    }
+    if (_uid.isNotEmpty) {
+      _categoriesStream = _firestoreService.streamCategories(_uid);
+      _walletsStream = _firestoreService.streamWallets(_uid);
+      _transactionsStream = _firestoreService.streamTransactions(_uid);
+    } else {
+      _categoriesStream = const Stream.empty();
+      _walletsStream = const Stream.empty();
+      _transactionsStream = const Stream.empty();
+    }
+    _searchFocusNode.addListener(_onSearchFocusChanged);
+  }
+
+  void _onSearchFocusChanged() {
+    if (mounted) setState(() {});
   }
 
   @override
   void dispose() {
+    _searchFocusNode.removeListener(_onSearchFocusChanged);
     _searchController.dispose();
     _searchFocusNode.dispose();
     super.dispose();
@@ -199,17 +219,24 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
       );
 
       if (!mounted) return;
-      AppSnackbar.show(context, 'Đã xuất file CSV thành công');
+      AppSnackbar.show(context, context.tr('tx_list_export_ok'));
 
       await _exportService.shareFile(
         csvFile.path,
-        text: 'Xuất danh sách ${filteredList.length} giao dịch',
-        subject: 'Dữ liệu giao dịch',
+        text: context.tr(
+          'tx_list_export_text',
+          params: {'count': '${filteredList.length}'},
+        ),
+        subject: context.tr('tx_list_export_subject'),
       );
     } catch (e) {
       debugPrint('Export CSV Error: $e');
       if (mounted) {
-        AppSnackbar.show(context, 'Không thể xuất file: $e', isError: true);
+        AppSnackbar.show(
+          context,
+          context.tr('tx_list_export_err', params: {'error': '$e'}),
+          isError: true,
+        );
       }
     } finally {
       if (mounted) setState(() => _isExportingCsv = false);
@@ -339,7 +366,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
       centerTitle: false,
       titleSpacing: 16,
       title: Text(
-        'Lịch sử giao dịch',
+        context.tr('tx_list_title'),
         style: GoogleFonts.inter(
           fontWeight: FontWeight.bold,
           fontSize: 18.5,
@@ -358,7 +385,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                 )
               : Icon(Icons.file_download_outlined,
                   color: context.appTextPrimary, size: 22),
-          tooltip: 'Xuất CSV',
+          tooltip: context.tr('tx_list_export_csv'),
           onPressed: _isExportingCsv
               ? null
               : () async {
@@ -386,7 +413,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                     : context.appTextPrimary,
                 size: 21,
               ),
-              tooltip: 'Bộ lọc nâng cao',
+              tooltip: context.tr('tx_list_adv_filter'),
               onPressed: () => _showAdvancedFilterModal(),
             ),
             if (_activeFilterCount > 0)
@@ -415,7 +442,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
     );
   }
 
-  /// Thanh Tìm kiếm Thông minh chuẩn Fintech
+  /// Thanh Tìm kiếm Thông minh chuẩn Fintech (Thiết kế liền mạch, không viền lồng nhau)
   Widget _buildSearchBar() {
     final hasFocus = _searchFocusNode.hasFocus;
     final hasQuery = _searchQuery.isNotEmpty;
@@ -423,56 +450,48 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        height: 48,
+        duration: const Duration(milliseconds: 180),
+        height: 46,
         decoration: BoxDecoration(
           color: context.appCard,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(
             color: hasFocus
                 ? AppColors.primary
-                : context.appBorder.withValues(alpha: 0.9),
-            width: hasFocus ? 1.5 : 1,
+                : context.appBorder.withValues(alpha: 0.85),
+            width: hasFocus ? 1.4 : 1.0,
           ),
           boxShadow: [
             BoxShadow(
               color: hasFocus
-                  ? AppColors.primary.withValues(alpha: 0.12)
+                  ? AppColors.primary.withValues(alpha: 0.10)
                   : Colors.black
-                      .withValues(alpha: context.isDarkMode ? 0.25 : 0.04),
+                      .withValues(alpha: context.isDarkMode ? 0.20 : 0.03),
               blurRadius: hasFocus ? 10 : 6,
               offset: const Offset(0, 2),
             ),
           ],
         ),
         child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
           children: [
-            // Icon kính lúp trong hộp mềm
-            Container(
-              margin: const EdgeInsets.only(left: 10, right: 10),
-              padding: const EdgeInsets.all(7),
-              decoration: BoxDecoration(
-                color: (hasFocus || hasQuery)
-                    ? AppColors.primary.withValues(alpha: 0.12)
-                    : (context.isDarkMode
-                        ? AppColors.slate700
-                        : AppColors.slate100),
-                borderRadius: BorderRadius.circular(10),
-              ),
+            Padding(
+              padding: const EdgeInsets.only(left: 14, right: 10),
               child: Icon(
                 Icons.search_rounded,
                 color: (hasFocus || hasQuery)
                     ? AppColors.primary
                     : context.appTextSecondary,
-                size: 18,
+                size: 20,
               ),
             ),
 
-            // Input field
+            // Input field hoàn toàn trong suốt, không bị chồng viền từ Theme
             Expanded(
               child: TextField(
                 controller: _searchController,
                 focusNode: _searchFocusNode,
+                textAlignVertical: TextAlignVertical.center,
                 onChanged: (v) => setState(() => _searchQuery = v),
                 style: GoogleFonts.inter(
                   fontSize: 13.5,
@@ -480,45 +499,56 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                   color: context.appTextPrimary,
                 ),
                 decoration: InputDecoration(
-                  hintText: 'Tìm theo ghi chú, danh mục, ví, số tiền...',
+                  hintText: context.tr('tx_list_search_hint'),
                   hintStyle: GoogleFonts.inter(
-                    color: context.appTextSecondary.withValues(alpha: 0.75),
+                    color: context.appTextSecondary.withValues(alpha: 0.72),
                     fontSize: 13,
                     fontWeight: FontWeight.w400,
                   ),
+                  filled: false,
+                  isCollapsed: true,
+                  contentPadding: const EdgeInsets.symmetric(vertical: 10),
                   border: InputBorder.none,
-                  isDense: true,
-                  contentPadding: const EdgeInsets.symmetric(vertical: 12),
+                  enabledBorder: InputBorder.none,
+                  focusedBorder: InputBorder.none,
+                  disabledBorder: InputBorder.none,
+                  errorBorder: InputBorder.none,
+                  focusedErrorBorder: InputBorder.none,
                 ),
               ),
             ),
 
-            // Nút xóa từ khóa
+            // Nút xóa từ khóa gọn gàng
             if (hasQuery)
               Padding(
-                padding: const EdgeInsets.only(right: 6),
-                child: IconButton(
-                  icon: Container(
-                    padding: const EdgeInsets.all(3),
-                    decoration: BoxDecoration(
-                      color: context.isDarkMode
-                          ? AppColors.slate700
-                          : AppColors.slate200,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Icon(
-                      Icons.close_rounded,
-                      size: 13,
-                      color: context.appTextSecondary,
+                padding: const EdgeInsets.only(right: 8),
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(14),
+                    onTap: () {
+                      _searchController.clear();
+                      setState(() => _searchQuery = '');
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.all(5),
+                      decoration: BoxDecoration(
+                        color: context.isDarkMode
+                            ? AppColors.slate700
+                            : AppColors.slate200,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Icon(
+                        Icons.close_rounded,
+                        size: 13,
+                        color: context.appTextSecondary,
+                      ),
                     ),
                   ),
-                  tooltip: 'Xóa tìm kiếm',
-                  onPressed: () {
-                    _searchController.clear();
-                    setState(() => _searchQuery = '');
-                  },
                 ),
-              ),
+              )
+            else
+              const SizedBox(width: 12),
           ],
         ),
       ),
@@ -544,8 +574,11 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
             ),
             label: Text(
               _activeFilterCount > 0
-                  ? 'Bộ lọc ($_activeFilterCount)'
-                  : 'Bộ lọc',
+                  ? context.tr(
+                      'tx_list_filter_count',
+                      params: {'count': '$_activeFilterCount'},
+                    )
+                  : context.tr('common_filter'),
               style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
@@ -572,10 +605,12 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
           // 2. Chip Loại giao dịch
           _buildFilterChip(
             label: _typeFilter == 'all'
-                ? 'Loại: Tất cả'
+                ? context.tr('tx_list_type_all')
                 : (_typeFilter == 'expense'
-                    ? 'Chi tiêu'
-                    : (_typeFilter == 'income' ? 'Thu nhập' : 'Chuyển khoản')),
+                    ? context.tr('common_expense')
+                    : (_typeFilter == 'income'
+                        ? context.tr('common_income')
+                        : context.tr('common_transfer'))),
             isActive: _typeFilter != 'all',
             onTap: () => _showTypePicker(),
           ),
@@ -592,11 +627,14 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
           // 4. Chip Danh mục
           _buildFilterChip(
             label: _selectedCategoryId != null
-                ? (categories
-                    .firstWhere((c) => c.categoryId == _selectedCategoryId,
-                        orElse: () => categories.first)
-                    .name)
-                : 'Danh mục',
+                ? CategoryLocalizationHelper.localizeNameWithContext(
+                    context,
+                    categories
+                        .firstWhere((c) => c.categoryId == _selectedCategoryId,
+                            orElse: () => categories.first)
+                        .name,
+                  )
+                : context.tr('tx_list_category_label'),
             isActive: _selectedCategoryId != null,
             onTap: () => _showCategoryPicker(categories),
           ),
@@ -605,11 +643,12 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
           // 5. Chip Ví tiền
           _buildFilterChip(
             label: _selectedWalletId != null
-                ? (wallets
-                    .firstWhere((w) => w.walletId == _selectedWalletId,
-                        orElse: () => wallets.first)
-                    .walletName)
-                : 'Ví tiền',
+                ? WalletLocalizationHelper.localizeWalletWithContext(
+                    context,
+                    wallets.firstWhere((w) => w.walletId == _selectedWalletId,
+                        orElse: () => wallets.first),
+                  )
+                : context.tr('tx_list_wallet_label'),
             isActive: _selectedWalletId != null,
             onTap: () => _showWalletPicker(wallets),
           ),
@@ -628,9 +667,9 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
             ActionChip(
               avatar: const Icon(Icons.refresh_rounded,
                   size: 14, color: AppColors.expense),
-              label: const Text(
-                'Đặt lại',
-                style: TextStyle(
+              label: Text(
+                context.tr('tx_list_reset'),
+                style: const TextStyle(
                     fontSize: 11.5,
                     color: AppColors.expense,
                     fontWeight: FontWeight.bold),
@@ -693,27 +732,33 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
   }
 
   String _getTimeFilterLabel() {
-    if (_timeFilter == 'today') return 'Hôm nay';
-    if (_timeFilter == 'this_month') return 'Tháng này';
-    if (_timeFilter == 'last_month') return 'Tháng trước';
-    if (_timeFilter == 'last_7_days') return '7 ngày qua';
+    if (_timeFilter == 'today') return context.tr('add_tx_today');
+    if (_timeFilter == 'this_month') return context.tr('tx_list_this_month');
+    if (_timeFilter == 'last_month') return context.tr('tx_list_last_month');
+    if (_timeFilter == 'last_7_days') return context.tr('tx_list_last_7_days');
     if (_timeFilter == 'custom_date' && _selectedDate != null) {
       return AppFormatters.date(_selectedDate!);
     }
     if (_timeFilter == 'custom_month' && _selectedMonth != null) {
-      return 'Tháng ${_selectedMonth!.month}/${_selectedMonth!.year}';
+      return context.tr(
+        'tx_list_custom_month',
+        params: {
+          'month': '${_selectedMonth!.month}',
+          'year': '${_selectedMonth!.year}',
+        },
+      );
     }
     if (_timeFilter == 'custom_range' && _selectedDateRange != null) {
       return '${AppFormatters.date(_selectedDateRange!.start)} - ${AppFormatters.date(_selectedDateRange!.end)}';
     }
-    return 'Thời gian';
+    return context.tr('tx_list_time_label');
   }
 
   String _getSortLabel() {
-    if (_sortBy == 'oldest') return 'Cũ nhất';
-    if (_sortBy == 'amount_desc') return 'Số tiền: Cao ➔ Thấp';
-    if (_sortBy == 'amount_asc') return 'Số tiền: Thấp ➔ Cao';
-    return 'Mới nhất';
+    if (_sortBy == 'oldest') return context.tr('tx_list_sort_oldest');
+    if (_sortBy == 'amount_desc') return context.tr('tx_list_sort_amount_desc');
+    if (_sortBy == 'amount_asc') return context.tr('tx_list_sort_amount_asc');
+    return context.tr('tx_list_sort_newest');
   }
 
   /// Thanh phản hồi kết quả tìm kiếm/lọc
@@ -726,7 +771,13 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
         children: [
           Expanded(
             child: Text(
-              'Tìm thấy $filteredCount / $totalCount giao dịch',
+              context.tr(
+                'tx_list_found_count',
+                params: {
+                  'filtered': '$filteredCount',
+                  'total': '$totalCount',
+                },
+              ),
               style: TextStyle(
                 fontSize: 12,
                 fontWeight: FontWeight.w600,
@@ -739,11 +790,11 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
           if (_searchQuery.isNotEmpty || _activeFilterCount > 0)
             InkWell(
               onTap: _resetAllFilters,
-              child: const Padding(
-                padding: EdgeInsets.only(left: 8),
+              child: Padding(
+                padding: const EdgeInsets.only(left: 8),
                 child: Text(
-                  'Xóa bộ lọc',
-                  style: TextStyle(
+                  context.tr('tx_list_clear_filters'),
+                  style: const TextStyle(
                       fontSize: 12,
                       color: AppColors.primary,
                       fontWeight: FontWeight.bold),
@@ -789,80 +840,11 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // 1. Date Header
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-                decoration: BoxDecoration(
-                  color: context.isDarkMode
-                      ? AppColors.slate800.withValues(alpha: 0.7)
-                      : AppColors.slate100.withValues(alpha: 0.7),
-                  borderRadius: const BorderRadius.vertical(
-                      top: Radius.circular(AppColors.radiusCard)),
-                  border: Border(
-                      bottom: BorderSide(
-                          color: context.appBorder.withValues(alpha: 0.5))),
-                ),
-                child: Row(
-                  children: [
-                    // Ngày tháng năm bên trái
-                    Expanded(
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Icon(
-                            Icons.calendar_today_rounded,
-                            size: 13,
-                            color: AppColors.primary.withValues(alpha: 0.9),
-                          ),
-                          const SizedBox(width: 6),
-                          Flexible(
-                            child: Text(
-                              _formatDayDetailed(date),
-                              style: GoogleFonts.inter(
-                                fontSize: 12.5,
-                                fontWeight: FontWeight.w600,
-                                color: context.appTextPrimary,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    // Thống kê Thu / Chi trong ngày dạng Micro-Badge tinh tế
-                    Flexible(
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        mainAxisAlignment: MainAxisAlignment.end,
-                        children: [
-                          if (dayIncome > 0)
-                            Flexible(
-                              child: _buildHeaderAmountBadge(
-                                text:
-                                    '+${AppFormatters.compactCurrency(dayIncome)}',
-                                color: AppColors.income,
-                                icon: Icons.arrow_upward_rounded,
-                              ),
-                            ),
-                          if (dayIncome > 0 && dayExpense > 0)
-                            const SizedBox(width: 5),
-                          if (dayExpense > 0)
-                            Flexible(
-                              child: _buildHeaderAmountBadge(
-                                text:
-                                    '-${AppFormatters.compactCurrency(dayExpense)}',
-                                color: AppColors.expense,
-                                icon: Icons.arrow_downward_rounded,
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
+              // 1. Date Header (Hiển thị trọn vẹn ngày tháng bên trái, tổng Thu/Chi căn phải chống tràn)
+              _buildDayHeader(
+                date: date,
+                dayIncome: dayIncome,
+                dayExpense: dayExpense,
               ),
 
               // 2. Danh sách các giao dịch trong ngày
@@ -883,10 +865,15 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                         (c) => c?.categoryId == tx.categoryId,
                         orElse: () => null,
                       );
+                  final wal = wallets.cast<Wallet?>().firstWhere(
+                        (w) => w?.walletId == tx.walletId,
+                        orElse: () => null,
+                      );
 
                   return TransactionCard(
                     transaction: tx,
                     category: cat,
+                    wallet: wal,
                     margin: EdgeInsets.zero,
                     onTap: () => Navigator.of(context).push(
                       MaterialPageRoute(
@@ -922,47 +909,223 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
     final compare = DateTime(date.year, date.month, date.day);
 
     if (compare == today) {
-      return 'Hôm nay (${AppFormatters.date(date)})';
+      return context.tr(
+        'tx_list_header_today',
+        params: {'date': AppFormatters.date(date)},
+      );
     } else if (compare == yesterday) {
-      return 'Hôm qua (${AppFormatters.date(date)})';
+      return context.tr(
+        'tx_list_header_yesterday',
+        params: {'date': AppFormatters.date(date)},
+      );
     } else {
-      final weekdays = ['T2', 'T3', 'T4', 'T5', 'T6', 'T7', 'CN'];
-      final weekdayStr = weekdays[date.weekday - 1];
+      final weekdayStr = context.tr('tx_list_wd_${date.weekday}');
       return '$weekdayStr, ${AppFormatters.date(date)}';
     }
   }
 
-  /// Badge hiển thị tổng thu / tổng chi trong ngày tinh tế
+  /// Header từng ngày: giữ trọn vẹn chuỗi ngày tháng bên trái và căn phải gọn gàng giá trị Thu/Chi
+  Widget _buildDayHeader({
+    required DateTime date,
+    required double dayIncome,
+    required double dayExpense,
+  }) {
+    final dateText = _formatDayDetailed(date);
+    final hasIncome = dayIncome > 0;
+    final hasExpense = dayExpense > 0;
+    final incomeStr =
+        hasIncome ? '+${AppFormatters.compactCurrency(dayIncome)}' : '';
+    final expenseStr =
+        hasExpense ? '-${AppFormatters.compactCurrency(dayExpense)}' : '';
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+      decoration: BoxDecoration(
+        color: context.isDarkMode
+            ? AppColors.slate800.withValues(alpha: 0.7)
+            : AppColors.slate100.withValues(alpha: 0.7),
+        borderRadius: const BorderRadius.vertical(
+            top: Radius.circular(AppColors.radiusCard)),
+        border: Border(
+            bottom:
+                BorderSide(color: context.appBorder.withValues(alpha: 0.5))),
+      ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final textScaler = MediaQuery.textScalerOf(context);
+          final double totalWidth =
+              constraints.maxWidth.isFinite ? constraints.maxWidth : 320.0;
+
+          final dateStyle = GoogleFonts.inter(
+            fontSize: 12.5,
+            fontWeight: FontWeight.w600,
+            color: context.appTextPrimary,
+          );
+
+          final datePainter = TextPainter(
+            text: TextSpan(text: dateText, style: dateStyle),
+            maxLines: 1,
+            textDirection: TextDirection.ltr,
+            textScaler: textScaler,
+          )..layout();
+
+          // 13.5px icon + 6px khoảng cách + độ rộng chữ ngày tháng
+          final double neededDateWidth =
+              (datePainter.width + 20.0).clamp(90.0, totalWidth * 0.65);
+          final double maxBadgesAreaWidth =
+              (totalWidth - neededDateWidth - 8.0).clamp(72.0, totalWidth);
+
+          bool stackBadgesVertically = false;
+          if (hasIncome && hasExpense) {
+            final badgeStyle = GoogleFonts.inter(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+            );
+            final incPainter = TextPainter(
+              text: TextSpan(text: incomeStr, style: badgeStyle),
+              maxLines: 1,
+              textDirection: TextDirection.ltr,
+              textScaler: textScaler,
+            )..layout();
+            final expPainter = TextPainter(
+              text: TextSpan(text: expenseStr, style: badgeStyle),
+              maxLines: 1,
+              textDirection: TextDirection.ltr,
+              textScaler: textScaler,
+            )..layout();
+
+            // Mỗi badge có ~28px cho icon + padding + viền, cộng 5px khoảng cách giữa 2 badge
+            final double twoBadgesHorizontalWidth =
+                incPainter.width + expPainter.width + 61.0;
+            if (twoBadgesHorizontalWidth > maxBadgesAreaWidth) {
+              stackBadgesVertically = true;
+            }
+          }
+
+          return Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              // Ngày tháng năm bên trái — luôn ưu tiên hiển thị đầy đủ, không bị cắt mất năm
+              Flexible(
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.calendar_today_rounded,
+                      size: 13.5,
+                      color: AppColors.primary.withValues(alpha: 0.9),
+                    ),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          dateText,
+                          style: dateStyle,
+                          maxLines: 1,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              if (hasIncome || hasExpense) ...[
+                const SizedBox(width: 8),
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxWidth: maxBadgesAreaWidth),
+                  child: stackBadgesVertically
+                      ? Column(
+                          crossAxisAlignment: CrossAxisAlignment.end,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _buildHeaderAmountBadge(
+                              text: incomeStr,
+                              color: AppColors.income,
+                              icon: Icons.arrow_upward_rounded,
+                              maxWidth: maxBadgesAreaWidth,
+                            ),
+                            const SizedBox(height: 3),
+                            _buildHeaderAmountBadge(
+                              text: expenseStr,
+                              color: AppColors.expense,
+                              icon: Icons.arrow_downward_rounded,
+                              maxWidth: maxBadgesAreaWidth,
+                            ),
+                          ],
+                        )
+                      : Row(
+                          mainAxisSize: MainAxisSize.min,
+                          mainAxisAlignment: MainAxisAlignment.end,
+                          children: [
+                            if (hasIncome)
+                              Flexible(
+                                child: _buildHeaderAmountBadge(
+                                  text: incomeStr,
+                                  color: AppColors.income,
+                                  icon: Icons.arrow_upward_rounded,
+                                  maxWidth: maxBadgesAreaWidth,
+                                ),
+                              ),
+                            if (hasIncome && hasExpense)
+                              const SizedBox(width: 5),
+                            if (hasExpense)
+                              Flexible(
+                                child: _buildHeaderAmountBadge(
+                                  text: expenseStr,
+                                  color: AppColors.expense,
+                                  icon: Icons.arrow_downward_rounded,
+                                  maxWidth: maxBadgesAreaWidth,
+                                ),
+                              ),
+                          ],
+                        ),
+                ),
+              ],
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  /// Badge hiển thị tổng thu / tổng chi trong ngày tinh tế, chống tràn với số tiền lớn
   Widget _buildHeaderAmountBadge({
     required String text,
     required Color color,
     required IconData icon,
+    double? maxWidth,
   }) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6.5, vertical: 2.5),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: color.withValues(alpha: 0.22), width: 0.8),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 10, color: color),
-          const SizedBox(width: 3),
-          Flexible(
-            child: Text(
-              text,
-              style: GoogleFonts.inter(
-                fontSize: 11,
-                fontWeight: FontWeight.w600,
-                color: color,
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxWidth: maxWidth ?? 180),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.08),
+          borderRadius: BorderRadius.circular(6),
+          border: Border.all(color: color.withValues(alpha: 0.22), width: 0.8),
+        ),
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.centerRight,
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 10.5, color: color),
+              const SizedBox(width: 3),
+              Text(
+                text,
+                style: GoogleFonts.inter(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w600,
+                  color: color,
+                ),
+                maxLines: 1,
               ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
+            ],
           ),
-        ],
+        ),
       ),
     );
   }
@@ -989,9 +1152,9 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
   /// Empty State đẹp mắt & Thân thiện
   Widget _buildEmptyState(bool isTotalEmpty) {
     if (isTotalEmpty) {
-      return const AppEmptyState(
-        title: 'Chưa có giao dịch nào',
-        subtitle: 'Hãy thêm giao dịch đầu tiên để bắt đầu theo dõi thu chi.',
+      return AppEmptyState(
+        title: context.tr('tx_list_empty_title'),
+        subtitle: context.tr('tx_list_empty_sub'),
         icon: Icons.receipt_long_outlined,
       );
     }
@@ -1013,7 +1176,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
             ),
             const SizedBox(height: 16),
             Text(
-              'Không tìm thấy giao dịch',
+              context.tr('tx_list_no_match_title'),
               style: GoogleFonts.inter(
                 fontSize: 16.5,
                 fontWeight: FontWeight.bold,
@@ -1023,8 +1186,11 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
             const SizedBox(height: 6),
             Text(
               _searchQuery.isNotEmpty
-                  ? 'Không có kết quả nào khớp với "$_searchQuery".'
-                  : 'Không có giao dịch nào thỏa mãn bộ lọc hiện tại.',
+                  ? context.tr(
+                      'tx_list_no_match_query',
+                      params: {'query': _searchQuery},
+                    )
+                  : context.tr('tx_list_no_match_filter'),
               textAlign: TextAlign.center,
               style: TextStyle(
                   fontSize: 13, color: context.appTextSecondary, height: 1.4),
@@ -1032,7 +1198,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
             const SizedBox(height: 20),
             ElevatedButton.icon(
               icon: const Icon(Icons.refresh_rounded, size: 18),
-              label: const Text('Xóa bộ lọc & Tìm lại'),
+              label: Text(context.tr('tx_list_reset_search')),
               style: ElevatedButton.styleFrom(
                 backgroundColor: AppColors.primary,
                 foregroundColor: Colors.white,
@@ -1062,11 +1228,11 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _buildModalHeader('Chọn loại giao dịch'),
+            _buildModalHeader(ctx.tr('tx_list_pick_type')),
             ListTile(
               leading:
                   const Icon(Icons.list_alt_rounded, color: AppColors.primary),
-              title: const Text('Tất cả giao dịch'),
+              title: Text(ctx.tr('tx_list_all_tx')),
               trailing: _typeFilter == 'all'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1076,9 +1242,9 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
               },
             ),
             ListTile(
-              leading: const Icon(Icons.arrow_upward_rounded,
+              leading: const Icon(Icons.arrow_downward_rounded,
                   color: AppColors.expense),
-              title: const Text('Chi tiêu (Tiền ra)'),
+              title: Text(ctx.tr('tx_list_expense_out')),
               trailing: _typeFilter == 'expense'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1088,9 +1254,9 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
               },
             ),
             ListTile(
-              leading: const Icon(Icons.arrow_downward_rounded,
+              leading: const Icon(Icons.arrow_upward_rounded,
                   color: AppColors.income),
-              title: const Text('Thu nhập (Tiền vào)'),
+              title: Text(ctx.tr('tx_list_income_in')),
               trailing: _typeFilter == 'income'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1102,7 +1268,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
             ListTile(
               leading: const Icon(Icons.swap_horiz_rounded,
                   color: AppColors.primary),
-              title: const Text('Chuyển tiền & Mục tiêu'),
+              title: Text(ctx.tr('tx_list_transfer_goal')),
               trailing: _typeFilter == 'transfer'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1128,11 +1294,11 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _buildModalHeader('Lọc theo thời gian'),
+            _buildModalHeader(ctx.tr('tx_list_pick_time')),
             ListTile(
               leading: const Icon(Icons.all_inclusive_rounded,
                   color: AppColors.primary),
-              title: const Text('Tất cả thời gian'),
+              title: Text(ctx.tr('tx_list_all_time')),
               trailing: _timeFilter == 'all'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1149,7 +1315,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
             ListTile(
               leading:
                   const Icon(Icons.today_rounded, color: AppColors.primary),
-              title: const Text('Hôm nay'),
+              title: Text(ctx.tr('add_tx_today')),
               trailing: _timeFilter == 'today'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1161,7 +1327,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
             ListTile(
               leading: const Icon(Icons.date_range_rounded,
                   color: AppColors.primary),
-              title: const Text('7 ngày qua'),
+              title: Text(ctx.tr('tx_list_last_7_days')),
               trailing: _timeFilter == 'last_7_days'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1173,7 +1339,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
             ListTile(
               leading: const Icon(Icons.calendar_month_rounded,
                   color: AppColors.primary),
-              title: const Text('Tháng này'),
+              title: Text(ctx.tr('tx_list_this_month')),
               trailing: _timeFilter == 'this_month'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1185,7 +1351,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
             ListTile(
               leading:
                   const Icon(Icons.history_rounded, color: AppColors.primary),
-              title: const Text('Tháng trước'),
+              title: Text(ctx.tr('tx_list_last_month')),
               trailing: _timeFilter == 'last_month'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1197,7 +1363,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
             ListTile(
               leading: const Icon(Icons.event_available_rounded,
                   color: AppColors.primary),
-              title: const Text('Chọn khoảng ngày (Từ ngày ➔ Đến ngày)'),
+              title: Text(ctx.tr('tx_list_pick_range')),
               trailing: _timeFilter == 'custom_range'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1238,9 +1404,9 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _buildModalHeader('Chọn danh mục'),
+            _buildModalHeader(ctx.tr('tx_list_pick_cat')),
             ListTile(
-              title: const Text('Tất cả danh mục'),
+              title: Text(ctx.tr('tx_list_all_cat')),
               trailing: _selectedCategoryId == null
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1266,7 +1432,10 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                       child: Icon(Icons.category_rounded,
                           size: 16, color: Color(cat.color)),
                     ),
-                    title: Text(cat.name),
+                    title: Text(
+                      CategoryLocalizationHelper.localizeNameWithContext(
+                          ctx, cat.name),
+                    ),
                     trailing: isSelected
                         ? const Icon(Icons.check, color: AppColors.primary)
                         : null,
@@ -1294,9 +1463,9 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _buildModalHeader('Chọn ví tài khoản'),
+            _buildModalHeader(ctx.tr('tx_list_pick_wallet')),
             ListTile(
-              title: const Text('Tất cả ví'),
+              title: Text(ctx.tr('tx_list_all_wallet')),
               trailing: _selectedWalletId == null
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1310,9 +1479,18 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
               return ListTile(
                 leading: const Icon(Icons.account_balance_wallet_outlined,
                     color: AppColors.primary),
-                title: Text(w.walletName),
-                subtitle:
-                    Text('Số dư: ${AppFormatters.compactCurrency(w.balance)}'),
+                title: Text(
+                  WalletLocalizationHelper.localizeWalletWithContext(
+                    ctx,
+                    w,
+                  ),
+                ),
+                subtitle: Text(
+                  ctx.tr(
+                    'tx_list_wallet_bal',
+                    params: {'amount': AppFormatters.compactCurrency(w.balance)},
+                  ),
+                ),
                 trailing: isSelected
                     ? const Icon(Icons.check, color: AppColors.primary)
                     : null,
@@ -1338,9 +1516,9 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            _buildModalHeader('Sắp xếp giao dịch'),
+            _buildModalHeader(ctx.tr('tx_list_pick_sort')),
             ListTile(
-              title: const Text('Mới nhất trước (Mặc định)'),
+              title: Text(ctx.tr('tx_list_sort_newest_def')),
               trailing: _sortBy == 'newest'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1350,7 +1528,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
               },
             ),
             ListTile(
-              title: const Text('Cũ nhất trước'),
+              title: Text(ctx.tr('tx_list_sort_oldest_full')),
               trailing: _sortBy == 'oldest'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1360,7 +1538,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
               },
             ),
             ListTile(
-              title: const Text('Số tiền: Lớn nhất ➔ Nhỏ nhất'),
+              title: Text(ctx.tr('tx_list_sort_high_low')),
               trailing: _sortBy == 'amount_desc'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1370,7 +1548,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
               },
             ),
             ListTile(
-              title: const Text('Số tiền: Nhỏ nhất ➔ Lớn nhất'),
+              title: Text(ctx.tr('tx_list_sort_low_high')),
               trailing: _sortBy == 'amount_asc'
                   ? const Icon(Icons.check, color: AppColors.primary)
                   : null,
@@ -1406,20 +1584,25 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        'Bộ lọc nâng cao',
-                        style: GoogleFonts.inter(
-                            fontSize: 17,
-                            fontWeight: FontWeight.bold,
-                            color: context.appTextPrimary),
+                      Expanded(
+                        child: Text(
+                          ctx.tr('tx_list_adv_filter'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: GoogleFonts.inter(
+                              fontSize: 17,
+                              fontWeight: FontWeight.bold,
+                              color: context.appTextPrimary),
+                        ),
                       ),
+                      const SizedBox(width: 8),
                       TextButton(
                         onPressed: () {
                           _resetAllFilters();
                           setModalState(() {});
                         },
-                        child: const Text('Đặt lại',
-                            style: TextStyle(color: AppColors.expense)),
+                        child: Text(ctx.tr('tx_list_reset'),
+                            style: const TextStyle(color: AppColors.expense)),
                       ),
                     ],
                   ),
@@ -1428,7 +1611,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                     child: ListView(
                       children: [
                         // 1. Khoảng số tiền
-                        Text('Khoảng số tiền',
+                        Text(ctx.tr('tx_list_amt_range'),
                             style: TextStyle(
                                 fontSize: 13,
                                 fontWeight: FontWeight.bold,
@@ -1439,24 +1622,27 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                           runSpacing: 8,
                           children: [
                             _buildModalFilterChip(
-                                'Tất cả', _amountFilter == 'all', () {
+                                ctx.tr('common_all'), _amountFilter == 'all', () {
                               setModalState(() => _amountFilter = 'all');
                             }),
                             _buildModalFilterChip(
-                                '< 100k', _amountFilter == 'under_100k', () {
+                                ctx.tr('tx_list_amt_under_100k'),
+                                _amountFilter == 'under_100k', () {
                               setModalState(() => _amountFilter = 'under_100k');
                             }),
                             _buildModalFilterChip(
-                                '100k - 500k', _amountFilter == '100k_500k',
-                                () {
+                                ctx.tr('tx_list_amt_100k_500k'),
+                                _amountFilter == '100k_500k', () {
                               setModalState(() => _amountFilter = '100k_500k');
                             }),
                             _buildModalFilterChip(
-                                '500k - 2tr', _amountFilter == '500k_2m', () {
+                                ctx.tr('tx_list_amt_500k_2m'),
+                                _amountFilter == '500k_2m', () {
                               setModalState(() => _amountFilter = '500k_2m');
                             }),
                             _buildModalFilterChip(
-                                '> 2tr', _amountFilter == 'over_2m', () {
+                                ctx.tr('tx_list_amt_over_2m'),
+                                _amountFilter == 'over_2m', () {
                               setModalState(() => _amountFilter = 'over_2m');
                             }),
                           ],
@@ -1464,7 +1650,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                         const SizedBox(height: 18),
 
                         // 2. Loại giao dịch
-                        Text('Loại giao dịch',
+                        Text(ctx.tr('tx_list_type_sec'),
                             style: TextStyle(
                                 fontSize: 13,
                                 fontWeight: FontWeight.bold,
@@ -1475,19 +1661,19 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                           runSpacing: 8,
                           children: [
                             _buildModalFilterChip(
-                                'Tất cả', _typeFilter == 'all', () {
+                                ctx.tr('common_all'), _typeFilter == 'all', () {
                               setModalState(() => _typeFilter = 'all');
                             }),
-                            _buildModalFilterChip(
-                                'Chi tiêu', _typeFilter == 'expense', () {
+                            _buildModalFilterChip(ctx.tr('common_expense'),
+                                _typeFilter == 'expense', () {
                               setModalState(() => _typeFilter = 'expense');
                             }),
-                            _buildModalFilterChip(
-                                'Thu nhập', _typeFilter == 'income', () {
+                            _buildModalFilterChip(ctx.tr('common_income'),
+                                _typeFilter == 'income', () {
                               setModalState(() => _typeFilter = 'income');
                             }),
-                            _buildModalFilterChip(
-                                'Chuyển khoản', _typeFilter == 'transfer', () {
+                            _buildModalFilterChip(ctx.tr('common_transfer'),
+                                _typeFilter == 'transfer', () {
                               setModalState(() => _typeFilter = 'transfer');
                             }),
                           ],
@@ -1495,7 +1681,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                         const SizedBox(height: 18),
 
                         // 3. Thời gian
-                        Text('Thời gian',
+                        Text(ctx.tr('tx_list_time_label'),
                             style: TextStyle(
                                 fontSize: 13,
                                 fontWeight: FontWeight.bold,
@@ -1506,23 +1692,24 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                           runSpacing: 8,
                           children: [
                             _buildModalFilterChip(
-                                'Tất cả', _timeFilter == 'all', () {
+                                ctx.tr('common_all'), _timeFilter == 'all', () {
                               setModalState(() => _timeFilter = 'all');
                             }),
                             _buildModalFilterChip(
-                                'Hôm nay', _timeFilter == 'today', () {
+                                ctx.tr('add_tx_today'), _timeFilter == 'today',
+                                () {
                               setModalState(() => _timeFilter = 'today');
                             }),
-                            _buildModalFilterChip(
-                                '7 ngày qua', _timeFilter == 'last_7_days', () {
+                            _buildModalFilterChip(ctx.tr('tx_list_last_7_days'),
+                                _timeFilter == 'last_7_days', () {
                               setModalState(() => _timeFilter = 'last_7_days');
                             }),
-                            _buildModalFilterChip(
-                                'Tháng này', _timeFilter == 'this_month', () {
+                            _buildModalFilterChip(ctx.tr('tx_list_this_month'),
+                                _timeFilter == 'this_month', () {
                               setModalState(() => _timeFilter = 'this_month');
                             }),
-                            _buildModalFilterChip(
-                                'Tháng trước', _timeFilter == 'last_month', () {
+                            _buildModalFilterChip(ctx.tr('tx_list_last_month'),
+                                _timeFilter == 'last_month', () {
                               setModalState(() => _timeFilter = 'last_month');
                             }),
                           ],
@@ -1530,7 +1717,7 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                         const SizedBox(height: 18),
 
                         // 4. Sắp xếp
-                        Text('Sắp xếp',
+                        Text(ctx.tr('tx_list_sort_sec'),
                             style: TextStyle(
                                 fontSize: 13,
                                 fontWeight: FontWeight.bold,
@@ -1541,20 +1728,23 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                           runSpacing: 8,
                           children: [
                             _buildModalFilterChip(
-                                'Mới nhất', _sortBy == 'newest', () {
+                                ctx.tr('tx_list_sort_newest'),
+                                _sortBy == 'newest', () {
                               setModalState(() => _sortBy = 'newest');
                             }),
                             _buildModalFilterChip(
-                                'Cũ nhất', _sortBy == 'oldest', () {
+                                ctx.tr('tx_list_sort_oldest'),
+                                _sortBy == 'oldest', () {
                               setModalState(() => _sortBy = 'oldest');
                             }),
                             _buildModalFilterChip(
-                                'Tiền cao ➔ thấp', _sortBy == 'amount_desc',
-                                () {
+                                ctx.tr('tx_list_sort_short_desc'),
+                                _sortBy == 'amount_desc', () {
                               setModalState(() => _sortBy = 'amount_desc');
                             }),
                             _buildModalFilterChip(
-                                'Tiền thấp ➔ cao', _sortBy == 'amount_asc', () {
+                                ctx.tr('tx_list_sort_short_asc'),
+                                _sortBy == 'amount_asc', () {
                               setModalState(() => _sortBy = 'amount_asc');
                             }),
                           ],
@@ -1577,8 +1767,8 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                         setState(() {});
                         Navigator.pop(ctx);
                       },
-                      child: const Text('Áp dụng bộ lọc',
-                          style: TextStyle(fontWeight: FontWeight.bold)),
+                      child: Text(ctx.tr('tx_list_apply_filters'),
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
                     ),
                   ),
                 ],
@@ -1623,9 +1813,14 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          Text(title,
-              style:
-                  GoogleFonts.inter(fontWeight: FontWeight.bold, fontSize: 16)),
+          Expanded(
+            child: Text(title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: GoogleFonts.inter(
+                    fontWeight: FontWeight.bold, fontSize: 16)),
+          ),
+          const SizedBox(width: 8),
           InkWell(
             onTap: () => Navigator.pop(context),
             child: const Icon(Icons.close, size: 20),
@@ -1656,64 +1851,87 @@ class TransactionSearchFilterHelper {
     final normQuery =
         TransactionIntelligenceService.removeVietnameseDiacritics(cleanQuery);
 
-    // 1. So khớp Ghi chú (Note)
+    // 1. So khớp Ghi chú (Note) & biến thể song ngữ cho giao dịch mục tiêu tiết kiệm
     if (tx.note != null && tx.note!.isNotEmpty) {
-      final lowerNote = tx.note!.toLowerCase();
-      final normNote =
-          TransactionIntelligenceService.removeVietnameseDiacritics(tx.note!);
-      if (lowerNote.contains(lowerQuery) || normNote.contains(normQuery)) {
-        return true;
+      for (final variant in TransactionNoteLocalizationHelper.allSearchVariants(
+        tx,
+        wallet: wallet,
+      )) {
+        final lowerNote = variant.toLowerCase();
+        final normNote =
+            TransactionIntelligenceService.removeVietnameseDiacritics(variant);
+        if (lowerNote.contains(lowerQuery) || normNote.contains(normQuery)) {
+          return true;
+        }
       }
     }
 
-    // 2. So khớp Danh mục (Category)
+    // 2. So khớp Danh mục (Category) - hỗ trợ cả tên gốc và tên theo ngôn ngữ hiện tại/tiếng Anh/tiếng Việt
     if (category != null) {
-      final lowerCat = category.name.toLowerCase();
-      final normCat = TransactionIntelligenceService.removeVietnameseDiacritics(
-          category.name);
-      if (lowerCat.contains(lowerQuery) || normCat.contains(normQuery)) {
-        return true;
+      for (final variant
+          in CategoryLocalizationHelper.allSearchVariants(category.name)) {
+        final lowerCat = variant.toLowerCase();
+        final normCat =
+            TransactionIntelligenceService.removeVietnameseDiacritics(variant);
+        if (lowerCat.contains(lowerQuery) || normCat.contains(normQuery)) {
+          return true;
+        }
       }
     }
 
-    // 3. So khớp Ví nguồn & Ví đích (Wallet)
+    // 3. So khớp Ví nguồn & Ví đích (Wallet) - hỗ trợ cả tên gốc & bản địa hóa ví Tiền mặt hệ thống
     if (wallet != null) {
-      final lowerWallet = wallet.walletName.toLowerCase();
-      final normWallet =
-          TransactionIntelligenceService.removeVietnameseDiacritics(
-              wallet.walletName);
-      if (lowerWallet.contains(lowerQuery) || normWallet.contains(normQuery)) {
-        return true;
+      for (final variant in WalletLocalizationHelper.allSearchVariants(wallet)) {
+        final lowerWallet = variant.toLowerCase();
+        final normWallet =
+            TransactionIntelligenceService.removeVietnameseDiacritics(variant);
+        if (lowerWallet.contains(lowerQuery) ||
+            normWallet.contains(normQuery)) {
+          return true;
+        }
       }
     }
     if (toWallet != null) {
-      final lowerToWallet = toWallet.walletName.toLowerCase();
-      final normToWallet =
-          TransactionIntelligenceService.removeVietnameseDiacritics(
-              toWallet.walletName);
-      if (lowerToWallet.contains(lowerQuery) ||
-          normToWallet.contains(normQuery)) {
-        return true;
+      for (final variant
+          in WalletLocalizationHelper.allSearchVariants(toWallet)) {
+        final lowerToWallet = variant.toLowerCase();
+        final normToWallet =
+            TransactionIntelligenceService.removeVietnameseDiacritics(variant);
+        if (lowerToWallet.contains(lowerQuery) ||
+            normToWallet.contains(normQuery)) {
+          return true;
+        }
       }
     }
 
-    // 4. So khớp Loại giao dịch bằng từ khóa tiếng Việt
+    // 4. So khớp Loại giao dịch bằng từ khóa tiếng Việt & tiếng Anh
     if (normQuery == 'thu' ||
         normQuery == 'thu nhap' ||
-        normQuery == 'tien vao') {
+        normQuery == 'tien vao' ||
+        normQuery == 'income' ||
+        normQuery == 'earning' ||
+        normQuery == 'earnings') {
       if (tx.type == 'income') return true;
     }
     if (normQuery == 'chi' ||
         normQuery == 'chi tieu' ||
-        normQuery == 'tien ra') {
+        normQuery == 'tien ra' ||
+        normQuery == 'expense' ||
+        normQuery == 'expenses' ||
+        normQuery == 'spending') {
       if (tx.type == 'expense') return true;
     }
     if (normQuery == 'chuyen' ||
         normQuery == 'chuyen tien' ||
-        normQuery == 'chuyen khoan') {
+        normQuery == 'chuyen khoan' ||
+        normQuery == 'transfer') {
       if (tx.type == 'transfer') return true;
     }
-    if (normQuery == 'tiet kiem' || normQuery == 'muc tieu') {
+    if (normQuery == 'tiet kiem' ||
+        normQuery == 'muc tieu' ||
+        normQuery == 'saving' ||
+        normQuery == 'savings' ||
+        normQuery == 'goal') {
       if (tx.type.contains('goal')) return true;
     }
 
@@ -1800,25 +2018,59 @@ class TransactionSearchFilterHelper {
     return null;
   }
 
-  /// So khớp ngày tháng (hôm nay, hôm qua, tháng X, ngày/tháng...)
+  static const Map<String, int> _englishMonthKeywords = {
+    'jan': 1,
+    'january': 1,
+    'feb': 2,
+    'february': 2,
+    'mar': 3,
+    'march': 3,
+    'apr': 4,
+    'april': 4,
+    'may': 5,
+    'jun': 6,
+    'june': 6,
+    'jul': 7,
+    'july': 7,
+    'aug': 8,
+    'august': 8,
+    'sep': 9,
+    'sept': 9,
+    'september': 9,
+    'oct': 10,
+    'october': 10,
+    'nov': 11,
+    'november': 11,
+    'dec': 12,
+    'december': 12,
+  };
+
+  /// So khớp ngày tháng (hôm nay / today, hôm qua / yesterday, tháng X / month X, ngày/tháng...)
   static bool matchesDateQuery(DateTime date, String normQuery,
       {DateTime? referenceDate}) {
     final now = referenceDate ?? DateTime.now();
-    if (normQuery == 'hom nay') {
+    if (normQuery == 'hom nay' || normQuery == 'today') {
       return date.year == now.year &&
           date.month == now.month &&
           date.day == now.day;
     }
-    if (normQuery == 'hom qua') {
+    if (normQuery == 'hom qua' || normQuery == 'yesterday') {
       final yest = now.subtract(const Duration(days: 1));
       return date.year == yest.year &&
           date.month == yest.month &&
           date.day == yest.day;
     }
-    if (normQuery.startsWith('thang ')) {
-      final mStr = normQuery.replaceAll('thang ', '').trim();
+    if (normQuery.startsWith('thang ') || normQuery.startsWith('month ')) {
+      final mStr = normQuery
+          .replaceFirst('thang ', '')
+          .replaceFirst('month ', '')
+          .trim();
       final m = int.tryParse(mStr);
       if (m != null && date.month == m) return true;
+    }
+    final englishMonth = _englishMonthKeywords[normQuery];
+    if (englishMonth != null && date.month == englishMonth) {
+      return true;
     }
 
     final dayMonth =

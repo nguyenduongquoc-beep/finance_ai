@@ -9,7 +9,6 @@
  * Cách dùng:
  *   node functions/scripts/seed_emulator.js --email <admin_email> --password <admin_password>
  */
-const crypto = require("node:crypto");
 const admin = require("../node_modules/firebase-admin");
 
 function parseArgs(argv) {
@@ -24,25 +23,6 @@ function parseArgs(argv) {
     }
   }
   return args;
-}
-
-function canonicalizeJsonValue(value) {
-  if (Array.isArray(value)) {
-    return value.map((item) => canonicalizeJsonValue(item));
-  }
-  if (value && typeof value === "object") {
-    const sorted = {};
-    for (const key of Object.keys(value).sort()) {
-      sorted[key] = canonicalizeJsonValue(value[key]);
-    }
-    return sorted;
-  }
-  return value;
-}
-
-function computeCanonicalConfigHash(payload) {
-  const canonicalJson = JSON.stringify(canonicalizeJsonValue(payload || {}));
-  return crypto.createHash("sha256").update(canonicalJson, "utf8").digest("hex");
 }
 
 async function ensureAuthUser({ auth, email, password, displayName, claims }) {
@@ -132,33 +112,7 @@ async function main() {
     updatedAt: nowIso,
   });
 
-  // 3. Seed cấu hình Published & Draft mặc định nếu chưa tồn tại
-  const aiRuntimePayload = {
-    schemaVersion: 1,
-    primaryModel: "gemini-3.5-flash",
-    fallbackModels: ["gemini-3.5-flash-lite"],
-    temperature: 0.4,
-    maxOutputTokens: 1024,
-    advisorSystemPromptPrefix:
-      "Bạn là cố vấn tài chính cá nhân thực tế, giải thích ngắn gọn theo đúng số liệu giao dịch và ngân sách.",
-    monthlyPlanPromptPrefix:
-      "Lập kế hoạch tài chính theo tỷ lệ hợp lý với thu nhập thực tế và quỹ dự phòng.",
-    enableKnowledgeGrounding: true,
-    enableFeedbackSignals: true,
-  };
-  await db.collection("published_configs").doc("ai_runtime").set(
-    {
-      configType: "ai_runtime",
-      publishedVersion: 1,
-      payload: aiRuntimePayload,
-      payloadHash: computeCanonicalConfigHash(aiRuntimePayload),
-      publishedAt: nowIso,
-      publishedBy: adminRecord.uid,
-    },
-    { merge: true }
-  );
-
-  // 4. Seed System Categories, Announcements, Knowledge & Feedback mẫu
+  // 3. Seed System Categories, Announcements & Audit Log mẫu
   await db.collection("system_categories").doc("sys_cat_an_uong").set(
     {
       id: "sys_cat_an_uong",
@@ -176,55 +130,9 @@ async function main() {
     {
       id: "ann_welcome_local",
       title: "Môi trường Emulator Kiểm thử Admin Web",
-      message: "Hệ thống đang chạy trên Firebase Emulators cục bộ (Auth + Firestore + Functions).",
+      content: "Hệ thống đang chạy trên Firebase Emulators cục bộ (Auth + Firestore + Functions).",
       level: "info",
       isActive: true,
-      createdAt: nowIso,
-    },
-    { merge: true }
-  );
-
-  await db.collection("financial_knowledge_drafts").doc("kb_emergency_fund").set(
-    {
-      articleId: "kb_emergency_fund",
-      title: "Quỹ dự phòng 3-6 tháng chi thiết yếu",
-      topic: "saving_strategy",
-      triggerCondition: "low_saving_rate",
-      priority: 8,
-      summaryForUser: "Duy trì quỹ dự phòng tương đương 3-6 tháng chi tiêu thiết yếu trước khi mở rộng chi linh hoạt.",
-      aiGroundingSnippet: "Khuyến nghị người dùng trích tự động tối thiểu 10-20% thu nhập vào quỹ dự phòng trước.",
-      suggestedPrompts: ["Tôi cần trích bao nhiêu cho quỹ dự phòng mỗi tháng?"],
-      isActive: true,
-      updatedAt: nowIso,
-      updatedBy: adminRecord.uid,
-    },
-    { merge: true }
-  );
-
-  await db.collection("ai_feedback_reports").doc("fb_sample_pseudo_1").set(
-    {
-      reportId: "fb_sample_pseudo_1",
-      targetFeature: "ocr_suggestion",
-      rating: "negative",
-      reasonCode: "wrong_merchant",
-      userNote: "Hóa đơn Highlands Coffee nhận nhầm sang danh mục mua sắm.",
-      suggestedKeywordOrMerchant: "Highlands Coffee",
-      aiConfigVersion: 1,
-      heuristicsVersion: 1,
-      modelUsed: "gemini-3.5-flash",
-      dataTier: "standard",
-      feedbackMode: "pseudonymous",
-      status: "open",
-      createdAt: nowIso,
-    },
-    { merge: true }
-  );
-
-  await db.collection("_feedback_notification_links").doc("fb_sample_pseudo_1").set(
-    {
-      reportId: "fb_sample_pseudo_1",
-      uid: sampleUserRecord.uid,
-      targetFeature: "ocr_suggestion",
       createdAt: nowIso,
     },
     { merge: true }

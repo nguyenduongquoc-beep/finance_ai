@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../../l10n/app_localizations.dart';
 import '../../models/wallet_model.dart';
 import '../../services/firestore_service.dart';
 import '../../utils/constants.dart';
 import '../../utils/formatters.dart';
+import '../../utils/wallet_localization_helper.dart';
 import '../../widgets/wallet_card.dart';
 import '../../widgets/app_card.dart';
 import '../../widgets/stream_error_widget.dart';
@@ -20,7 +22,7 @@ class WalletManagementScreen extends StatelessWidget {
 
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surface,
-      appBar: AppBar(title: const Text('Ví của tôi')),
+      appBar: AppBar(title: Text(context.tr('wal_mgmt_title'))),
       floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
       floatingActionButton: FloatingActionButton.extended(
         backgroundColor: AppColors.primary,
@@ -28,8 +30,8 @@ class WalletManagementScreen extends StatelessWidget {
         elevation: 2,
         onPressed: () => _showWalletDialog(context, firestoreService, uid),
         icon: const Icon(Icons.add_rounded),
-        label: const Text('Thêm ví',
-            style: TextStyle(fontWeight: FontWeight.w600)),
+        label: Text(context.tr('wal_mgmt_add_fab'),
+            style: const TextStyle(fontWeight: FontWeight.w600)),
       ),
       body: StreamBuilder<List<Wallet>>(
         stream: firestoreService.streamWallets(uid),
@@ -106,7 +108,7 @@ class WalletManagementScreen extends StatelessWidget {
                 child: Padding(
                   padding: const EdgeInsets.only(top: 4),
                   child: Text(
-                    'Nhấn để sửa ví • Nhấn giữ hoặc chọn ⋮ để ẩn/xóa',
+                    context.tr('wal_mgmt_footer_hint'),
                     style: TextStyle(
                         fontSize: 12, color: context.appTextSecondary),
                   ),
@@ -169,7 +171,10 @@ class WalletManagementScreen extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          wallet.walletName,
+                          WalletLocalizationHelper.localizeWalletWithContext(
+                            context,
+                            wallet,
+                          ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
@@ -192,7 +197,7 @@ class WalletManagementScreen extends StatelessWidget {
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.edit_rounded),
-                title: const Text('Chỉnh sửa ví'),
+                title: Text(ctx.tr('wal_mgmt_action_edit')),
                 onTap: () {
                   Navigator.pop(ctx);
                   _showWalletDialog(context, firestoreService, uid,
@@ -203,8 +208,8 @@ class WalletManagementScreen extends StatelessWidget {
                 contentPadding: EdgeInsets.zero,
                 leading: const Icon(Icons.delete_outline_rounded,
                     color: AppColors.expense),
-                title: const Text('Ẩn / Xóa ví',
-                    style: TextStyle(color: AppColors.expense)),
+                title: Text(ctx.tr('wal_mgmt_action_del'),
+                    style: const TextStyle(color: AppColors.expense)),
                 onTap: () {
                   Navigator.pop(ctx);
                   _handleDeleteWallet(
@@ -233,17 +238,21 @@ class WalletManagementScreen extends StatelessWidget {
         final confirm = await showDialog<bool>(
           context: context,
           builder: (ctx) => AlertDialog(
-            title: const Text('Xóa ví?'),
-            content: Text(
-                'Bạn có chắc chắn muốn xóa ví "${wallet.walletName}"? Hành động này không thể hoàn tác.'),
+            title: Text(ctx.tr('wal_mgmt_del_title')),
+            content: Text(ctx.tr('wal_mgmt_del_msg', params: {
+              'name': WalletLocalizationHelper.localizeWalletWithContext(
+                ctx,
+                wallet,
+              ),
+            })),
             actions: [
               TextButton(
                   onPressed: () => Navigator.pop(ctx, false),
-                  child: const Text('Hủy')),
+                  child: Text(ctx.tr('common_cancel'))),
               TextButton(
                 onPressed: () => Navigator.pop(ctx, true),
-                child: const Text('Xóa',
-                    style: TextStyle(color: AppColors.expense)),
+                child: Text(ctx.tr('common_delete'),
+                    style: const TextStyle(color: AppColors.expense)),
               ),
             ],
           ),
@@ -259,24 +268,28 @@ class WalletManagementScreen extends StatelessWidget {
       final action = await showDialog<String>(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: const Text('Ví đang được sử dụng'),
+          title: Text(ctx.tr('wal_mgmt_in_use_title')),
           content: Text(
-            'Ví "${wallet.walletName}" đang có giao dịch liên kết. Bạn có thể ẨN ví (giữ nguyên lịch sử giao dịch cũ, '
-            'không hiện ví này khi tạo giao dịch mới) hoặc CHUYỂN toàn bộ giao dịch sang ví khác rồi xóa hẳn.',
+            ctx.tr('wal_mgmt_in_use_msg', params: {
+              'name': WalletLocalizationHelper.localizeWalletWithContext(
+                ctx,
+                wallet,
+              ),
+            }),
           ),
           actions: [
             TextButton(
                 onPressed: () => Navigator.pop(ctx, null),
-                child: const Text('Hủy')),
+                child: Text(ctx.tr('common_cancel'))),
             TextButton(
               onPressed: () => Navigator.pop(ctx, 'hide'),
-              child: const Text('Ẩn ví',
-                  style: TextStyle(fontWeight: FontWeight.w600)),
+              child: Text(ctx.tr('wal_mgmt_hide_btn'),
+                  style: const TextStyle(fontWeight: FontWeight.w600)),
             ),
             TextButton(
               onPressed: () => Navigator.pop(ctx, 'reassign'),
-              child: const Text('Chuyển & Xóa',
-                  style: TextStyle(color: AppColors.expense)),
+              child: Text(ctx.tr('wal_mgmt_transfer_del_btn'),
+                  style: const TextStyle(color: AppColors.expense)),
             ),
           ],
         ),
@@ -292,8 +305,7 @@ class WalletManagementScreen extends StatelessWidget {
             activeWallets.where((w) => w.walletId != wallet.walletId).toList();
         if (otherWallets.isEmpty) {
           if (context.mounted) {
-            AppSnackbar.show(
-                context, 'Không thể xóa ví duy nhất đang chứa giao dịch.',
+            AppSnackbar.show(context, context.tr('wal_mgmt_del_only_err'),
                 isError: true);
           }
           return;
@@ -306,22 +318,26 @@ class WalletManagementScreen extends StatelessWidget {
           builder: (ctx) {
             return StatefulBuilder(
               builder: (context, setState) => AlertDialog(
-                title: const Text('Chuyển giao dịch'),
+                title: Text(ctx.tr('wal_mgmt_transfer_title')),
                 content: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text(
-                        'Vui lòng chọn ví để chuyển toàn bộ giao dịch sang trước khi xóa:'),
+                    Text(ctx.tr('wal_mgmt_transfer_desc')),
                     const SizedBox(height: 12),
                     DropdownButtonFormField<String>(
                       initialValue: selectedWalletId,
-                      decoration: const InputDecoration(
-                        labelText: 'Chuyển sang ví',
-                        border: OutlineInputBorder(),
+                      decoration: InputDecoration(
+                        labelText: ctx.tr('wal_mgmt_transfer_label'),
+                        border: const OutlineInputBorder(),
                       ),
                       items: otherWallets
                           .map((w) => DropdownMenuItem(
-                              value: w.walletId, child: Text(w.walletName)))
+                                value: w.walletId,
+                                child: Text(
+                                  WalletLocalizationHelper
+                                      .localizeWalletWithContext(ctx, w),
+                                ),
+                              ))
                           .toList(),
                       onChanged: (v) => setState(() => selectedWalletId = v),
                     ),
@@ -330,11 +346,11 @@ class WalletManagementScreen extends StatelessWidget {
                 actions: [
                   TextButton(
                       onPressed: () => Navigator.pop(ctx, false),
-                      child: const Text('Hủy')),
+                      child: Text(ctx.tr('common_cancel'))),
                   TextButton(
                     onPressed: () => Navigator.pop(ctx, true),
-                    child: const Text('Xóa & Chuyển',
-                        style: TextStyle(color: AppColors.expense)),
+                    child: Text(ctx.tr('cat_mgmt_del_transfer_btn'),
+                        style: const TextStyle(color: AppColors.expense)),
                   ),
                 ],
               ),
@@ -351,8 +367,7 @@ class WalletManagementScreen extends StatelessWidget {
     } catch (e) {
       debugPrint('❌ Lỗi khi xử lý xóa/ẩn ví: $e');
       if (context.mounted) {
-        AppSnackbar.show(
-            context, 'Không thể thực hiện thao tác. Vui lòng thử lại.',
+        AppSnackbar.show(context, context.tr('wal_mgmt_action_err'),
             isError: true);
       }
     }
@@ -364,12 +379,15 @@ class WalletManagementScreen extends StatelessWidget {
     String uid, {
     Wallet? wallet,
   }) {
+    final displayedInitialName = wallet == null
+        ? ''
+        : WalletLocalizationHelper.localizeWalletWithContext(context, wallet);
     final nameController =
-        TextEditingController(text: wallet?.walletName ?? '');
+        TextEditingController(text: displayedInitialName);
     final descController =
         TextEditingController(text: wallet?.description ?? '');
     final balanceController = TextEditingController(
-        text: wallet != null ? wallet.balance.toStringAsFixed(0) : '');
+        text: wallet != null ? AppFormatters.number(wallet.balance) : '');
     String type = wallet?.type ?? 'cash';
     bool saving = false;
     String? nameError;
@@ -389,7 +407,8 @@ class WalletManagementScreen extends StatelessWidget {
           Future<void> save() async {
             final name = nameController.text.trim();
             if (name.isEmpty) {
-              setSheetState(() => nameError = 'Vui lòng nhập tên ví');
+              setSheetState(
+                  () => nameError = ctx.tr('wal_mgmt_name_empty_err'));
               return;
             }
 
@@ -408,13 +427,20 @@ class WalletManagementScreen extends StatelessWidget {
                   initialBalance: balance,
                   type: type,
                   description: desc.isNotEmpty ? desc : null,
+                  isUserNamed: true,
                   createdAt: DateTime.now(),
                 ));
               } else {
+                final keepSystemName = WalletLocalizationHelper.isSystemCashWallet(
+                      wallet,
+                    ) &&
+                    type == 'cash' &&
+                    (name == displayedInitialName || name == wallet.walletName);
                 await firestoreService.updateWallet(wallet.walletId, {
-                  'walletName': name,
+                  'walletName': keepSystemName ? wallet.walletName : name,
                   'type': type,
                   'description': desc.isNotEmpty ? desc : null,
+                  'isUserNamed': !keepSystemName,
                   'updatedAt': DateTime.now().toIso8601String(),
                 });
               }
@@ -423,7 +449,7 @@ class WalletManagementScreen extends StatelessWidget {
               debugPrint('❌ Lỗi khi lưu ví: $e');
               if (ctx.mounted) {
                 setSheetState(() => saving = false);
-                AppSnackbar.show(context, 'Không thể lưu ví. Vui lòng thử lại.',
+                AppSnackbar.show(context, ctx.tr('wal_mgmt_save_err'),
                     isError: true);
               }
             }
@@ -468,7 +494,9 @@ class WalletManagementScreen extends StatelessWidget {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             Text(
-                              wallet == null ? 'Thêm ví mới' : 'Sửa ví',
+                              wallet == null
+                                  ? ctx.tr('wal_mgmt_sheet_add')
+                                  : ctx.tr('wal_mgmt_sheet_edit'),
                               style: TextStyle(
                                 fontSize: 20,
                                 fontWeight: FontWeight.w700,
@@ -478,8 +506,8 @@ class WalletManagementScreen extends StatelessWidget {
                             const SizedBox(height: 2),
                             Text(
                               wallet == null
-                                  ? 'Tạo nơi lưu trữ tiền để theo dõi dòng tiền'
-                                  : 'Cập nhật thông tin hiển thị của ví',
+                                  ? ctx.tr('wal_mgmt_sub_add')
+                                  : ctx.tr('wal_mgmt_sub_edit'),
                               style: TextStyle(
                                   fontSize: 13,
                                   color: context.appTextSecondary),
@@ -490,7 +518,7 @@ class WalletManagementScreen extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 22),
-                  _sheetLabel(context, 'Loại ví'),
+                  _sheetLabel(ctx, ctx.tr('wal_mgmt_type_label')),
                   const SizedBox(height: 8),
                   Wrap(
                     spacing: 8,
@@ -521,7 +549,7 @@ class WalletManagementScreen extends StatelessWidget {
                     ],
                   ),
                   const SizedBox(height: 18),
-                  _sheetLabel(context, 'Tên ví'),
+                  _sheetLabel(ctx, ctx.tr('wal_mgmt_name_label')),
                   const SizedBox(height: 8),
                   TextField(
                     controller: nameController,
@@ -532,21 +560,25 @@ class WalletManagementScreen extends StatelessWidget {
                         setSheetState(() => nameError = null);
                     },
                     decoration: InputDecoration(
-                      hintText: 'VD: Vietcombank, MoMo, Ví tiền mặt',
+                      hintText: ctx.tr('wal_mgmt_name_hint'),
                       errorText: nameError,
                       prefixIcon:
                           const Icon(Icons.label_outline_rounded, size: 20),
                     ),
                   ),
                   const SizedBox(height: 16),
-                  _sheetLabel(context,
-                      wallet == null ? 'Số dư ban đầu' : 'Số dư hiện tại'),
+                  _sheetLabel(
+                      ctx,
+                      wallet == null
+                          ? ctx.tr('wal_mgmt_init_balance')
+                          : ctx.tr('wal_mgmt_cur_balance')),
                   const SizedBox(height: 8),
                   TextField(
                     controller: balanceController,
                     enabled: wallet ==
                         null, // Khóa field số dư khi sửa ví đã tồn tại
                     keyboardType: TextInputType.number,
+                    inputFormatters: const [CurrencyInputFormatter()],
                     style: const TextStyle(
                         fontSize: 18, fontWeight: FontWeight.w700),
                     decoration: InputDecoration(
@@ -554,19 +586,19 @@ class WalletManagementScreen extends StatelessWidget {
                       suffixText: '₫',
                       prefixIcon: const Icon(Icons.payments_outlined, size: 20),
                       helperText: wallet != null
-                          ? 'Số dư tự động đồng bộ từ giao dịch, không thể chỉnh sửa tay'
+                          ? ctx.tr('wal_mgmt_balance_locked_hint')
                           : null,
                       helperMaxLines: 2,
                     ),
                   ),
                   const SizedBox(height: 16),
-                  _sheetLabel(context, 'Mô tả (tùy chọn)'),
+                  _sheetLabel(ctx, ctx.tr('wal_mgmt_desc_label')),
                   const SizedBox(height: 8),
                   TextField(
                     controller: descController,
-                    decoration: const InputDecoration(
-                      hintText: 'VD: Chi tiêu sinh hoạt hàng ngày',
-                      prefixIcon: Icon(Icons.notes_rounded, size: 20),
+                    decoration: InputDecoration(
+                      hintText: ctx.tr('wal_mgmt_desc_hint'),
+                      prefixIcon: const Icon(Icons.notes_rounded, size: 20),
                     ),
                   ),
                   const SizedBox(height: 24),
@@ -581,8 +613,9 @@ class WalletManagementScreen extends StatelessWidget {
                               foregroundColor: context.appTextPrimary,
                               side: BorderSide(color: context.appBorder),
                             ),
-                            child: const Text('Hủy',
-                                style: TextStyle(fontWeight: FontWeight.w600)),
+                            child: Text(ctx.tr('common_cancel'),
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w600)),
                           ),
                         ),
                       ),
@@ -608,7 +641,9 @@ class WalletManagementScreen extends StatelessWidget {
                                     ),
                                   )
                                 : Text(
-                                    wallet == null ? 'Tạo ví' : 'Lưu thay đổi',
+                                    wallet == null
+                                        ? ctx.tr('wal_mgmt_create_btn')
+                                        : ctx.tr('cat_mgmt_save_changes'),
                                     style: const TextStyle(
                                         fontSize: 15,
                                         fontWeight: FontWeight.w600),
@@ -637,7 +672,7 @@ class WalletManagementScreen extends StatelessWidget {
       );
 }
 
-/// Thẻ tổng quan tài sản: tổng số dư + cơ cấu theo loại ví.
+/// Thẻ tổng quan tài sản: tổng số dư + cơ cấu theo loại ví (đồng bộ màu Dark Slate với Báo cáo AI).
 class _AssetsHero extends StatelessWidget {
   final double totalAssets;
   final int walletCount;
@@ -660,155 +695,205 @@ class _AssetsHero extends StatelessWidget {
     final isLarge = totalAssets.abs() >= 1e9;
 
     return Container(
+      width: double.infinity,
       padding: const EdgeInsets.all(20),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(22),
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [Color(0xFF2A86A6), Color(0xFF14485B)],
+          colors: [Color(0xFF1F6F8B), Color(0xFF134A5D)],
         ),
-      ),
-      child: Stack(
-        children: [
-          Positioned(
-            right: -50,
-            top: -60,
-            child: Container(
-              width: 150,
-              height: 150,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: Colors.white.withAlpha(16),
-              ),
-            ),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primary.withValues(alpha: 0.25),
+            blurRadius: 14,
+            offset: const Offset(0, 6),
           ),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  Row(
-                    children: [
-                      Icon(Icons.account_balance_wallet_rounded,
-                          size: 18, color: Colors.white.withAlpha(210)),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Tổng tài sản',
-                        style: TextStyle(
-                          color: Colors.white.withAlpha(220),
-                          fontWeight: FontWeight.w500,
-                          fontSize: 13,
-                        ),
+              Expanded(
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(7),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(10),
                       ),
-                    ],
-                  ),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withAlpha(36),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Text(
-                      '$walletCount ví',
-                      style: const TextStyle(
+                      child: const Icon(
+                        Icons.account_balance_wallet_rounded,
+                        size: 16,
                         color: Colors.white,
-                        fontWeight: FontWeight.w600,
-                        fontSize: 11,
                       ),
                     ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              FittedBox(
-                fit: BoxFit.scaleDown,
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  isLarge
-                      ? AppFormatters.compactCurrency(totalAssets)
-                      : AppFormatters.currency(totalAssets),
-                  style: const TextStyle(
-                    fontWeight: FontWeight.w700,
-                    fontSize: 34,
-                    color: Colors.white,
-                    letterSpacing: -0.8,
-                  ),
-                ),
-              ),
-              if (isLarge) ...[
-                const SizedBox(height: 2),
-                Text(
-                  'Chi tiết: ${AppFormatters.currency(totalAssets)}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.white.withAlpha(200),
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              ],
-              const SizedBox(height: 20),
-              // Thanh cơ cấu tài sản theo loại ví
-              ClipRRect(
-                borderRadius: BorderRadius.circular(6),
-                child: SizedBox(
-                  height: 8,
-                  child: positiveSum <= 0
-                      ? Container(color: Colors.white.withAlpha(40))
-                      : Row(
-                          children: [
-                            for (final e in subtotals.entries)
-                              if (e.value > 0)
-                                Expanded(
-                                  flex: ((e.value / positiveSum) * 1000)
-                                      .round()
-                                      .clamp(1, 1000),
-                                  child: Container(
-                                    margin: const EdgeInsets.only(right: 2),
-                                    color: e.key.onDarkColor,
-                                  ),
-                                ),
-                          ],
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        context.tr('wallet_total_assets'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.95),
+                          fontWeight: FontWeight.w700,
+                          fontSize: 12,
+                          letterSpacing: 0.6,
                         ),
+                      ),
+                    ),
+                  ],
                 ),
               ),
-              const SizedBox(height: 14),
-              Wrap(
-                spacing: 16,
-                runSpacing: 8,
-                children: [
-                  for (final e in subtotals.entries)
-                    Row(
+              const SizedBox(width: 8),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 140),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: e.key.onDarkColor,
-                            shape: BoxShape.circle,
-                          ),
+                        const Icon(
+                          Icons.layers_rounded,
+                          color: Colors.white,
+                          size: 12,
                         ),
-                        const SizedBox(width: 6),
+                        const SizedBox(width: 5),
                         Text(
-                          positiveSum > 0 && e.value > 0
-                              ? '${e.key.label} ${((e.value / positiveSum) * 100).round()}%'
-                              : e.key.label,
-                          style: TextStyle(
-                            fontSize: 12,
-                            fontWeight: FontWeight.w500,
-                            color: Colors.white.withAlpha(225),
+                          context.tr('wallet_in_use',
+                              params: {'count': '$walletCount'}),
+                          maxLines: 1,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 11,
                           ),
                         ),
                       ],
                     ),
-                ],
+                  ),
+                ),
               ),
             ],
+          ),
+          const SizedBox(height: 16),
+          Text(
+            context.tr('wallet_total_balance_sub'),
+            style: TextStyle(
+              color: Colors.white.withValues(alpha: 0.8),
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 5),
+          FittedBox(
+            fit: BoxFit.scaleDown,
+            alignment: Alignment.centerLeft,
+            child: Text(
+              isLarge
+                  ? AppFormatters.compactCurrency(totalAssets)
+                  : AppFormatters.currency(totalAssets),
+              style: const TextStyle(
+                fontWeight: FontWeight.w800,
+                fontSize: 30,
+                color: Colors.white,
+                letterSpacing: -0.6,
+              ),
+            ),
+          ),
+          if (isLarge) ...[
+            const SizedBox(height: 2),
+            Text(
+              context.tr('wal_mgmt_detail_amount',
+                  params: {'amount': AppFormatters.currency(totalAssets)}),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 12,
+                color: Colors.white.withValues(alpha: 0.75),
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+          const SizedBox(height: 14),
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(14),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Thanh cơ cấu tài sản theo loại ví
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(6),
+                  child: SizedBox(
+                    height: 8,
+                    child: positiveSum <= 0
+                        ? Container(color: Colors.white.withValues(alpha: 0.2))
+                        : Row(
+                            children: [
+                              for (final e in subtotals.entries)
+                                if (e.value > 0)
+                                  Expanded(
+                                    flex: ((e.value / positiveSum) * 1000)
+                                        .round()
+                                        .clamp(1, 1000),
+                                    child: Container(
+                                      margin: const EdgeInsets.only(right: 2),
+                                      color: e.key.onDarkColor,
+                                    ),
+                                  ),
+                            ],
+                          ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 16,
+                  runSpacing: 8,
+                  children: [
+                    for (final e in subtotals.entries)
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            width: 8,
+                            height: 8,
+                            decoration: BoxDecoration(
+                              color: e.key.onDarkColor,
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            positiveSum > 0 && e.value > 0
+                                ? '${e.key.label} ${((e.value / positiveSum) * 100).round()}%'
+                                : e.key.label,
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                              color: Colors.white.withValues(alpha: 0.9),
+                            ),
+                          ),
+                        ],
+                      ),
+                  ],
+                ),
+              ],
+            ),
           ),
         ],
       ),
@@ -901,7 +986,7 @@ class _EmptyWallets extends StatelessWidget {
               ),
               const SizedBox(height: 18),
               Text(
-                'Chưa có ví nào',
+                context.tr('wal_mgmt_empty_title'),
                 style: TextStyle(
                   fontSize: 18,
                   fontWeight: FontWeight.w700,
@@ -910,7 +995,7 @@ class _EmptyWallets extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               Text(
-                'Tạo ví đầu tiên (tiền mặt, ngân hàng, ví điện tử) để bắt đầu theo dõi thu chi.',
+                context.tr('wal_mgmt_empty_desc'),
                 textAlign: TextAlign.center,
                 style: TextStyle(
                     fontSize: 13, height: 1.4, color: context.appTextSecondary),
@@ -921,7 +1006,7 @@ class _EmptyWallets extends StatelessWidget {
                 child: ElevatedButton.icon(
                   onPressed: onAdd,
                   icon: const Icon(Icons.add_rounded),
-                  label: const Text('Tạo ví mới'),
+                  label: Text(context.tr('wal_mgmt_empty_btn')),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.primary,
                     foregroundColor: Colors.white,

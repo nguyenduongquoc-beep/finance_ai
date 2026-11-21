@@ -464,10 +464,6 @@ class _AdminAuditLogsViewState extends State<AdminAuditLogsView> {
                           'Thông báo hệ thống',
                           'system_announcement',
                         ),
-                        _buildTypeChip('Cấu hình AI & Quy tắc', 'config'),
-                        _buildTypeChip('Tri thức Tài chính', 'knowledge'),
-                        _buildTypeChip('Phản hồi AI', 'ai_feedback'),
-                        _buildTypeChip('AI Sandbox', 'sandbox'),
                       ],
                     ),
                     const SizedBox(height: 12),
@@ -540,7 +536,11 @@ class _AdminAuditLogsViewState extends State<AdminAuditLogsView> {
                                     crossAxisAlignment:
                                         CrossAxisAlignment.start,
                                     children: [
-                                      Row(
+                                      Wrap(
+                                        spacing: 8,
+                                        runSpacing: 4,
+                                        crossAxisAlignment:
+                                            WrapCrossAlignment.center,
                                         children: [
                                           Text(
                                             log.actionDisplayLabel,
@@ -550,14 +550,15 @@ class _AdminAuditLogsViewState extends State<AdminAuditLogsView> {
                                               color: AppColors.slate900,
                                             ),
                                           ),
-                                          const SizedBox(width: 8),
                                           Container(
                                             padding: const EdgeInsets.symmetric(
                                               horizontal: 6,
                                               vertical: 2,
                                             ),
                                             decoration: BoxDecoration(
-                                              color: AppColors.incomeBackground,
+                                              color: log.isSuccess
+                                                  ? AppColors.incomeBackground
+                                                  : AppColors.expenseBackground,
                                               borderRadius:
                                                   BorderRadius.circular(4),
                                             ),

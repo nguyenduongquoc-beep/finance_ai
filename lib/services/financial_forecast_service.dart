@@ -1,3 +1,4 @@
+import '../l10n/app_localizations.dart';
 import '../models/ai_runtime_config_model.dart';
 import '../models/budget_model.dart';
 import '../models/category_model.dart';
@@ -7,7 +8,7 @@ import '../models/recurring_transaction_model.dart';
 import '../models/saving_goal_model.dart';
 import '../models/transaction_model.dart';
 import '../models/wallet_model.dart';
-import 'ai_config_sync_service.dart';
+import '../utils/category_localization_helper.dart';
 import 'financial_analytics_service.dart';
 import 'recurring_transaction_service.dart';
 
@@ -30,7 +31,7 @@ class FinancialForecastService {
   /// Lấy bộ ngưỡng định lượng đang hiệu lực (tách biệt hoàn toàn ngưỡng bất thường
   /// theo danh mục tháng và ngưỡng bất thường của từng giao dịch đơn lẻ).
   FinancialHeuristicsConfig get effectiveHeuristics =>
-      _heuristicsOverride ?? AiConfigSyncService.instance.currentHeuristics;
+      _heuristicsOverride ?? FinancialHeuristicsConfig.defaults();
 
   /// 1. Dự báo số dư cuối tháng (Có hỗ trợ các khoản định kỳ chưa đến hạn)
   MonthEndForecast calculateMonthEndForecast({
@@ -164,7 +165,7 @@ class FinancialForecastService {
         orElse: () => Category(
           categoryId: budget.categoryId,
           userId: '',
-          name: 'Danh mục',
+          name: AppLocalizations.tr('ai_rep_default_cat'),
           type: 'expense',
           icon: 'category',
           color: 0xFF9E9E9E,
@@ -290,7 +291,7 @@ class FinancialForecastService {
               orElse: () => Category(
                 categoryId: catId,
                 userId: '',
-                name: 'Danh mục',
+                name: AppLocalizations.tr('ai_rep_default_cat'),
                 type: 'expense',
                 icon: 'category',
                 color: 0xFF9E9E9E,
@@ -323,8 +324,10 @@ class FinancialForecastService {
   }
 
   /// 4. Tổng hợp điểm sức khỏe tài chính & chống trùng phạt (Deduplicated Health Score)
+  /// Nguồn sự thật duy nhất dùng chung giữa `AiInsightScreen` và `FinancialExportService`.
+  /// [monthEndForecast] có thể `null` khi chấm điểm cho báo cáo tháng quá khứ.
   int calculateOverallHealthScore({
-    required MonthEndForecast monthEndForecast,
+    MonthEndForecast? monthEndForecast,
     required List<BudgetForecast> budgetForecasts,
     required List<SpendingAnomaly> anomalies,
     required List<FinancialIssue> issues,
@@ -340,17 +343,20 @@ class FinancialForecastService {
     double score = 100;
     outDeductions.clear();
 
-    // 1. Phạt dự báo số dư cuối tháng
-    if (monthEndForecast.hasEnoughData) {
+    // 1. Phạt dự báo số dư cuối tháng (chỉ áp dụng khi có dự báo tháng hiện tại)
+    final bool penalizedNegativeBalance = monthEndForecast != null &&
+        monthEndForecast.hasEnoughData &&
+        monthEndForecast.projectedEndBalance < 0;
+    if (monthEndForecast != null && monthEndForecast.hasEnoughData) {
       if (monthEndForecast.projectedEndBalance < 0) {
         outDeductions.add(HealthScoreDeduction(
-          reason: 'Dự báo âm số dư cuối tháng',
+          reason: AppLocalizations.tr('svc_fc_neg_bal'),
           points: negBalPenalty,
         ));
         score -= negBalPenalty;
       } else if (monthEndForecast.projectedEndBalance < 1000000) {
-        outDeductions.add(const HealthScoreDeduction(
-          reason: 'Dự báo số dư cuối tháng thấp (< 1.000.000đ)',
+        outDeductions.add(HealthScoreDeduction(
+          reason: AppLocalizations.tr('svc_fc_low_bal'),
           points: 10,
         ));
         score -= 10;
@@ -362,12 +368,15 @@ class FinancialForecastService {
 
     // 2. Ngân sách vượt / nguy cơ
     for (final b in budgetForecasts) {
+      final localizedCat =
+          CategoryLocalizationHelper.localizeName(b.categoryName);
       if (b.status == BudgetForecastStatus.exceeded) {
         final pts = exceededPenalty;
         categoryDeductionMap[b.categoryId] =
             (categoryDeductionMap[b.categoryId] ?? 0) + pts;
         outDeductions.add(HealthScoreDeduction(
-          reason: 'Ngân sách "${b.categoryName}" đã vượt hạn mức',
+          reason: AppLocalizations.tr('svc_fc_bud_exceeded',
+              params: {'cat': localizedCat}),
           points: pts,
           categoryId: b.categoryId,
         ));
@@ -376,7 +385,8 @@ class FinancialForecastService {
         categoryDeductionMap[b.categoryId] =
             (categoryDeductionMap[b.categoryId] ?? 0) + pts;
         outDeductions.add(HealthScoreDeduction(
-          reason: 'Ngân sách "${b.categoryName}" có nguy cơ vượt trong tháng',
+          reason: AppLocalizations.tr('svc_fc_bud_risk',
+              params: {'cat': localizedCat}),
           points: pts,
           categoryId: b.categoryId,
         ));
@@ -385,8 +395,10 @@ class FinancialForecastService {
         categoryDeductionMap[b.categoryId] =
             (categoryDeductionMap[b.categoryId] ?? 0) + pts;
         outDeductions.add(HealthScoreDeduction(
-          reason:
-              'Ngân sách "${b.categoryName}" gần chạm hạn mức (>=$nearLimitPct%)',
+          reason: AppLocalizations.tr('svc_fc_bud_warn', params: {
+            'cat': localizedCat,
+            'pct': '$nearLimitPct',
+          }),
           points: pts,
           categoryId: b.categoryId,
         ));
@@ -406,8 +418,10 @@ class FinancialForecastService {
         categoryDeductionMap[a.categoryId] =
             currentCategoryDeduction + actualPts;
         outDeductions.add(HealthScoreDeduction(
-          reason:
-              'Chi tiêu bất thường danh mục "${a.categoryName}" (${(a.excessRatio * 100 - 100).round()}% over)',
+          reason: AppLocalizations.tr('svc_fc_anom', params: {
+            'cat': CategoryLocalizationHelper.localizeName(a.categoryName),
+            'pct': '${(a.excessRatio * 100 - 100).round()}',
+          }),
           points: actualPts,
           categoryId: a.categoryId,
         ));
@@ -429,7 +443,7 @@ class FinancialForecastService {
         ));
         score -= pts;
       } else if (issue.category == IssueCategory.negativeCashflow &&
-          monthEndForecast.projectedEndBalance >= 0) {
+          !penalizedNegativeBalance) {
         // Chỉ phạt thêm nếu chưa bị phạt nặng ở mục âm số dư cuối tháng
         const pts = 12;
         outDeductions.add(HealthScoreDeduction(
@@ -448,6 +462,22 @@ class FinancialForecastService {
     }
 
     return score.clamp(0, 100).round();
+  }
+
+  /// Ánh xạ điểm sức khỏe tài chính (0-100) sang nhãn xếp hạng chuẩn duy nhất
+  /// dùng chung giữa `AiInsightScreen` và `FinancialExportService`.
+  String resolveHealthRating(int healthScore) {
+    if (healthScore >= 85) {
+      return AppLocalizations.tr('svc_fc_rate_excellent');
+    } else if (healthScore >= 70) {
+      return AppLocalizations.tr('svc_fc_rate_good');
+    } else if (healthScore >= 50) {
+      return AppLocalizations.tr('svc_exp_rate_watch');
+    } else if (healthScore >= 35) {
+      return AppLocalizations.tr('svc_exp_rate_risk');
+    } else {
+      return AppLocalizations.tr('svc_exp_rate_urgent');
+    }
   }
 
   /// 5. Tạo FinancialInsightSummary hoàn chỉnh tích hợp phân tích đa chiều
@@ -502,11 +532,16 @@ class FinancialForecastService {
     );
 
     // 1. Phân tích thu nhập & độ ổn định
+    // Chỉ truyền các tháng trước tháng liền kề ([m3, m2]) vào precedingMonthsTx
+    // vì lastMonthTx (m1) đã được truyền riêng — tránh đếm trùng m1 khi tính CV.
+    final earlierPrecedingMonthsTx = preceding3MonthsTx.length > 1
+        ? preceding3MonthsTx.sublist(0, preceding3MonthsTx.length - 1)
+        : const <List<AppTransaction>>[];
     final incomeAnalytics = analytics.computeIncomeAnalytics(
       currentMonthTx: currentMonthTx,
       lastMonthTx: lastMonthTx,
       categories: categories,
-      precedingMonthsTx: preceding3MonthsTx,
+      precedingMonthsTx: earlierPrecedingMonthsTx,
       fallbackMonthlyIncome: monthlyIncome,
     );
 
@@ -529,18 +564,7 @@ class FinancialForecastService {
           )
         : null;
 
-    // 4. Kế hoạch hành động cải thiện cụ thể tháng tới
-    final actionPlan = analytics.generateActionPlan(
-      currentMonthTx: currentMonthTx,
-      categories: categories,
-      budgetForecasts: budgetForecasts,
-      anomalies: anomalies,
-      issues: issues,
-      netCashFlow: cashFlowAnalytics.netCashFlow,
-      savingsShortfall: savingsGoalAssessment?.gapAmount ?? 0,
-    );
-
-    // 5. Trích xuất điểm mạnh tài chính
+    // 4. Trích xuất điểm mạnh tài chính
     final strengths = analytics.extractStrengths(
       cashFlow: cashFlowAnalytics,
       income: incomeAnalytics,
@@ -548,18 +572,7 @@ class FinancialForecastService {
       anomalies: anomalies,
     );
 
-    final String healthRating;
-    if (healthScore >= 85) {
-      healthRating = 'Xuất sắc';
-    } else if (healthScore >= 70) {
-      healthRating = 'Khá tốt';
-    } else if (healthScore >= 50) {
-      healthRating = 'Cần theo dõi';
-    } else if (healthScore >= 35) {
-      healthRating = 'Có rủi ro';
-    } else {
-      healthRating = 'Cần hành động ngay';
-    }
+    final healthRating = resolveHealthRating(healthScore);
 
     return FinancialInsightSummary(
       monthEndForecast: monthEnd,
@@ -573,7 +586,17 @@ class FinancialForecastService {
       incomeAnalytics: incomeAnalytics,
       cashFlowAnalytics: cashFlowAnalytics,
       savingsGoalAssessment: savingsGoalAssessment,
-      actionPlan: actionPlan,
+      // Tính lười (on-demand) vì UI hiện dùng MonthlyFinancialPlan thay thế;
+      // chỉ thực thi khi có nhánh fallback đọc `summary.actionPlan`.
+      actionPlanBuilder: () => analytics.generateActionPlan(
+        currentMonthTx: currentMonthTx,
+        categories: categories,
+        budgetForecasts: budgetForecasts,
+        anomalies: anomalies,
+        issues: issues,
+        netCashFlow: cashFlowAnalytics.netCashFlow,
+        savingsShortfall: savingsGoalAssessment?.gapAmount ?? 0,
+      ),
       referenceDate: today,
     );
   }

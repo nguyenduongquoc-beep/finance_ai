@@ -3,7 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import '../models/quick_template.dart';
 
 class TemplateService {
-  final FirebaseFirestore _db = FirebaseFirestore.instance;
+  FirebaseFirestore get _db => FirebaseFirestore.instance;
 
   /// Create a new quick template for the current user.
   Future<String> createTemplate({
@@ -50,5 +50,18 @@ class TemplateService {
         .map((snap) => snap.docs
             .map((d) => QuickTemplate.fromMap(d.data(), d.id))
             .toList());
+  }
+
+  /// Delete a quick template by its document ID.
+  Future<void> deleteTemplate(String templateId) async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (uid == null) throw Exception('User not authenticated');
+    if (templateId.trim().isEmpty) return;
+    await _db
+        .collection('users')
+        .doc(uid)
+        .collection('quickTemplates')
+        .doc(templateId)
+        .delete();
   }
 }

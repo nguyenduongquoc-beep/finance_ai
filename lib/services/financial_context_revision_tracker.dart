@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' hide Category;
 import '../models/budget_model.dart';
 import '../models/category_model.dart';
 import '../models/monthly_financial_plan.dart';
@@ -16,10 +17,15 @@ class FinancialContextRevisionTracker {
   /// bất kỳ thao tác ghi create/update/delete nào).
   static int _localMutationVersion = 0;
 
+  /// Notifier phát sự kiện mỗi khi dữ liệu tài chính thay đổi để UI (VD: AiInsightScreen)
+  /// tự động làm mới mà không cần thoát app hoặc bấm refresh thủ công.
+  static final ValueNotifier<int> versionNotifier = ValueNotifier<int>(0);
+
   static int get localMutationVersion => _localMutationVersion;
 
   static void notifyDataMutated() {
     _localMutationVersion++;
+    versionNotifier.value = _localMutationVersion;
   }
 
   /// Tính chữ ký tổng hợp (Deterministic Revision Signature) cho toàn bộ dữ liệu

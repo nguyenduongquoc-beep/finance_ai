@@ -7,6 +7,8 @@ import '../widgets/app_card.dart';
 import '../widgets/app_snackbar.dart';
 import '../widgets/app_text_field.dart';
 import 'auth/forgot_password_screen.dart';
+import 'auth/login_screen.dart';
+import '../l10n/app_localizations.dart';
 
 /// Màn hình Bảo mật tài khoản & Đổi mật khẩu
 ///
@@ -51,29 +53,27 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
     final confirm = _confirmPasswordController.text;
 
     if (current.isEmpty) {
-      AppSnackbar.show(context, 'Vui lòng nhập mật khẩu hiện tại',
-          isError: true);
+      AppSnackbar.show(context, context.tr('sec_err_cur_empty'), isError: true);
       return;
     }
     if (newPass.isEmpty) {
-      AppSnackbar.show(context, 'Vui lòng nhập mật khẩu mới', isError: true);
+      AppSnackbar.show(context, context.tr('sec_err_new_empty'), isError: true);
       return;
     }
     if (newPass.length < 6) {
-      AppSnackbar.show(context, 'Mật khẩu mới phải có ít nhất 6 ký tự',
-          isError: true);
+      AppSnackbar.show(context, context.tr('sec_err_new_short'), isError: true);
       return;
     }
     if (newPass == current) {
       AppSnackbar.show(
         context,
-        'Mật khẩu mới không được trùng với mật khẩu hiện tại',
+        context.tr('sec_err_new_same'),
         isError: true,
       );
       return;
     }
     if (newPass != confirm) {
-      AppSnackbar.show(context, 'Xác nhận mật khẩu không khớp', isError: true);
+      AppSnackbar.show(context, context.tr('sec_err_mismatch'), isError: true);
       return;
     }
 
@@ -89,7 +89,7 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
       _confirmPasswordController.clear();
 
       if (mounted) {
-        AppSnackbar.show(context, 'Cập nhật mật khẩu thành công!');
+        AppSnackbar.show(context, context.tr('sec_pwd_updated'));
         // Tự động đóng màn hình sau khi đổi thành công để bảo vệ phiên làm việc
         Future.delayed(const Duration(milliseconds: 600), () {
           if (mounted) Navigator.of(context).pop();
@@ -101,21 +101,22 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
         switch (e.code) {
           case 'wrong-password':
           case 'invalid-credential':
-            message = 'Mật khẩu hiện tại không chính xác';
+            message = context.tr('sec_err_wrong_pwd');
             break;
           case 'weak-password':
-            message =
-                'Mật khẩu mới quá yếu, vui lòng chọn mật khẩu phức tạp hơn';
+            message = context.tr('sec_err_weak_pwd');
             break;
           case 'requires-recent-login':
-            message =
-                'Phiên đăng nhập đã hết hạn. Vui lòng đăng xuất và đăng nhập lại trước khi đổi mật khẩu.';
+            message = context.tr('sec_err_recent_login');
             break;
           case 'network-request-failed':
-            message = 'Lỗi kết nối mạng. Vui lòng kiểm tra lại đường truyền.';
+            message = context.tr('sec_err_network');
             break;
           default:
-            message = 'Không thể đổi mật khẩu: ${e.message ?? e.code}';
+            message = context.tr(
+              'sec_err_change_failed',
+              params: {'error': e.message ?? e.code},
+            );
         }
         AppSnackbar.show(context, message, isError: true);
       }
@@ -123,7 +124,7 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
       if (mounted) {
         AppSnackbar.show(
           context,
-          'Đã xảy ra lỗi không xác định, vui lòng thử lại sau',
+          context.tr('sec_err_unknown'),
           isError: true,
         );
       }
@@ -142,7 +143,7 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
     return Scaffold(
       backgroundColor: context.appBackground,
       appBar: AppBar(
-        title: const Text('Bảo mật tài khoản'),
+        title: Text(context.tr('sec_title')),
         elevation: 0,
       ),
       body: SingleChildScrollView(
@@ -164,6 +165,10 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
 
             // 3. Quy chuẩn an toàn dữ liệu
             _buildSecurityNotice(),
+            const SizedBox(height: 24),
+
+            // 4. Vùng nguy hiểm: Xóa tài khoản
+            _buildDeleteAccountSection(isEmailPasswordUser),
             const SizedBox(height: 32),
           ],
         ),
@@ -174,7 +179,7 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
   /// Thẻ tổng quan phương thức đăng nhập
   Widget _buildAuthMethodCard(
       User? user, bool isGoogleOnly, bool isEmailPassword) {
-    final email = user?.email ?? 'Không có email';
+    final email = user?.email ?? context.tr('sec_no_email');
     return AppCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -206,7 +211,9 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      isGoogleOnly ? 'Tài khoản Google' : 'Email & Mật khẩu',
+                      isGoogleOnly
+                          ? context.tr('sec_provider_google')
+                          : context.tr('sec_provider_email'),
                       style: TextStyle(
                         fontSize: 15,
                         fontWeight: FontWeight.w600,
@@ -225,18 +232,27 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
                   ],
                 ),
               ),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                decoration: BoxDecoration(
-                  color: AppColors.incomeBackground,
-                  borderRadius: BorderRadius.circular(6),
-                ),
-                child: const Text(
-                  'Đã xác minh',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: AppColors.income,
+              const SizedBox(width: 8),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 120),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: AppColors.incomeBackground,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      context.tr('sec_verified'),
+                      maxLines: 1,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.income,
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -259,20 +275,21 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
               const Icon(Icons.info_outline_rounded,
                   color: AppColors.info, size: 20),
               const SizedBox(width: 8),
-              Text(
-                'Quản lý mật khẩu qua Google',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: FontWeight.w600,
-                  color: context.appTextPrimary,
+              Expanded(
+                child: Text(
+                  context.tr('sec_google_title'),
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    color: context.appTextPrimary,
+                  ),
                 ),
               ),
             ],
           ),
           const SizedBox(height: 12),
           Text(
-            'Tài khoản này được đăng nhập thông qua xác thực Google ($email). '
-            'Ứng dụng không lưu trữ mật khẩu riêng của bạn nhằm tuân thủ quy chuẩn bảo mật OAuth 2.0.',
+            context.tr('sec_google_desc', params: {'email': email}),
             style: TextStyle(
               fontSize: 13,
               height: 1.5,
@@ -294,7 +311,7 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    'Bảo vệ bởi xác thực đa lớp (2FA) của Google',
+                    context.tr('sec_google_2fa'),
                     style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.w500,
@@ -307,7 +324,7 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
           ),
           const SizedBox(height: 14),
           Text(
-            'Nếu muốn đổi mật khẩu hoặc xem cài đặt đăng nhập, bạn có thể truy cập trang Quản lý tài khoản Google của thiết bị.',
+            context.tr('sec_google_hint'),
             style: TextStyle(
               fontSize: 12,
               fontStyle: FontStyle.italic,
@@ -326,7 +343,7 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Đổi mật khẩu',
+            context.tr('sec_change_pwd_title'),
             style: TextStyle(
               fontSize: 16,
               fontWeight: FontWeight.w600,
@@ -335,7 +352,7 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
           ),
           const SizedBox(height: 6),
           Text(
-            'Vui lòng nhập mật khẩu hiện tại để xác thực trước khi thiết lập mật khẩu mới.',
+            context.tr('sec_change_pwd_sub'),
             style: TextStyle(
               fontSize: 12,
               color: context.appTextSecondary,
@@ -346,7 +363,7 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
           // Mật khẩu hiện tại
           AppTextField(
             controller: _currentPasswordController,
-            labelText: 'Mật khẩu hiện tại',
+            labelText: context.tr('sec_cur_pwd_label'),
             prefixIcon: Icons.lock_outline_rounded,
             obscureText: _obscureCurrent,
             suffixIcon: IconButton(
@@ -366,8 +383,8 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
           // Mật khẩu mới
           AppTextField(
             controller: _newPasswordController,
-            labelText: 'Mật khẩu mới',
-            hintText: 'Tối thiểu 6 ký tự',
+            labelText: context.tr('sec_new_pwd_label'),
+            hintText: context.tr('sec_min_6_chars'),
             prefixIcon: Icons.lock_reset_rounded,
             obscureText: _obscureNew,
             suffixIcon: IconButton(
@@ -394,13 +411,15 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
                     : context.appTextSecondary,
               ),
               const SizedBox(width: 4),
-              Text(
-                'Tối thiểu 6 ký tự',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: _newPasswordController.text.length >= 6
-                      ? AppColors.income
-                      : context.appTextSecondary,
+              Expanded(
+                child: Text(
+                  context.tr('sec_min_6_chars'),
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: _newPasswordController.text.length >= 6
+                        ? AppColors.income
+                        : context.appTextSecondary,
+                  ),
                 ),
               ),
             ],
@@ -410,8 +429,8 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
           // Xác nhận mật khẩu mới
           AppTextField(
             controller: _confirmPasswordController,
-            labelText: 'Xác nhận mật khẩu mới',
-            hintText: 'Nhập lại mật khẩu mới',
+            labelText: context.tr('sec_confirm_pwd_label'),
+            hintText: context.tr('sec_confirm_pwd_hint'),
             prefixIcon: Icons.lock_outline_rounded,
             obscureText: _obscureConfirm,
             suffixIcon: IconButton(
@@ -430,7 +449,9 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
 
           // Nút cập nhật mật khẩu
           AppButton(
-            text: 'Cập nhật mật khẩu',
+            text: context.tr('sec_update_pwd_btn'),
+            backgroundColor: const Color(0xFF161F28),
+            textColor: Colors.white,
             isLoading: _isUpdating,
             onPressed: _handleChangePassword,
           ),
@@ -448,9 +469,9 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
                   ),
                 );
               },
-              child: const Text(
-                'Quên mật khẩu hiện tại?',
-                style: TextStyle(
+              child: Text(
+                context.tr('sec_forgot_cur_pwd'),
+                style: const TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w500,
                   color: AppColors.primaryLight,
@@ -483,7 +504,7 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Bảo mật dữ liệu',
+                  context.tr('sec_notice_title'),
                   style: TextStyle(
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
@@ -492,8 +513,7 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  'Mọi thao tác thay đổi mật khẩu đều yêu cầu xác thực chính thức với máy chủ. '
-                  'Dữ liệu tài chính của bạn được mã hóa an toàn trên hệ thống đám mây.',
+                  context.tr('sec_notice_desc'),
                   style: TextStyle(
                     fontSize: 12,
                     height: 1.4,
@@ -506,5 +526,200 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
         ],
       ),
     );
+  }
+
+  /// Vùng nguy hiểm: Xóa tài khoản
+  Widget _buildDeleteAccountSection(bool isEmailPasswordUser) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: AppColors.expense.withAlpha(15),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.expense.withAlpha(50)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Row(
+            children: [
+              Icon(
+                Icons.delete_forever_rounded,
+                color: AppColors.expense,
+                size: 20,
+              ),
+              SizedBox(width: 8),
+              Text(
+                'Xóa tài khoản',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w700,
+                  color: AppColors.expense,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            'Sau khi xóa, tài khoản và toàn bộ dữ liệu tài chính của bạn (ví, giao dịch, ngân sách, mục tiêu) sẽ bị xóa vĩnh viễn và không thể khôi phục.',
+            style: TextStyle(
+              fontSize: 12,
+              height: 1.4,
+              color: context.appTextSecondary,
+            ),
+          ),
+          const SizedBox(height: 14),
+          SizedBox(
+            width: double.infinity,
+            child: OutlinedButton.icon(
+              style: OutlinedButton.styleFrom(
+                foregroundColor: AppColors.expense,
+                side: const BorderSide(color: AppColors.expense),
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              onPressed: _isUpdating
+                  ? null
+                  : () => _handleDeleteAccount(isEmailPasswordUser),
+              icon: const Icon(Icons.delete_outline_rounded, size: 18),
+              label: const Text(
+                'Xóa vĩnh viễn tài khoản',
+                style: TextStyle(fontWeight: FontWeight.w600),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _handleDeleteAccount(bool isEmailPasswordUser) async {
+    final passwordCtrl = TextEditingController();
+    bool obscureConfirmPass = true;
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Row(
+            children: [
+              Icon(
+                Icons.warning_amber_rounded,
+                color: AppColors.expense,
+                size: 24,
+              ),
+              SizedBox(width: 8),
+              Expanded(child: Text('Xác nhận Xóa tài khoản')),
+            ],
+          ),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'CẢNH BÁO NGUY HIỂM:\n\n'
+                  '• Tài khoản của bạn sẽ bị xóa vĩnh viễn khỏi hệ thống.\n'
+                  '• Toàn bộ dữ liệu hồ sơ, ví, giao dịch, ngân sách, mục tiêu sẽ được dọn dẹp sạch sẽ.\n'
+                  '• Thao tác này KHÔNG THỂ HOÀN TÁC.',
+                  style: TextStyle(
+                    fontSize: 13,
+                    height: 1.45,
+                    color: AppColors.expense,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                if (isEmailPasswordUser) ...[
+                  const SizedBox(height: 16),
+                  const Text(
+                    'Vui lòng nhập mật khẩu hiện tại để xác thực:',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: passwordCtrl,
+                    obscureText: obscureConfirmPass,
+                    decoration: InputDecoration(
+                      labelText: 'Mật khẩu hiện tại',
+                      prefixIcon:
+                          const Icon(Icons.lock_outline_rounded, size: 20),
+                      suffixIcon: IconButton(
+                        icon: Icon(
+                          obscureConfirmPass
+                              ? Icons.visibility_off_outlined
+                              : Icons.visibility_outlined,
+                          size: 20,
+                        ),
+                        onPressed: () => setDialogState(
+                            () => obscureConfirmPass = !obscureConfirmPass),
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop(false),
+              child: const Text('Hủy'),
+            ),
+            FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: AppColors.expense,
+              ),
+              onPressed: () {
+                if (isEmailPasswordUser && passwordCtrl.text.isEmpty) {
+                  return;
+                }
+                Navigator.of(ctx).pop(true);
+              },
+              icon: const Icon(Icons.delete_forever_rounded, size: 16),
+              label: const Text('Xóa Vĩnh Viễn'),
+            ),
+          ],
+        ),
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isUpdating = true);
+    try {
+      await _authService.deleteCurrentUser(
+        currentPassword: isEmailPasswordUser ? passwordCtrl.text : null,
+      );
+
+      if (!mounted) return;
+      AppSnackbar.show(context, 'Tài khoản của bạn đã được xóa thành công.');
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(builder: (_) => const LoginScreen()),
+        (route) => false,
+      );
+    } on FirebaseAuthException catch (e) {
+      if (!mounted) return;
+      String message = 'Không thể xóa tài khoản.';
+      if (e.code == 'wrong-password' || e.code == 'invalid-credential') {
+        message = 'Mật khẩu hiện tại không chính xác.';
+      } else if (e.code == 'requires-recent-login') {
+        message =
+            'Yêu cầu bảo mật: Vui lòng đăng nhập lại trước khi thực hiện xóa tài khoản.';
+      }
+      AppSnackbar.show(context, message, isError: true);
+    } catch (e) {
+      if (!mounted) return;
+      AppSnackbar.show(
+        context,
+        'Không thể xóa tài khoản. Vui lòng thử lại sau.',
+        isError: true,
+      );
+    } finally {
+      if (mounted) setState(() => _isUpdating = false);
+    }
   }
 }

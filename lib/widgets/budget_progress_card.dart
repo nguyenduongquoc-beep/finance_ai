@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:percent_indicator/percent_indicator.dart';
+import '../l10n/app_localizations.dart';
 import '../models/budget_model.dart';
 import '../models/category_model.dart';
+import '../utils/category_localization_helper.dart';
 import '../utils/constants.dart';
 import '../utils/formatters.dart';
 import 'app_card.dart';
@@ -62,10 +64,10 @@ class BudgetProgressCard extends StatelessWidget {
             : AppColors.income;
 
     final String statusLabel = isOver
-        ? 'Vượt hạn mức'
+        ? context.tr('budget_card_over')
         : isNear
-            ? 'Sắp hết'
-            : 'An toàn';
+            ? context.tr('budget_card_near')
+            : context.tr('budget_card_safe');
 
     final Color cardBorderColor = isOver
         ? AppColors.expense.withAlpha(100)
@@ -103,7 +105,11 @@ class BudgetProgressCard extends StatelessWidget {
                       children: [
                         Flexible(
                           child: Text(
-                            category?.name ?? 'Danh mục',
+                            category != null
+                                ? CategoryLocalizationHelper
+                                    .localizeNameWithContext(
+                                        context, category!.name)
+                                : context.tr('budget_card_default_category'),
                             style: TextStyle(
                               fontWeight: FontWeight.w600,
                               fontSize: 15,
@@ -123,9 +129,9 @@ class BudgetProgressCard extends StatelessWidget {
                               color: AppColors.expenseBackground,
                               borderRadius: BorderRadius.circular(6),
                             ),
-                            child: const Text(
-                              'Đã bị xóa',
-                              style: TextStyle(
+                            child: Text(
+                              context.tr('budget_card_deleted'),
+                              style: const TextStyle(
                                 fontSize: 11,
                                 color: AppColors.expense,
                                 fontWeight: FontWeight.w600,
@@ -137,7 +143,15 @@ class BudgetProgressCard extends StatelessWidget {
                     ),
                     const SizedBox(height: 3),
                     Text(
-                      'Hạn mức ${AppFormatters.compactCurrency(budget.limit, unit: '₫')}',
+                      context.tr(
+                        'budget_card_limit',
+                        params: {
+                          'amount': AppFormatters.compactCurrency(
+                            budget.limit,
+                            unit: '₫',
+                          ),
+                        },
+                      ),
                       style: TextStyle(fontSize: 12, color: context.appTextSecondary),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -146,18 +160,26 @@ class BudgetProgressCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-                decoration: BoxDecoration(
-                  color: statusColor.withAlpha(context.isDarkMode ? 45 : 26),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: Text(
-                  statusLabel,
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: statusColor,
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 135),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: statusColor.withAlpha(context.isDarkMode ? 45 : 26),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      statusLabel,
+                      maxLines: 1,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w700,
+                        color: statusColor,
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -220,8 +242,24 @@ class BudgetProgressCard extends StatelessWidget {
               Expanded(
                 child: Text(
                   isOver
-                      ? 'Đã vượt ${AppFormatters.compactCurrency(spentAmount - budget.limit, unit: '₫')}'
-                      : 'Còn lại ${AppFormatters.compactCurrency(remaining, unit: '₫')}',
+                      ? context.tr(
+                          'budget_card_over_by',
+                          params: {
+                            'amount': AppFormatters.compactCurrency(
+                              spentAmount - budget.limit,
+                              unit: '₫',
+                            ),
+                          },
+                        )
+                      : context.tr(
+                          'budget_card_remaining',
+                          params: {
+                            'amount': AppFormatters.compactCurrency(
+                              remaining,
+                              unit: '₫',
+                            ),
+                          },
+                        ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:finance_ai_app/models/saving_goal_model.dart';
+import 'package:finance_ai_app/screens/management/saving_goal_screen.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 void main() {
@@ -76,6 +77,73 @@ void main() {
       expect(goal.percentComplete, 1.0);
       expect(goal.monthlyRequired, 0.0);
       expect(goal.dailyRequired, 0.0);
+    });
+
+    test('5. SavingGoalDurationHelper calculates clamped dates and custom month/year durations accurately', () {
+      expect(
+        SavingGoalDurationHelper.addMonthsClamped(DateTime(2026, 1, 31), 1),
+        DateTime(2026, 2, 28),
+      );
+      expect(
+        SavingGoalDurationHelper.addMonthsClamped(DateTime(2026, 11, 16), 18),
+        DateTime(2028, 5, 16),
+      );
+      expect(
+        SavingGoalDurationHelper.monthsBetweenForTargetDate(
+          DateTime(2026, 11, 16),
+          DateTime(2028, 5, 16),
+        ),
+        18,
+      );
+      expect(
+        SavingGoalDurationHelper.monthsBetweenForTargetDate(
+          DateTime(2026, 11, 16),
+          DateTime(2026, 11, 20),
+        ),
+        1,
+      );
+      expect(
+        SavingGoalDurationHelper.monthsBetweenForTargetDate(
+          DateTime(2026, 11, 16),
+          DateTime(2070, 1, 1),
+        ),
+        SavingGoalDurationHelper.maxMonths,
+      );
+    });
+
+    testWidgets('6. OutlinedButton in Row with app theme does not throw infinite width constraint exception', (tester) async {
+      final theme = ThemeData(
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            minimumSize: const Size(64, 48),
+          ),
+        ),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: theme,
+          home: Scaffold(
+            body: Row(
+              children: [
+                const Expanded(child: Text('Summary')),
+                OutlinedButton.icon(
+                  onPressed: () {},
+                  icon: const Icon(Icons.calendar_month_rounded, size: 16),
+                  label: const Text('Pick date'),
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: Size.zero,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+
+      expect(tester.takeException(), isNull);
+      expect(find.text('Pick date'), findsOneWidget);
     });
   });
 }

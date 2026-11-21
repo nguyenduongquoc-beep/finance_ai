@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import '../l10n/app_localizations.dart';
 import '../utils/constants.dart';
 import '../utils/formatters.dart';
 
@@ -129,7 +130,8 @@ class _CustomNumpadState extends State<CustomNumpad> {
                 // Khung hiển thị số tiền lớn (Chống tràn viền tự động với FittedBox)
                 Container(
                   width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                   decoration: BoxDecoration(
                     color: context.appInputFill,
                     borderRadius: BorderRadius.circular(14),
@@ -172,7 +174,7 @@ class _CustomNumpadState extends State<CustomNumpad> {
                       if (_raw.isNotEmpty) ...[
                         const SizedBox(width: 8),
                         IconButton(
-                          tooltip: 'Xóa toàn bộ (C)',
+                          tooltip: context.tr('numpad_clear_tooltip'),
                           icon: Icon(Icons.cancel_rounded,
                               color: context.appTextSecondary, size: 20),
                           padding: EdgeInsets.zero,
@@ -188,7 +190,7 @@ class _CustomNumpadState extends State<CustomNumpad> {
                 ),
                 const SizedBox(height: 8),
 
-                // Hàng nút tiền nhanh (+50k, +100k, +500k, +1Tr)
+                // Hàng nút tiền nhanh (+50.000, +100.000, +500.000, +1.000.000, +5.000.000)
                 SingleChildScrollView(
                   scrollDirection: Axis.horizontal,
                   child: Row(
@@ -281,7 +283,12 @@ class _CustomNumpadState extends State<CustomNumpad> {
                             ),
                           ),
                           child: Text(
-                            value > 0 ? 'Xác nhận: $_display ₫' : 'Xác nhận',
+                            value > 0
+                                ? context.tr(
+                                    'numpad_confirm_amount',
+                                    params: {'amount': _display},
+                                  )
+                                : context.tr('common_confirm'),
                             style: const TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.w600,

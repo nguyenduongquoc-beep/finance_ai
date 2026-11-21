@@ -30,7 +30,7 @@ service cloud.firestore {
       return isSignedIn() &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
         currentUserDoc().data.get('status', '') == 'active' &&
-        (request.auth.token.admin == true ||
+        (request.auth.token.get('admin', false) == true ||
          currentUserDoc().data.get('role', 'user') == 'admin');
     }
 
@@ -194,118 +194,655 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    // 5. Cấu hình AI & Quy tắc Tài chính: Tách biệt nghiêm ngặt Draft và Published
-    // - Bản Published: Người dùng đã đăng nhập chỉ được đọc; chỉ Cloud Function (Admin SDK) được ghi.
+    // 5. Khóa tuyệt đối các collection Quản trị AI & Tri thức đã gỡ bỏ
+    //    (Mobile App chạy hoàn toàn bằng hằng số chuẩn trong mã nguồn; bảo vệ mọi dữ liệu tồn dư)
     match /published_configs/{configType} {
-      allow read: if isSignedIn();
-      allow write: if false;
+      allow read, write: if false;
     }
 
     match /financial_knowledge_published/{articleId} {
-      allow read: if isSignedIn();
-      allow write: if false;
+      allow read, write: if false;
     }
 
-    // - Bản Draft: Chỉ Admin mới được đọc/ghi; User hoàn toàn không đọc được nội dung nháp.
-    //   Giới hạn chặt các trường được phép lưu từ Client để ngăn tự ghi trạng thái xác minh Sandbox.
     match /draft_configs/{configType} {
-      allow read: if isAdmin();
-      allow create, update: if isAdmin()
-        && request.resource.data.keys().hasAll([
-          'configType',
-          'draftPayload',
-          'draftHash',
-          'updatedAt',
-          'updatedBy'
-        ])
-        && request.resource.data.keys().hasOnly([
-          'configType',
-          'draftPayload',
-          'draftHash',
-          'updatedAt',
-          'updatedBy',
-          'changeNote'
-        ])
-        && request.resource.data.configType == configType;
-      allow delete: if isAdmin();
+      allow read, write: if false;
     }
 
-    // - Kết quả xác minh AI Sandbox: Chỉ Admin được đọc; chỉ Cloud Function được ghi sau khi xác thực Hash.
     match /_sandbox_verifications/{configType} {
-      allow read: if isAdmin();
-      allow write: if false;
+      allow read, write: if false;
     }
 
     match /financial_knowledge_drafts/{articleId} {
-      allow read, delete: if isAdmin();
-      allow create, update: if isAdmin()
-        && request.resource.data.keys().hasAll([
-          'articleId',
-          'title',
-          'topic',
-          'triggerCondition',
-          'priority',
-          'summaryForUser',
-          'aiGroundingSnippet',
-          'isActive'
-        ])
-        && request.resource.data.keys().hasOnly([
-          'articleId',
-          'title',
-          'topic',
-          'triggerCondition',
-          'priority',
-          'summaryForUser',
-          'aiGroundingSnippet',
-          'suggestedPrompts',
-          'isActive',
-          'updatedAt',
-          'updatedBy',
-          'lastPublishedVersion',
-          'lastPublishedAt',
-          'lastPublishedBy'
-        ])
-        && request.resource.data.articleId == articleId
-        && request.resource.data.title is string
-        && request.resource.data.title.size() >= 3
-        && request.resource.data.title.size() <= 120
-        && request.resource.data.topic in ['budget_rule', 'saving_strategy', 'spending_control', 'crisis_recovery']
-        && request.resource.data.triggerCondition in ['always', 'low_saving_rate', 'essential_deficit', 'variable_income', 'budget_overrun', 'infeasible_goal']
-        && request.resource.data.priority is int
-        && request.resource.data.priority >= 1
-        && request.resource.data.priority <= 10
-        && request.resource.data.summaryForUser is string
-        && request.resource.data.summaryForUser.size() >= 1
-        && request.resource.data.summaryForUser.size() <= 250
-        && request.resource.data.aiGroundingSnippet is string
-        && request.resource.data.aiGroundingSnippet.size() >= 1
-        && request.resource.data.aiGroundingSnippet.size() <= 300
-        && request.resource.data.isActive is bool;
+      allow read, write: if false;
     }
 
-    // - Lịch sử phiên bản cấu hình (Immutable Snapshots): Chỉ Admin được đọc; chỉ Cloud Function tạo mới.
     match /config_versions/{versionId} {
-      allow read: if isAdmin();
-      allow write: if false;
+      allow read, write: if false;
     }
 
-    // 6. Phản hồi chất lượng AI từ Người dùng (AI Feedback Reports)
-    // - Thống nhất cổng tiếp nhận duy nhất qua Cloud Function `submitAiFeedback`
-    //   và cổng xử lý duy nhất qua Cloud Function `adminResolveAiFeedback`.
-    // - Chặn Client trực tiếp tạo mới hoặc cập nhật để bảo đảm 100% tính nhất quán
-    //   giữa chế độ anonymous / pseudonymous, ghi nhật ký `admin_logs` và gửi thông báo.
     match /ai_feedback_reports/{reportId} {
-      allow read: if isAdmin();
-      allow create, update, delete: if false;
+      allow read, write: if false;
     }
 
-    // 7. Bảng ánh xạ giả danh nội bộ & Kho bí mật nội bộ phía Server (Chỉ Cloud Function Admin SDK truy cập)
     match /_feedback_notification_links/{reportId} {
       allow read, write: if false;
     }
 
     match /_server_secrets/{secretId} {
       allow read, write: if false;
+    }
+
+    match /_user_deletion_markers/{uid} {
+      allow read, write: if false;
+    }
+
+    // 8. Trung tâm Tư vấn & Hỗ trợ Người dùng (User Support & Financial Advisory - Spark)
+    // - Người dùng chỉ đọc/tạo yêu cầu của chính mình, không tự nâng mức ưu tiên,
+    //   không giả mạo vai trò Admin, không sửa/xóa lịch sử tin nhắn, chỉ đánh giá khi `resolved`
+    //   (tối đa 1 lần sửa) và không thao tác ghi trên yêu cầu đã `closed`.
+    // - Admin đang hoạt động (`isAdmin()`) tiếp nhận, điều chỉnh ưu tiên, phản hồi, đánh dấu giải quyết
+    //   và đóng chuẩn (`resolved -> closed`) hoặc đóng ngoại lệ (`resolvedAt == null`),
+    //   không sửa nội dung gốc, thông tin kỹ thuật, tham chiếu hay đánh giá của người dùng.
+    // - Đồng bộ 2 chiều `WriteBatch` bằng `lastMessageId` + `!exists()` + `existsAfter()` + `getAfter()`
+    //   giữa `support_tickets/{ticketId}` và `messages/{messageId}` (tối đa 7 document access/batch < giới hạn 20).
+    function isValidSupportCategory(cat) {
+      return cat in ['app_guide', 'bug_report', 'financial_advisory', 'other'];
+    }
+
+    function isValidSupportStatus(st) {
+      return st in ['new', 'in_progress', 'waiting_for_user', 'replied', 'resolved', 'closed'];
+    }
+
+    function isValidSupportPriority(pr) {
+      return pr in ['low', 'normal', 'high', 'urgent'];
+    }
+
+    function isValidSupportUserImpact(imp) {
+      return imp in ['low', 'normal', 'high', 'blocking'];
+    }
+
+    function isValidUnresolvedCloseReason(reason) {
+      return reason in ['duplicate', 'out_of_scope', 'no_user_response', 'invalid_request'];
+    }
+
+    function isSupportText(val, minLen, maxLen) {
+      return val is string && val.size() >= minLen && val.size() <= maxLen;
+    }
+
+    function isOptionalSupportText(val, maxLen) {
+      return val == null || (val is string && val.size() <= maxLen);
+    }
+
+    function isValidSupportTechnicalInfo(info) {
+      return info is map
+        && info.keys().hasAll(['appVersion', 'platform', 'capturedAt'])
+        && info.keys().hasOnly(['appVersion', 'platform', 'osVersion', 'capturedAt'])
+        && isSupportText(info.appVersion, 1, 32)
+        && isSupportText(info.platform, 1, 32)
+        && (!('osVersion' in info) || isOptionalSupportText(info.osVersion, 100))
+        && isSupportText(info.capturedAt, 10, 40);
+    }
+
+    function isUserSupportTransitionValid(prevStatus, nextStatus) {
+      return (prevStatus in ['waiting_for_user', 'replied', 'resolved'] && nextStatus == 'in_progress')
+        || (prevStatus == 'new' && nextStatus == 'new')
+        || (prevStatus == 'in_progress' && nextStatus == 'in_progress');
+    }
+
+    function isSupportRatingUnchanged() {
+      return request.resource.data.get('ratingScore', null) == resource.data.get('ratingScore', null)
+        && request.resource.data.get('ratingComment', null) == resource.data.get('ratingComment', null)
+        && request.resource.data.get('ratedAt', null) == resource.data.get('ratedAt', null)
+        && request.resource.data.get('ratingUpdatedAt', null) == resource.data.get('ratingUpdatedAt', null)
+        && request.resource.data.get('ratingEditCount', 0) == resource.data.get('ratingEditCount', 0);
+    }
+
+    function hasSynchronizedNewSupportMessage(ticketId, expectedRole, expectedType) {
+      return isSupportText(request.resource.data.get('lastMessageId', ''), 1, 128)
+        && !exists(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId))
+        && existsAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId))
+        && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId)).data.messageId == request.resource.data.lastMessageId
+        && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId)).data.senderId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId)).data.senderRole == expectedRole
+        && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId)).data.messageType == expectedType
+        && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId)).data.createdAt == request.resource.data.lastMessageAt;
+    }
+
+    match /support_tickets/{ticketId} {
+      allow get: if (isActiveUser()
+          && (resource == null || resource.data.userId == request.auth.uid))
+        || isAdmin();
+      allow list: if (isActiveUser() && resource.data.userId == request.auth.uid)
+        || isAdmin();
+
+      allow create: if isActiveUser()
+        && request.resource.data.keys().hasAll([
+          'ticketId',
+          'ticketCode',
+          'userId',
+          'userName',
+          'userEmail',
+          'category',
+          'title',
+          'description',
+          'status',
+          'priority',
+          'assignedAdminId',
+          'assignedAdminName',
+          'lastMessageId',
+          'lastMessagePreview',
+          'lastMessageSenderRole',
+          'lastMessageAt',
+          'unreadByAdmin',
+          'unreadByUser',
+          'createdAt',
+          'updatedAt',
+          'resolvedAt',
+          'closedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'ticketId',
+          'ticketCode',
+          'userId',
+          'userName',
+          'userEmail',
+          'category',
+          'title',
+          'description',
+          'sharedContext',
+          'status',
+          'priority',
+          'userImpact',
+          'technicalInfo',
+          'relatedTicketId',
+          'relatedTicketCode',
+          'assignedAdminId',
+          'assignedAdminName',
+          'lastMessageId',
+          'lastMessagePreview',
+          'lastMessageSenderRole',
+          'lastMessageAt',
+          'unreadByAdmin',
+          'unreadByUser',
+          'createdAt',
+          'updatedAt',
+          'claimedAt',
+          'firstAdminResponseAt',
+          'resolvedAt',
+          'resolvedByRole',
+          'closedAt',
+          'closeReason',
+          'ratingScore',
+          'ratingComment',
+          'ratedAt',
+          'ratingUpdatedAt',
+          'ratingEditCount'
+        ])
+        && request.resource.data.ticketId == ticketId
+        && isSupportText(request.resource.data.ticketCode, 4, 32)
+        && request.resource.data.userId == request.auth.uid
+        && isOptionalSupportText(request.resource.data.userName, 80)
+        && isOptionalSupportText(request.resource.data.userEmail, 120)
+        && isValidSupportCategory(request.resource.data.category)
+        && isSupportText(request.resource.data.title, 5, 120)
+        && isSupportText(request.resource.data.description, 10, 2000)
+        && (!('sharedContext' in request.resource.data)
+            || isOptionalSupportText(request.resource.data.sharedContext, 800))
+        && request.resource.data.status == 'new'
+        // User không tự gán mức ưu tiên cuối cùng (luôn khởi tạo là normal)
+        && request.resource.data.priority == 'normal'
+        && (!('userImpact' in request.resource.data)
+            || request.resource.data.userImpact == null
+            || isValidSupportUserImpact(request.resource.data.userImpact))
+        // Thông tin kỹ thuật cơ bản chỉ cho phép trên nhóm Báo lỗi hoặc sự cố
+        && (!('technicalInfo' in request.resource.data)
+            || request.resource.data.technicalInfo == null
+            || (request.resource.data.category == 'bug_report'
+                && isValidSupportTechnicalInfo(request.resource.data.technicalInfo)))
+        // Tham chiếu ticket trước đó (nếu có) phải thuộc chính User và đã closed
+        && (
+          (request.resource.data.get('relatedTicketId', null) == null
+            && request.resource.data.get('relatedTicketCode', null) == null)
+          ||
+          (
+            isSupportText(request.resource.data.get('relatedTicketId', ''), 1, 64)
+            && isSupportText(request.resource.data.get('relatedTicketCode', ''), 4, 32)
+            && exists(/databases/$(database)/documents/support_tickets/$(request.resource.data.relatedTicketId))
+            && get(/databases/$(database)/documents/support_tickets/$(request.resource.data.relatedTicketId)).data.userId == request.auth.uid
+            && get(/databases/$(database)/documents/support_tickets/$(request.resource.data.relatedTicketId)).data.status == 'closed'
+            && get(/databases/$(database)/documents/support_tickets/$(request.resource.data.relatedTicketId)).data.ticketCode == request.resource.data.relatedTicketCode
+          )
+        )
+        && request.resource.data.assignedAdminId == null
+        && request.resource.data.assignedAdminName == null
+        && isSupportText(request.resource.data.lastMessagePreview, 1, 200)
+        && request.resource.data.lastMessageSenderRole == 'user'
+        && isSupportText(request.resource.data.lastMessageAt, 10, 40)
+        && request.resource.data.unreadByAdmin == true
+        && request.resource.data.unreadByUser == false
+        && isSupportText(request.resource.data.createdAt, 10, 40)
+        && isSupportText(request.resource.data.updatedAt, 10, 40)
+        && request.resource.data.get('claimedAt', null) == null
+        && request.resource.data.get('firstAdminResponseAt', null) == null
+        && request.resource.data.resolvedAt == null
+        && request.resource.data.get('resolvedByRole', null) == null
+        && request.resource.data.closedAt == null
+        && request.resource.data.get('closeReason', null) == null
+        && request.resource.data.get('ratingScore', null) == null
+        && request.resource.data.get('ratingComment', null) == null
+        && request.resource.data.get('ratedAt', null) == null
+        && request.resource.data.get('ratingUpdatedAt', null) == null
+        && request.resource.data.get('ratingEditCount', 0) == 0
+        && hasSynchronizedNewSupportMessage(ticketId, 'user', 'text');
+
+      allow update: if (
+        // (a) Chủ yêu cầu (User đang hoạt động)
+        isActiveUser()
+        && resource.data.userId == request.auth.uid
+        && request.resource.data.ticketId == resource.data.ticketId
+        && request.resource.data.ticketCode == resource.data.ticketCode
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.userName == resource.data.userName
+        && request.resource.data.userEmail == resource.data.userEmail
+        && request.resource.data.category == resource.data.category
+        && request.resource.data.title == resource.data.title
+        && request.resource.data.description == resource.data.description
+        && request.resource.data.get('sharedContext', null) == resource.data.get('sharedContext', null)
+        && request.resource.data.get('priority', 'normal') == resource.data.get('priority', 'normal')
+        && request.resource.data.get('userImpact', null) == resource.data.get('userImpact', null)
+        && request.resource.data.get('technicalInfo', null) == resource.data.get('technicalInfo', null)
+        && request.resource.data.get('relatedTicketId', null) == resource.data.get('relatedTicketId', null)
+        && request.resource.data.get('relatedTicketCode', null) == resource.data.get('relatedTicketCode', null)
+        && request.resource.data.assignedAdminId == resource.data.assignedAdminId
+        && request.resource.data.assignedAdminName == resource.data.assignedAdminName
+        && request.resource.data.get('claimedAt', null) == resource.data.get('claimedAt', null)
+        && request.resource.data.get('firstAdminResponseAt', null) == resource.data.get('firstAdminResponseAt', null)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.closedAt == resource.data.closedAt
+        && request.resource.data.get('closeReason', null) == resource.data.get('closeReason', null)
+        && (
+          // Nhánh U1: Đánh dấu đã đọc (không tự đổi trạng thái xử lý)
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['unreadByUser'])
+            && request.resource.data.unreadByUser == false
+          )
+          ||
+          // Nhánh U2: Gửi thêm tin nhắn mới khi yêu cầu chưa đóng (đồng bộ 2 chiều WriteBatch)
+          (
+            resource.data.status != 'closed'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'status',
+              'lastMessageId',
+              'lastMessagePreview',
+              'lastMessageSenderRole',
+              'lastMessageAt',
+              'unreadByAdmin',
+              'unreadByUser',
+              'updatedAt',
+              'resolvedAt',
+              'resolvedByRole'
+            ])
+            && isUserSupportTransitionValid(resource.data.status, request.resource.data.status)
+            // Nếu nhắn tiếp từ `resolved` -> `in_progress`, bắt buộc xóa mốc giải quyết nhưng giữ đánh giá lịch sử
+            && (
+              (resource.data.status == 'resolved'
+                && request.resource.data.resolvedAt == null
+                && request.resource.data.get('resolvedByRole', null) == null)
+              ||
+              (resource.data.status != 'resolved'
+                && request.resource.data.resolvedAt == resource.data.resolvedAt
+                && request.resource.data.get('resolvedByRole', null) == resource.data.get('resolvedByRole', null))
+            )
+            && isSupportText(request.resource.data.lastMessagePreview, 1, 200)
+            && request.resource.data.lastMessageSenderRole == 'user'
+            && isSupportText(request.resource.data.lastMessageAt, 10, 40)
+            && isSupportText(request.resource.data.updatedAt, 10, 40)
+            && request.resource.data.unreadByAdmin == true
+            && request.resource.data.unreadByUser == false
+            && isSupportRatingUnchanged()
+            && hasSynchronizedNewSupportMessage(ticketId, 'user', 'text')
+          )
+          ||
+          // Nhánh U3: User chủ động xác nhận vấn đề đã được giải quyết (`in_progress | waiting_for_user | replied` -> `resolved`)
+          (
+            resource.data.status in ['in_progress', 'waiting_for_user', 'replied']
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'status',
+              'resolvedAt',
+              'resolvedByRole',
+              'lastMessageId',
+              'lastMessagePreview',
+              'lastMessageSenderRole',
+              'lastMessageAt',
+              'unreadByAdmin',
+              'unreadByUser',
+              'updatedAt'
+            ])
+            && request.resource.data.status == 'resolved'
+            && isSupportText(request.resource.data.resolvedAt, 10, 40)
+            && request.resource.data.resolvedAt == request.resource.data.lastMessageAt
+            && request.resource.data.resolvedByRole == 'user'
+            && isSupportText(request.resource.data.lastMessagePreview, 1, 200)
+            && request.resource.data.lastMessageSenderRole == 'user'
+            && isSupportText(request.resource.data.lastMessageAt, 10, 40)
+            && isSupportText(request.resource.data.updatedAt, 10, 40)
+            && request.resource.data.unreadByAdmin == true
+            && request.resource.data.unreadByUser == false
+            && isSupportRatingUnchanged()
+            && hasSynchronizedNewSupportMessage(ticketId, 'user', 'status_change')
+          )
+          ||
+          // Nhánh U4: User gửi hoặc chỉnh sửa đánh giá tối đa 1 lần — CHỈ khi trạng thái là `resolved`
+          (
+            resource.data.status == 'resolved'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'ratingScore',
+              'ratingComment',
+              'ratedAt',
+              'ratingUpdatedAt',
+              'ratingEditCount'
+            ])
+            && request.resource.data.ratingScore is int
+            && request.resource.data.ratingScore >= 1
+            && request.resource.data.ratingScore <= 5
+            && isOptionalSupportText(request.resource.data.get('ratingComment', null), 500)
+            && isSupportText(request.resource.data.ratedAt, 10, 40)
+            && isSupportText(request.resource.data.ratingUpdatedAt, 10, 40)
+            && (
+              // Đánh giá lần đầu
+              (
+                resource.data.get('ratingScore', null) == null
+                && request.resource.data.ratingEditCount == 0
+                && request.resource.data.ratingUpdatedAt == request.resource.data.ratedAt
+              )
+              ||
+              // Chỉnh sửa 1 lần duy nhất (giữ nguyên mốc ratedAt ban đầu)
+              (
+                resource.data.get('ratingScore', null) != null
+                && resource.data.get('ratingEditCount', 0) == 0
+                && request.resource.data.ratingEditCount == 1
+                && request.resource.data.ratedAt == resource.data.get('ratedAt', '')
+              )
+            )
+          )
+        )
+      ) || (
+        // (b) Quản trị viên đang hoạt động (`isAdmin()`)
+        isAdmin()
+        && request.resource.data.ticketId == resource.data.ticketId
+        && request.resource.data.ticketCode == resource.data.ticketCode
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.userName == resource.data.userName
+        && request.resource.data.userEmail == resource.data.userEmail
+        && request.resource.data.category == resource.data.category
+        && request.resource.data.title == resource.data.title
+        && request.resource.data.description == resource.data.description
+        && request.resource.data.get('sharedContext', null) == resource.data.get('sharedContext', null)
+        && request.resource.data.get('userImpact', null) == resource.data.get('userImpact', null)
+        && request.resource.data.get('technicalInfo', null) == resource.data.get('technicalInfo', null)
+        && request.resource.data.get('relatedTicketId', null) == resource.data.get('relatedTicketId', null)
+        && request.resource.data.get('relatedTicketCode', null) == resource.data.get('relatedTicketCode', null)
+        && request.resource.data.createdAt == resource.data.createdAt
+        && isSupportRatingUnchanged()
+        && (
+          // Nhánh A1: Admin đánh dấu đã đọc (không đổi trạng thái)
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['unreadByAdmin'])
+            && request.resource.data.unreadByAdmin == false
+          )
+          ||
+          // Nhánh A2: Admin đánh giá và điều chỉnh mức độ ưu tiên xử lý (chỉ khi chưa đóng)
+          (
+            resource.data.status != 'closed'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['priority', 'updatedAt'])
+            && isValidSupportPriority(request.resource.data.priority)
+            && isSupportText(request.resource.data.updatedAt, 10, 40)
+          )
+          ||
+          // Nhánh A3: Admin chuyển trạng thái / phản hồi (chặn hoàn toàn thao tác trên ticket đã `closed`)
+          (
+            resource.data.status != 'closed'
+            && request.resource.data.get('priority', 'normal') == resource.data.get('priority', 'normal')
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'status',
+              'assignedAdminId',
+              'assignedAdminName',
+              'claimedAt',
+              'firstAdminResponseAt',
+              'resolvedAt',
+              'resolvedByRole',
+              'closedAt',
+              'closeReason',
+              'lastMessageId',
+              'lastMessagePreview',
+              'lastMessageSenderRole',
+              'lastMessageAt',
+              'unreadByAdmin',
+              'unreadByUser',
+              'updatedAt'
+            ])
+            && isValidSupportStatus(request.resource.data.status)
+            && request.resource.data.status != 'new'
+            && (request.resource.data.assignedAdminId == request.auth.uid
+                || (resource.data.assignedAdminId != null
+                    && request.resource.data.assignedAdminId == resource.data.assignedAdminId))
+            && isOptionalSupportText(request.resource.data.assignedAdminName, 80)
+            && isSupportText(request.resource.data.lastMessagePreview, 1, 200)
+            && isSupportText(request.resource.data.lastMessageAt, 10, 40)
+            && isSupportText(request.resource.data.updatedAt, 10, 40)
+            && request.resource.data.unreadByAdmin == false
+            && request.resource.data.unreadByUser == true
+            // Mốc claimedAt & firstAdminResponseAt bất biến sau khi được ghi lần đầu
+            && (
+              (resource.data.get('claimedAt', null) == null
+                && isOptionalSupportText(request.resource.data.get('claimedAt', null), 40))
+              ||
+              (resource.data.get('claimedAt', null) != null
+                && request.resource.data.get('claimedAt', null) == resource.data.get('claimedAt', null))
+            )
+            && (
+              (resource.data.get('firstAdminResponseAt', null) == null
+                && isOptionalSupportText(request.resource.data.get('firstAdminResponseAt', null), 40))
+              ||
+              (resource.data.get('firstAdminResponseAt', null) != null
+                && request.resource.data.get('firstAdminResponseAt', null) == resource.data.get('firstAdminResponseAt', null))
+            )
+            && (
+              // #11 Tiếp nhận xử lý (`new` -> `in_progress`)
+              (
+                resource.data.status == 'new'
+                && request.resource.data.status == 'in_progress'
+                && request.resource.data.resolvedAt == null
+                && request.resource.data.get('resolvedByRole', null) == null
+                && request.resource.data.closedAt == null
+                && request.resource.data.get('closeReason', null) == null
+                && request.resource.data.lastMessageSenderRole == 'system'
+                && hasSynchronizedNewSupportMessage(ticketId, 'system', 'status_change')
+              )
+              ||
+              // #12 Gửi phản hồi thường (`new|in_progress|waiting_for_user|replied` -> `replied`)
+              (
+                resource.data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
+                && request.resource.data.status == 'replied'
+                && request.resource.data.resolvedAt == null
+                && request.resource.data.get('resolvedByRole', null) == null
+                && request.resource.data.closedAt == null
+                && request.resource.data.get('closeReason', null) == null
+                && request.resource.data.lastMessageSenderRole == 'admin'
+                && hasSynchronizedNewSupportMessage(ticketId, 'admin', 'text')
+              )
+              ||
+              // #13 Yêu cầu bổ sung thông tin (`new|in_progress|waiting_for_user|replied` -> `waiting_for_user`)
+              (
+                resource.data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
+                && request.resource.data.status == 'waiting_for_user'
+                && request.resource.data.resolvedAt == null
+                && request.resource.data.get('resolvedByRole', null) == null
+                && request.resource.data.closedAt == null
+                && request.resource.data.get('closeReason', null) == null
+                && request.resource.data.lastMessageSenderRole == 'admin'
+                && hasSynchronizedNewSupportMessage(ticketId, 'admin', 'request_info')
+              )
+              ||
+              // #14 Đánh dấu đã giải quyết (`new|in_progress|waiting_for_user|replied` -> `resolved`)
+              (
+                resource.data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
+                && request.resource.data.status == 'resolved'
+                && isSupportText(request.resource.data.resolvedAt, 10, 40)
+                && request.resource.data.resolvedAt == request.resource.data.lastMessageAt
+                && request.resource.data.resolvedByRole == 'admin'
+                && request.resource.data.closedAt == null
+                && request.resource.data.get('closeReason', null) == null
+                && request.resource.data.lastMessageSenderRole == 'system'
+                && hasSynchronizedNewSupportMessage(ticketId, 'system', 'status_change')
+              )
+              ||
+              // #15 Đóng chuẩn sau giải quyết (`resolved` -> `closed`), bảo toàn nguyên vẹn `resolvedAt` & `resolvedByRole`
+              (
+                resource.data.status == 'resolved'
+                && request.resource.data.status == 'closed'
+                && resource.data.resolvedAt != null
+                && request.resource.data.resolvedAt == resource.data.resolvedAt
+                && (
+                  (resource.data.get('resolvedByRole', null) != null
+                    && request.resource.data.resolvedByRole == resource.data.get('resolvedByRole', null))
+                  ||
+                  (resource.data.get('resolvedByRole', null) == null
+                    && request.resource.data.resolvedByRole == 'admin')
+                )
+                && isSupportText(request.resource.data.closedAt, 10, 40)
+                && request.resource.data.closedAt == request.resource.data.lastMessageAt
+                && request.resource.data.closeReason == 'completed'
+                && request.resource.data.lastMessageSenderRole == 'system'
+                && hasSynchronizedNewSupportMessage(ticketId, 'system', 'status_change')
+              )
+              ||
+              // #16 Đóng ngoại lệ chưa giải quyết (`new|in_progress|waiting_for_user|replied` -> `closed`),
+              // bắt buộc `resolvedAt == null`, `resolvedByRole == null` và lý do ngoại lệ hợp lệ
+              (
+                resource.data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
+                && request.resource.data.status == 'closed'
+                && request.resource.data.resolvedAt == null
+                && request.resource.data.get('resolvedByRole', null) == null
+                && isSupportText(request.resource.data.closedAt, 10, 40)
+                && request.resource.data.closedAt == request.resource.data.lastMessageAt
+                && isValidUnresolvedCloseReason(request.resource.data.get('closeReason', ''))
+                && request.resource.data.lastMessageSenderRole == 'system'
+                && hasSynchronizedNewSupportMessage(ticketId, 'system', 'status_change')
+              )
+            )
+          )
+        )
+      );
+
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if isAdmin()
+          || (isActiveUser()
+              && exists(/databases/$(database)/documents/support_tickets/$(ticketId))
+              && get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.userId == request.auth.uid);
+
+        allow create: if request.resource.data.keys().hasAll([
+            'messageId',
+            'senderId',
+            'senderRole',
+            'senderDisplayName',
+            'body',
+            'messageType',
+            'createdAt'
+          ])
+          && request.resource.data.keys().hasOnly([
+            'messageId',
+            'senderId',
+            'senderRole',
+            'senderDisplayName',
+            'body',
+            'messageType',
+            'createdAt'
+          ])
+          && request.resource.data.messageId == messageId
+          && request.resource.data.senderId == request.auth.uid
+          && isOptionalSupportText(request.resource.data.senderDisplayName, 80)
+          && isSupportText(request.resource.data.body, 1, 2000)
+          && isSupportText(request.resource.data.createdAt, 10, 40)
+          && existsAfter(/databases/$(database)/documents/support_tickets/$(ticketId))
+          && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.lastMessageId == messageId
+          && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.lastMessageSenderRole == request.resource.data.senderRole
+          && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.lastMessageAt == request.resource.data.createdAt
+          && (
+            // User gửi tin nhắn thường (khởi tạo hoặc trao đổi tiếp trong cùng WriteBatch)
+            (
+              isActiveUser()
+              && request.resource.data.senderRole == 'user'
+              && request.resource.data.messageType == 'text'
+              && (!exists(/databases/$(database)/documents/support_tickets/$(ticketId))
+                  || (get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.userId == request.auth.uid
+                      && get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status != 'closed'))
+              && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.userId == request.auth.uid
+              && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status != 'closed'
+              && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.unreadByAdmin == true
+            )
+            ||
+            // User xác nhận vấn đề đã được giải quyết trong cùng WriteBatch
+            (
+              isActiveUser()
+              && request.resource.data.senderRole == 'user'
+              && request.resource.data.messageType == 'status_change'
+              && exists(/databases/$(database)/documents/support_tickets/$(ticketId))
+              && get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.userId == request.auth.uid
+              && get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status in ['in_progress', 'waiting_for_user', 'replied']
+              && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.userId == request.auth.uid
+              && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status == 'resolved'
+              && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.resolvedByRole == 'user'
+              && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.unreadByAdmin == true
+            )
+            ||
+            // Admin gửi phản hồi / yêu cầu bổ sung / sự kiện chuyển trạng thái trong cùng WriteBatch
+            (
+              isAdmin()
+              && exists(/databases/$(database)/documents/support_tickets/$(ticketId))
+              && get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status != 'closed'
+              && (
+                (
+                  request.resource.data.senderRole == 'admin'
+                  && request.resource.data.messageType == 'text'
+                  && get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
+                  && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status == 'replied'
+                )
+                ||
+                (
+                  request.resource.data.senderRole == 'admin'
+                  && request.resource.data.messageType == 'request_info'
+                  && get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
+                  && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status == 'waiting_for_user'
+                )
+                ||
+                (
+                  request.resource.data.senderRole == 'system'
+                  && request.resource.data.messageType == 'status_change'
+                  && (
+                    (get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status == 'new'
+                      && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status == 'in_progress')
+                    ||
+                    (get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
+                      && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status in ['resolved', 'closed'])
+                    ||
+                    (get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status == 'resolved'
+                      && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status == 'closed')
+                  )
+                )
+              )
+            )
+          );
+
+        allow update, delete: if false;
+      }
+
+      // Khóa tuyệt đối subcollection ghi chú nội bộ (chưa mở ở giai đoạn Spark)
+      match /internal_notes/{noteId} {
+        allow read, write: if false;
+      }
     }
   }
 }

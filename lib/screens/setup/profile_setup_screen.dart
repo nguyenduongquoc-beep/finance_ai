@@ -1,18 +1,17 @@
-import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:image_picker/image_picker.dart';
+import '../../l10n/app_localizations.dart';
 import '../../models/user_model.dart';
 import '../../services/firestore_service.dart';
-import '../../services/storage_service.dart';
 import '../../utils/constants.dart';
-import '../../utils/formatters.dart';
 import '../../widgets/app_button.dart';
-import '../../widgets/app_text_field.dart';
+import '../../widgets/app_card.dart';
 import 'wallet_setup_screen.dart';
 
-/// Thiết lập hồ sơ (Bước 1/3)
+/// Màn hình dự phòng khởi tạo hồ sơ cơ bản từ tài khoản xác thực
+/// (Luồng chính đã tự động tạo hồ sơ ngay sau bước Đăng ký / Đăng nhập
+/// và chuyển thẳng sang Thiết lập Ví tiền).
 class ProfileSetupScreen extends StatefulWidget {
   const ProfileSetupScreen({super.key});
 
@@ -21,65 +20,31 @@ class ProfileSetupScreen extends StatefulWidget {
 }
 
 class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
-  final _formKey = GlobalKey<FormState>();
-  final _nameController = TextEditingController();
-  final _incomeController = TextEditingController();
-  final _occupationController = TextEditingController();
-  final _goalController = TextEditingController();
   final _firestoreService = FirestoreService();
-  final ImagePicker _picker = ImagePicker();
-
-  File? _selectedAvatarFile;
   bool _isLoading = false;
 
-  @override
-  void initState() {
-    super.initState();
-    final displayName = FirebaseAuth.instance.currentUser?.displayName;
-    if (displayName != null) _nameController.text = displayName;
-  }
-
-  Future<void> _pickAvatar() async {
-    try {
-      final picked = await _picker.pickImage(
-          source: ImageSource.gallery, imageQuality: 70);
-      if (picked != null) {
-        setState(() => _selectedAvatarFile = File(picked.path));
-      }
-    } catch (e) {
-      debugPrint('Error picking avatar: $e');
-    }
-  }
-
   Future<void> _handleContinue() async {
-    if (!_formKey.currentState!.validate()) return;
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
     setState(() => _isLoading = true);
     try {
-      final user = FirebaseAuth.instance.currentUser!;
+      final fallbackName = (user.displayName != null &&
+              user.displayName!.trim().isNotEmpty)
+          ? user.displayName!.trim()
+          : (user.email?.split('@').first ?? AppLocalizations.tr('common_user'));
       final appUser = AppUser(
         uid: user.uid,
-        name: _nameController.text.trim(),
+        name: fallbackName,
         email: user.email ?? '',
-        monthlyIncome: AppFormatters.parseCurrencyInput(_incomeController.text),
-        occupation: _occupationController.text.trim(),
-        savingGoal: _goalController.text.trim(),
-        avatar: null,
+        monthlyIncome: 0,
+        avatar: user.photoURL,
         createdAt: DateTime.now(),
       );
       await _firestoreService.createUserProfile(appUser);
 
-      if (_selectedAvatarFile != null) {
-        try {
-          final path = await StorageService()
-              .uploadAvatar(user.uid, _selectedAvatarFile!);
-          await _firestoreService.updateUserProfile(user.uid, {'avatar': path});
-        } catch (avatarError) {
-          debugPrint('Avatar upload failed: $avatarError');
-        }
-      }
-
       if (!mounted) return;
-      Navigator.of(context).push(
+      Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const WalletSetupScreen()),
       );
     } finally {
@@ -89,158 +54,98 @@ class _ProfileSetupScreenState extends State<ProfileSetupScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final user = FirebaseAuth.instance.currentUser;
+    final displayName = (user?.displayName != null &&
+            user!.displayName!.trim().isNotEmpty)
+        ? user.displayName!.trim()
+        : (user?.email?.split('@').first ?? context.tr('common_user'));
+    final email = user?.email ?? '';
+
     return Scaffold(
       backgroundColor: context.appBackground,
       appBar: AppBar(
         backgroundColor: context.appBackground,
         elevation: 0,
         automaticallyImplyLeading: false,
+        title: Text(
+          context.tr('setup_profile_title'),
+          style: GoogleFonts.inter(
+            fontSize: 16,
+            fontWeight: FontWeight.w700,
+            color: context.appTextPrimary,
+          ),
+        ),
+        centerTitle: true,
       ),
       body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 10),
-          child: Form(
-            key: _formKey,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Step Indicator Badge
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: AppColors.primaryLight.withAlpha(25),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Text(
-                    'BƯỚC 1/3',
-                    style: GoogleFonts.inter(
-                      color: AppColors.primaryLight,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.5,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 12),
-
-                Text(
-                  'Thiết lập hồ sơ',
-                  style: GoogleFonts.inter(
-                    fontSize: 26,
-                    fontWeight: FontWeight.w600,
-                    color: context.appTextPrimary,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  'Cho chúng tôi biết một số thông tin cơ bản để cá nhân hóa thói quen tài chính của bạn.',
-                  style: GoogleFonts.inter(
-                    fontSize: 14,
-                    color: context.appTextSecondary,
-                    height: 1.5,
-                  ),
-                ),
-                const SizedBox(height: 24),
-
-                // Avatar Upload
-                Center(
-                  child: GestureDetector(
-                    onTap: _pickAvatar,
-                    child: Stack(
-                      children: [
-                        Container(
-                          width: 90,
-                          height: 90,
-                          decoration: BoxDecoration(
-                            shape: BoxShape.circle,
-                            border:
-                                Border.all(color: context.appBorder, width: 2),
-                            color: context.appInputFill,
-                          ),
-                          child: ClipOval(
-                            child: _selectedAvatarFile != null
-                                ? Image.file(_selectedAvatarFile!,
-                                    fit: BoxFit.cover)
-                                : Icon(
-                                    Icons.person_rounded,
-                                    size: 44,
-                                    color: context.appTextSecondary,
-                                  ),
-                          ),
-                        ),
-                        Positioned(
-                          bottom: 0,
-                          right: 0,
-                          child: Container(
-                            width: 30,
-                            height: 30,
-                            decoration: const BoxDecoration(
-                              color: AppColors.primary,
-                              shape: BoxShape.circle,
-                            ),
-                            child: const Icon(
-                              Icons.camera_alt_rounded,
-                              color: Colors.white,
-                              size: 16,
+        child: Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            children: [
+              Expanded(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    AppCard(
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        children: [
+                          CircleAvatar(
+                            radius: 34,
+                            backgroundColor: AppColors.primary.withAlpha(24),
+                            child: Text(
+                              displayName.isNotEmpty
+                                  ? displayName[0].toUpperCase()
+                                  : 'U',
+                              style: GoogleFonts.inter(
+                                fontSize: 26,
+                                fontWeight: FontWeight.w700,
+                                color: AppColors.primary,
+                              ),
                             ),
                           ),
-                        ),
-                      ],
+                          const SizedBox(height: 14),
+                          Text(
+                            displayName,
+                            style: GoogleFonts.inter(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w700,
+                              color: context.appTextPrimary,
+                            ),
+                          ),
+                          if (email.isNotEmpty) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              email,
+                              style: GoogleFonts.inter(
+                                fontSize: 13,
+                                color: context.appTextSecondary,
+                              ),
+                            ),
+                          ],
+                          const SizedBox(height: 12),
+                          Text(
+                            context.tr('setup_profile_desc'),
+                            textAlign: TextAlign.center,
+                            style: GoogleFonts.inter(
+                              fontSize: 13,
+                              color: context.appTextSecondary,
+                              height: 1.45,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
-                  ),
+                  ],
                 ),
-                const SizedBox(height: 28),
-
-                // Name Input
-                AppTextField(
-                  controller: _nameController,
-                  labelText: 'Họ tên hiển thị',
-                  hintText: 'Nguyễn Văn A',
-                  prefixIcon: Icons.badge_outlined,
-                  validator: (v) => (v == null || v.trim().isEmpty)
-                      ? 'Vui lòng nhập tên'
-                      : null,
-                ),
-                const SizedBox(height: 16),
-
-                // Occupation Input
-                AppTextField(
-                  controller: _occupationController,
-                  labelText: 'Nghề nghiệp',
-                  hintText: 'Lập trình viên, Nhân viên văn phòng...',
-                  prefixIcon: Icons.work_outline_rounded,
-                ),
-                const SizedBox(height: 16),
-
-                // Income Input
-                AppTextField(
-                  controller: _incomeController,
-                  labelText: 'Thu nhập hàng tháng (VNĐ)',
-                  hintText: '15000000',
-                  prefixIcon: Icons.monetization_on_outlined,
-                  keyboardType: TextInputType.number,
-                ),
-                const SizedBox(height: 16),
-
-                // Goal Input
-                AppTextField(
-                  controller: _goalController,
-                  labelText: 'Mục tiêu tiết kiệm chính',
-                  hintText: 'Mua xe máy, Đi du lịch, Quỹ dự phòng...',
-                  prefixIcon: Icons.flag_outlined,
-                ),
-                const SizedBox(height: 32),
-
-                // Continue Button
-                AppButton(
-                  text: 'Tiếp tục',
-                  isLoading: _isLoading,
-                  onPressed: _handleContinue,
-                ),
-                const SizedBox(height: 24),
-              ],
-            ),
+              ),
+              AppButton(
+                text: context.tr('setup_profile_continue'),
+                icon: Icons.arrow_forward_rounded,
+                isLoading: _isLoading,
+                onPressed: _handleContinue,
+              ),
+            ],
           ),
         ),
       ),

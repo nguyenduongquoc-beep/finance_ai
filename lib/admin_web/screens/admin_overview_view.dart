@@ -3,29 +3,22 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import '../../models/admin_audit_log_model.dart';
-import '../../models/ai_runtime_config_model.dart';
 import '../../models/monthly_financial_plan.dart';
 import '../../models/user_model.dart';
-import '../../services/ai_config_sync_service.dart';
 import '../../utils/constants.dart';
 import '../services/admin_web_service.dart';
 import '../widgets/admin_governance_widgets.dart';
 
-/// Khu vực 1: AI & Ops Dashboard trên Admin Web Portal.
-/// Hiển thị đồng thời Trạng thái Quản trị AI (Versions, Tri thức, Phản hồi)
-/// và Chỉ số vận hành nền tảng thực tế từ Firestore.
+/// Màn hình Dashboard Tổng quan (Admin Overview) trên Admin Web Portal.
+/// Hiển thị các chỉ số tổng hợp và biểu đồ tăng trưởng thực tế từ Firestore.
 class AdminOverviewView extends StatelessWidget {
   final AdminWebService adminService;
   final ValueChanged<int>? onNavigateTab;
-  final ValueChanged<int>? onOpenPlatformOpsSubTab;
-  final VoidCallback? onOpenKnowledgeBase;
 
   const AdminOverviewView({
     super.key,
     required this.adminService,
     this.onNavigateTab,
-    this.onOpenPlatformOpsSubTab,
-    this.onOpenKnowledgeBase,
   });
 
   @override
@@ -68,9 +61,6 @@ class AdminOverviewView extends StatelessWidget {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // 0. Trạng thái Quản trị AI & Tri thức
-                      _buildAiGovernanceStrip(),
-                      const SizedBox(height: 18),
                       // 1. 4 Thẻ KPI Tổng quan Vận hành
                       LayoutBuilder(
                         builder: (context, constraints) {
@@ -181,173 +171,6 @@ class AdminOverviewView extends StatelessWidget {
           },
         );
       },
-    );
-  }
-
-  Widget _buildAiGovernanceStrip() {
-    return StreamBuilder<Map<String, dynamic>?>(
-      stream: adminService.streamPublishedConfigMap(
-        AiConfigSyncService.kDocAiRuntime,
-      ),
-      builder: (context, aiSnap) {
-        return StreamBuilder<Map<String, dynamic>?>(
-          stream: adminService.streamPublishedConfigMap(
-            AiConfigSyncService.kDocFinancialHeuristics,
-          ),
-          builder: (context, heurSnap) {
-            return StreamBuilder<Map<String, dynamic>?>(
-              stream: adminService.streamPublishedConfigMap(
-                AiConfigSyncService.kDocTransactionRules,
-              ),
-              builder: (context, rulesSnap) {
-                return StreamBuilder<List<AdminKnowledgePublishedRecord>>(
-                  stream: adminService.streamKnowledgePublished(),
-                  builder: (context, kbSnap) {
-                    return StreamBuilder<List<AiFeedbackReport>>(
-                      stream: adminService.streamAiFeedbackReports(limit: 100),
-                      builder: (context, fbSnap) {
-                        final aiPub = aiSnap.data;
-                        final aiVer = aiPub != null
-                            ? (aiPub['version'] as num?)?.toInt() ?? 1
-                            : 1;
-                        final aiModel = aiPub != null
-                            ? AiRuntimeConfig.fromMap(aiPub).primaryModel
-                            : AiRuntimeConfig.kDefaultPrimaryModel;
-                        final aiEnabled = aiPub != null
-                            ? AiRuntimeConfig.fromMap(aiPub).isEnabled
-                            : true;
-
-                        final heurVer = heurSnap.data != null
-                            ? (heurSnap.data!['version'] as num?)?.toInt() ?? 1
-                            : 1;
-                        final rulesVer = rulesSnap.data != null
-                            ? (rulesSnap.data!['version'] as num?)?.toInt() ?? 1
-                            : 1;
-
-                        final kbList = kbSnap.data ?? const [];
-                        final activeKb =
-                            kbList.where((k) => k.article.isActive).length;
-
-                        final fbList = fbSnap.data ?? const [];
-                        final openFb =
-                            fbList.where((f) => f.status == 'open').length;
-                        final negFb =
-                            fbList.where((f) => f.rating == 'negative').length;
-
-                        return LayoutBuilder(
-                          builder: (context, constraints) {
-                            final isWide = constraints.maxWidth >= 820;
-                            final cardWidth = isWide
-                                ? (constraints.maxWidth - 36) / 4
-                                : (constraints.maxWidth >= 480
-                                    ? (constraints.maxWidth - 12) / 2
-                                    : constraints.maxWidth);
-
-                            return Wrap(
-                              spacing: 12,
-                              runSpacing: 12,
-                              children: [
-                                SizedBox(
-                                  width: cardWidth,
-                                  child: _buildClickableAiCard(
-                                    key: const ValueKey('kpi_ai_runtime'),
-                                    title: 'AI Runtime Production',
-                                    value: 'v$aiVer',
-                                    subtitle:
-                                        '${aiEnabled ? "Đang bật" : "Đang tắt"} · $aiModel',
-                                    icon: Icons.psychology_rounded,
-                                    accentColor: AppColors.primary,
-                                    onTap: onNavigateTab == null
-                                        ? null
-                                        : () => onNavigateTab!(1),
-                                  ),
-                                ),
-                                SizedBox(
-                                  width: cardWidth,
-                                  child: _buildClickableAiCard(
-                                    key: const ValueKey('kpi_rules_status'),
-                                    title: 'Quy tắc & Từ điển OCR',
-                                    value: 'H:v$heurVer · D:v$rulesVer',
-                                    subtitle:
-                                        'Heuristics v$heurVer · OCR Dict v$rulesVer',
-                                    icon: Icons.rule_folder_rounded,
-                                    accentColor: const Color(0xFF0284C7),
-                                    onTap: onOpenKnowledgeBase ??
-                                        (onNavigateTab == null
-                                            ? null
-                                            : () => onNavigateTab!(2)),
-                                  ),
-                                ),
-                                SizedBox(
-                                  width: cardWidth,
-                                  child: _buildClickableAiCard(
-                                    key: const ValueKey('kpi_knowledge_base'),
-                                    title: 'Kho Tri thức Tài chính',
-                                    value: '$activeKb',
-                                    subtitle:
-                                        '$activeKb đang kích hoạt / ${kbList.length} đã xuất bản',
-                                    icon: Icons.menu_book_rounded,
-                                    accentColor: AppColors.income,
-                                    onTap: onOpenKnowledgeBase ??
-                                        (onNavigateTab == null
-                                            ? null
-                                            : () => onNavigateTab!(2)),
-                                  ),
-                                ),
-                                SizedBox(
-                                  width: cardWidth,
-                                  child: _buildClickableAiCard(
-                                    key: const ValueKey('kpi_ai_feedback'),
-                                    title: 'Phản hồi AI chờ xử lý',
-                                    value: '$openFb',
-                                    subtitle:
-                                        '${fbList.length} tổng · $negFb chưa hài lòng',
-                                    icon: Icons.feedback_rounded,
-                                    accentColor: openFb > 0
-                                        ? AppColors.warning
-                                        : AppColors.slate500,
-                                    onTap: onNavigateTab == null
-                                        ? null
-                                        : () => onNavigateTab!(4),
-                                  ),
-                                ),
-                              ],
-                            );
-                          },
-                        );
-                      },
-                    );
-                  },
-                );
-              },
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildClickableAiCard({
-    required Key key,
-    required String title,
-    required String value,
-    required String subtitle,
-    required IconData icon,
-    required Color accentColor,
-    VoidCallback? onTap,
-  }) {
-    return InkWell(
-      key: key,
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(14),
-      child: _buildKpiCard(
-        key: ValueKey('inner_${key.toString()}'),
-        title: title,
-        value: value,
-        subtitle: subtitle,
-        icon: icon,
-        accentColor: accentColor,
-      ),
     );
   }
 
@@ -597,15 +420,9 @@ class AdminOverviewView extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              if (onOpenPlatformOpsSubTab != null || onNavigateTab != null)
+              if (onNavigateTab != null)
                 TextButton(
-                  onPressed: () {
-                    if (onOpenPlatformOpsSubTab != null) {
-                      onOpenPlatformOpsSubTab!(0);
-                    } else {
-                      onNavigateTab!(5);
-                    }
-                  },
+                  onPressed: () => onNavigateTab!(1),
                   child: const Text('Xem tất cả'),
                 ),
             ],
@@ -744,15 +561,9 @@ class AdminOverviewView extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              if (onOpenPlatformOpsSubTab != null || onNavigateTab != null)
+              if (onNavigateTab != null)
                 TextButton(
-                  onPressed: () {
-                    if (onOpenPlatformOpsSubTab != null) {
-                      onOpenPlatformOpsSubTab!(3);
-                    } else {
-                      onNavigateTab!(5);
-                    }
-                  },
+                  onPressed: () => onNavigateTab!(4),
                   child: const Text('Xem toàn bộ log'),
                 ),
             ],

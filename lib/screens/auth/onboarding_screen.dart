@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../../l10n/app_localizations.dart';
 import '../../utils/constants.dart';
 import 'login_screen.dart';
 
@@ -25,18 +26,18 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
   final List<_OnboardingPage> _pages = [
     _OnboardingPage(
       'assets/images/onboarding_1.png',
-      'Quản lý tài chính thông minh',
-      'Theo dõi thu nhập, chi tiêu và số dư của tất cả ví tiền chỉ trong một ứng dụng duy nhất.',
+      'onb_1_title',
+      'onb_1_desc',
     ),
     _OnboardingPage(
       'assets/images/onboarding_2.png',
-      'Theo dõi chi tiêu trực quan',
-      'Xem báo cáo sắc nét theo ngày, tuần, tháng và nhận cảnh báo khi gần vượt ngân sách.',
+      'onb_2_title',
+      'onb_2_desc',
     ),
     _OnboardingPage(
       'assets/images/onboarding_3.png',
-      'Phân tích & Tư vấn bằng AI',
-      'AI phân tích thói quen chi tiêu, tự động bóc tách hóa đơn và hỗ trợ tư vấn tài chính riêng.',
+      'onb_3_title',
+      'onb_3_desc',
     ),
   ];
 
@@ -63,7 +64,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 child: TextButton(
                   onPressed: _goToLogin,
                   child: Text(
-                    'Bỏ qua',
+                    context.tr('onb_skip'),
                     style: GoogleFonts.inter(
                       color: AppColors.slate400,
                       fontSize: 14,
@@ -106,7 +107,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         ),
                         const Spacer(),
                         Text(
-                          page.title,
+                          context.tr(page.title),
                           textAlign: TextAlign.center,
                           style: GoogleFonts.inter(
                             color: AppColors.slate50,
@@ -117,7 +118,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                         ),
                         const SizedBox(height: 12),
                         Text(
-                          page.description,
+                          context.tr(page.description),
                           textAlign: TextAlign.center,
                           style: GoogleFonts.inter(
                             color: AppColors.slate400,
@@ -177,7 +178,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                     }
                   },
                   child: Text(
-                    isLast ? 'Bắt đầu ngay' : 'Tiếp theo',
+                    isLast ? context.tr('onb_start') : context.tr('onb_next'),
                     style: GoogleFonts.inter(
                       fontSize: 16,
                       fontWeight: FontWeight.w600,

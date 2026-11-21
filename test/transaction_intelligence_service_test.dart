@@ -1,6 +1,8 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:finance_ai_app/models/category_model.dart';
+import 'package:finance_ai_app/models/receipt_info.dart';
 import 'package:finance_ai_app/models/transaction_model.dart';
+import 'package:finance_ai_app/models/wallet_model.dart';
 import 'package:finance_ai_app/services/transaction_intelligence_service.dart';
 
 void main() {
@@ -374,6 +376,203 @@ void main() {
         excludeTransactionId: 'editing_tx_100',
       );
       expect(withoutSelf.isAnomalous, isFalse);
+    });
+
+    // 12. Gợi ý ví từ OCR hóa đơn tiền mặt (như hóa đơn Kang Tea & Coffee)
+    test('12. Suggests cash wallet when receipt has cash payment or Tiền nhận/Tiền thừa', () {
+      final wallets = [
+        Wallet(
+          walletId: 'w_cash',
+          userId: 'user_1',
+          walletName: 'Tiền mặt',
+          balance: 500000,
+          type: 'cash',
+          createdAt: DateTime.now(),
+        ),
+        Wallet(
+          walletId: 'w_mb',
+          userId: 'user_1',
+          walletName: 'MB Bank',
+          balance: 2000000,
+          type: 'bank',
+          createdAt: DateTime.now(),
+        ),
+      ];
+
+      final fromRawText = intelligenceService.suggestWallet(
+        ocrRawText: '+Thanh toán tiền mặt 50,000 đ\nTiền nhận 50,000 đ\nTiền thừa 0 đ',
+        wallets: wallets,
+      );
+      expect(fromRawText.isMatched, isTrue);
+      expect(fromRawText.walletId, equals('w_cash'));
+      expect(fromRawText.walletName, equals('Tiền mặt'));
+      expect(fromRawText.confidence, equals(90));
+    });
+
+    // 13. Khi hóa đơn thanh toán qua loại ví mà người dùng không có -> isMatched = false, báo đúng tên ví
+    test('13. Returns isMatched=false with detectedPaymentLabel when user does not have that wallet', () {
+      final wallets = [
+        Wallet(
+          walletId: 'w_cash',
+          userId: 'user_1',
+          walletName: 'Tiền mặt',
+          balance: 500000,
+          type: 'cash',
+          createdAt: DateTime.now(),
+        ),
+        Wallet(
+          walletId: 'w_zalo',
+          userId: 'user_1',
+          walletName: 'ZaloPay',
+          balance: 300000,
+          type: 'eWallet',
+          createdAt: DateTime.now(),
+        ),
+      ];
+
+      // Hóa đơn thanh toán qua MoMo nhưng user chỉ có Tiền mặt và ZaloPay
+      final momoSuggestion = intelligenceService.suggestWallet(
+        paymentMethod: 'MoMo',
+        wallets: wallets,
+      );
+      expect(momoSuggestion.hasDetection, isTrue);
+      expect(momoSuggestion.isMatched, isFalse);
+      expect(momoSuggestion.walletId, isEmpty);
+      expect(momoSuggestion.detectedPaymentLabel, equals('MoMo'));
+
+      // Hóa đơn thanh toán qua Vietcombank nhưng user không có ví Vietcombank
+      final vcbSuggestion = intelligenceService.suggestWallet(
+        paymentMethod: 'Vietcombank',
+        wallets: wallets,
+      );
+      expect(vcbSuggestion.hasDetection, isTrue);
+      expect(vcbSuggestion.isMatched, isFalse);
+      expect(vcbSuggestion.walletId, isEmpty);
+      expect(vcbSuggestion.detectedPaymentLabel, equals('Vietcombank'));
+    });
+
+    // 14. Không khớp nhầm chữ "mb" trong "Combo" thành MB Bank
+    test('14. Word boundary prevents matching "Combo" as "MB Bank"', () {
+      final wallets = [
+        Wallet(
+          walletId: 'w_mb',
+          userId: 'user_1',
+          walletName: 'MB Bank',
+          balance: 2000000,
+          type: 'bank',
+          createdAt: DateTime.now(),
+        ),
+      ];
+
+      final res = intelligenceService.suggestWallet(
+        ocrRawText: 'Combo 1 Gà Rán: 89,000 đ',
+        wallets: wallets,
+      );
+      expect(res.hasDetection, isFalse);
+    });
+
+    // 15. ReceiptInfo.fromJson parse linh hoạt ngày dd/MM/yyyy và paymentMethod
+    test('15. ReceiptInfo.fromJson parses dd/MM/yyyy date and paymentMethod safely', () {
+      final info = ReceiptInfo.fromJson({
+        'merchant': 'Kang Tea & Coffee - Bạch Đằng',
+        'total': '50.000',
+        'date': '13/11/2026',
+        'paymentMethod': 'Tiền mặt',
+      }, rawText: '+Thanh toán tiền mặt 50,000 đ');
+
+      expect(info.merchant, equals('Kang Tea & Coffee - Bạch Đằng'));
+      expect(info.total, equals(50000));
+      expect(info.date, equals(DateTime(2026, 11, 13)));
+      expect(info.paymentMethod, equals('Tiền mặt'));
+      expect(info.rawText, contains('Thanh toán tiền mặt'));
+    });
+
+    // 16. Định dạng ghi chú linh hoạt theo 4 thành phần (Tên mặt hàng, SL, Đơn giá, Thành tiền)
+    test('16. ReceiptItem & ReceiptInfo format notes flexibly without fabricating missing fields', () {
+      // Trường hợp 1: Có đủ Tên món, SL, Đơn giá, Thành tiền (như hóa đơn Kang Tea & Coffee)
+      final fullItem = ReceiptItem.fromJson({
+        'description': 'Cà Phê Sữa Đá\nMáy',
+        'quantity': 2,
+        'unitPrice': 25000,
+        'amount': 50000,
+      });
+      expect(fullItem.description, equals('Cà Phê Sữa Đá Máy'));
+      expect(fullItem.quantity, equals(2));
+      expect(fullItem.unitPrice, equals(25000));
+      expect(fullItem.amount, equals(50000));
+      expect(fullItem.isPriceConsistent, isTrue);
+      expect(
+        fullItem.formatNoteLine(),
+        equals('Cà Phê Sữa Đá Máy: 2 x 25.000₫ = 50.000₫'),
+      );
+
+      // Trường hợp 2: Chỉ có Tên món, SL và Thành tiền (không có Đơn giá)
+      final qtyAndTotalItem = ReceiptItem.fromJson({
+        'description': 'Cà Phê Sữa Đá Máy',
+        'quantity': 2,
+        'amount': 50000,
+      });
+      expect(qtyAndTotalItem.unitPrice, isNull);
+      expect(
+        qtyAndTotalItem.formatNoteLine(),
+        equals('Cà Phê Sữa Đá Máy (SL: 2, tổng: 50.000₫)'),
+      );
+
+      // Trường hợp 3: Chỉ có Tên món và Thành tiền (không có SL, không có Đơn giá -> không tự suy diễn)
+      final nameAndTotalOnly = ReceiptItem.fromJson({
+        'description': 'Bánh ngọt',
+        'amount': 35000,
+      });
+      expect(nameAndTotalOnly.quantity, isNull);
+      expect(nameAndTotalOnly.unitPrice, isNull);
+      expect(
+        nameAndTotalOnly.formatNoteLine(),
+        equals('Bánh ngọt: 35.000₫'),
+      );
+    });
+
+    // 17. Khôi phục ngữ cảnh khi chữ bị mờ (Cà Phê Sữa Đa Máy -> Cà Phê Sữa Đá Máy) và phân biệt dữ liệu suy luận
+    test('17. Contextual restoration of blurry item names and location with inference tracking', () {
+      final info = ReceiptInfo.fromJson({
+        'merchant': 'Kang Tea & Coffee - Bach Dang',
+        'total': 50000,
+        'date': '2026-11-13',
+        'address': 'Địa chỉ: 20 Bach Dang, Phu Cuong, Tp Thu Dau Mot, Binh Duong',
+        'paymentMethod': 'Tiền mặt',
+        'items': [
+          {
+            'description': 'Cà Phê Sữa Đa Máy',
+            'quantity': 2,
+            'unitPrice': 25000,
+            'amount': 50000,
+          },
+        ],
+      });
+
+      // Đã khôi phục "Cà Phê Sữa Đa Máy" -> "Cà Phê Sữa Đá Máy" và đánh dấu isInferred
+      expect(info.items, isNotNull);
+      expect(info.items!.first.description, equals('Cà Phê Sữa Đá Máy'));
+      expect(info.items!.first.isInferred, isTrue);
+
+      // Đã khôi phục dấu địa điểm và kết hợp Tên cửa hàng + Địa chỉ hợp lý
+      expect(info.merchant, equals('Kang Tea & Coffee - Bạch Đằng'));
+      expect(
+        info.address,
+        equals('20 Bạch Đằng, Phú Cường, Tp Thủ Dầu Một, Bình Dương'),
+      );
+      expect(
+        info.resolvedLocation,
+        equals(
+          'Kang Tea & Coffee - Bạch Đằng - 20 Bạch Đằng, Phú Cường, Tp Thủ Dầu Một, Bình Dương',
+        ),
+      );
+      expect(info.isLocationInferred, isTrue);
+      expect(info.hasInferredData, isTrue);
+      expect(info.inferredFields, isNotEmpty);
+      expect(
+        info.buildFormattedNote(),
+        equals('Cà Phê Sữa Đá Máy: 2 x 25.000₫ = 50.000₫'),
+      );
     });
   });
 }

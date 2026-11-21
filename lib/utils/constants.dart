@@ -114,6 +114,7 @@ extension ContextThemeExtension on BuildContext {
 
 class AppStrings {
   static const String appName = 'Finance AI';
+  static const String appVersion = '1.0.0+1';
 }
 
 /// Danh mục mặc định - Thu
@@ -172,9 +173,3 @@ class DefaultExpenseCategories {
     },
   ];
 }
-
-/// Loại giao dịch
-enum TransactionType { income, expense }
-
-/// Loại ví
-enum WalletType { cash, bank, eWallet, other }

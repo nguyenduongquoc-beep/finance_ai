@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import '../l10n/app_localizations.dart';
 import '../models/transaction_model.dart';
 import '../models/wallet_model.dart';
 import '../models/saving_goal_model.dart';
@@ -28,7 +29,7 @@ class TransactionBusinessLogic {
   /// Validate số tiền giao dịch hợp lệ (> 0, hữu hạn, không NaN)
   static void validateAmount(double amount) {
     if (amount <= 0 || amount.isNaN || !amount.isFinite) {
-      throw Exception('Số tiền giao dịch không hợp lệ.');
+      throw Exception(AppLocalizations.tr('svc_tbl_invalid_amount'));
     }
   }
 
@@ -43,7 +44,7 @@ class TransactionBusinessLogic {
     validateAmount(tx.amount);
 
     if (!wallet.isActive) {
-      throw Exception('Ví đã bị ẩn hoặc không hoạt động.');
+      throw Exception(AppLocalizations.tr('svc_tbl_wallet_inactive'));
     }
 
     switch (tx.type) {
@@ -54,7 +55,7 @@ class TransactionBusinessLogic {
 
       case 'expense':
         if (tx.amount > wallet.balance) {
-          throw Exception('Số dư ví không đủ để thực hiện giao dịch này.');
+          throw Exception(AppLocalizations.tr('svc_tbl_insufficient_bal'));
         }
         return TransactionEffects(
           newSourceBalance: wallet.balance - tx.amount,
@@ -62,16 +63,16 @@ class TransactionBusinessLogic {
 
       case 'transfer':
         if (toWallet == null) {
-          throw Exception('Ví đích không tồn tại.');
+          throw Exception(AppLocalizations.tr('svc_tbl_dst_missing'));
         }
         if (!toWallet.isActive) {
-          throw Exception('Ví đích đã bị ẩn hoặc không hoạt động.');
+          throw Exception(AppLocalizations.tr('svc_tbl_dst_inactive'));
         }
         if (tx.walletId == tx.toWalletId) {
-          throw Exception('Ví nguồn và ví đích không được trùng nhau.');
+          throw Exception(AppLocalizations.tr('svc_tbl_same_wallet'));
         }
         if (tx.amount > wallet.balance) {
-          throw Exception('Số dư ví không đủ để thực hiện giao dịch này.');
+          throw Exception(AppLocalizations.tr('svc_tbl_insufficient_bal'));
         }
         return TransactionEffects(
           newSourceBalance: wallet.balance - tx.amount,
@@ -80,15 +81,15 @@ class TransactionBusinessLogic {
 
       case 'goal_deposit':
         if (goal == null) {
-          throw Exception('Mục tiêu tiết kiệm không tồn tại.');
+          throw Exception(AppLocalizations.tr('svc_tbl_goal_missing'));
         }
         if (tx.amount > wallet.balance) {
-          throw Exception('Số dư ví không đủ để thực hiện giao dịch này.');
+          throw Exception(AppLocalizations.tr('svc_tbl_insufficient_bal'));
         }
         final remaining = goal.targetAmount - goal.savedAmount;
         if (tx.amount > remaining) {
           throw Exception(
-              'Số tiền nạp vượt quá số tiền còn thiếu của mục tiêu tiết kiệm.');
+              AppLocalizations.tr('svc_tbl_goal_dep_excess'));
         }
 
         final updatedSources =
@@ -128,11 +129,11 @@ class TransactionBusinessLogic {
 
       case 'goal_withdraw':
         if (goal == null) {
-          throw Exception('Mục tiêu tiết kiệm không tồn tại.');
+          throw Exception(AppLocalizations.tr('svc_tbl_goal_missing'));
         }
         if (tx.amount > goal.savedAmount) {
           throw Exception(
-              'Số tiền rút vượt quá số tiền đã tiết kiệm trong mục tiêu.');
+              AppLocalizations.tr('svc_tbl_goal_wdr_excess'));
         }
 
         Map<String, GoalWalletSource>? updatedSources;
@@ -142,17 +143,17 @@ class TransactionBusinessLogic {
           final source = goal.walletSources[tx.walletId];
           if (source == null || source.totalDeposited <= 0) {
             throw Exception(
-              'Ví "${wallet.walletName}" chưa từng nạp tiền vào mục tiêu tiết kiệm này nên không thể rút về ví này.',
+              AppLocalizations.tr('svc_tbl_goal_wdr_never', params: {'wallet': wallet.walletName}),
             );
           }
           if (source.withdrawableAmount <= 0) {
             throw Exception(
-              'Nguồn tiền từ ví "${wallet.walletName}" trong mục tiêu này đã được rút hết.',
+              AppLocalizations.tr('svc_tbl_goal_wdr_depleted', params: {'wallet': wallet.walletName}),
             );
           }
           if (tx.amount > source.withdrawableAmount) {
             throw Exception(
-              'Số tiền rút vượt quá số tiền có thể rút từ ví "${wallet.walletName}".',
+              AppLocalizations.tr('svc_tbl_goal_wdr_over', params: {'wallet': wallet.walletName}),
             );
           }
 
@@ -181,7 +182,7 @@ class TransactionBusinessLogic {
         );
 
       default:
-        throw Exception('Loại giao dịch không hợp lệ.');
+        throw Exception(AppLocalizations.tr('svc_tbl_invalid_type'));
     }
   }
 
@@ -200,7 +201,7 @@ class TransactionBusinessLogic {
         final currentBal = wallet?.balance ?? 0;
         if (wallet != null && currentBal < tx.amount) {
           throw Exception(
-              'Số dư trong ví không đủ để hoàn tác giao dịch thu nhập này.');
+              AppLocalizations.tr('svc_tbl_undo_inc'));
         }
         return TransactionEffects(
           newSourceBalance: currentBal - tx.amount,
@@ -217,7 +218,7 @@ class TransactionBusinessLogic {
         final currentTarget = toWallet?.balance ?? 0;
         if (toWallet != null && currentTarget < tx.amount) {
           throw Exception(
-              'Số dư ví đích không đủ để hoàn tác giao dịch chuyển tiền này.');
+              AppLocalizations.tr('svc_tbl_undo_trf'));
         }
         return TransactionEffects(
           newSourceBalance: currentSource + tx.amount,
@@ -236,7 +237,7 @@ class TransactionBusinessLogic {
           final availableWithdrawable = source?.withdrawableAmount ?? 0.0;
           if (tx.amount > availableWithdrawable || tx.amount > currentSaved) {
             throw Exception(
-              'Không thể xóa giao dịch nạp tiền này vì một phần hoặc toàn bộ số tiền từ nguồn ví này đã được rút khỏi mục tiêu.',
+              AppLocalizations.tr('svc_tbl_del_goal_dep'),
             );
           }
 
@@ -296,7 +297,7 @@ class TransactionBusinessLogic {
         final currentBal = wallet?.balance ?? 0;
         if (wallet != null && currentBal < tx.amount) {
           throw Exception(
-              'Số dư trong ví không đủ để hoàn tác giao dịch rút tiền mục tiêu này.');
+              AppLocalizations.tr('svc_tbl_undo_goal_wdr'));
         }
         final currentSaved = goal?.savedAmount ?? 0;
         final targetAmount = goal?.targetAmount ?? double.infinity;
@@ -309,7 +310,7 @@ class TransactionBusinessLogic {
               Map<String, GoalWalletSource>.from(goal.walletSources);
           final source = updatedSources[tx.walletId];
           final walletName =
-              wallet?.walletName ?? source?.walletName ?? 'Ví thanh toán';
+              wallet?.walletName ?? source?.walletName ?? AppLocalizations.tr('svc_tbl_pay_wallet');
           final newWithdrawable =
               (source?.withdrawableAmount ?? 0.0) + tx.amount;
           final newTotalDeposited = math.max(
@@ -341,7 +342,7 @@ class TransactionBusinessLogic {
         );
 
       default:
-        throw Exception('Loại giao dịch không hợp lệ.');
+        throw Exception(AppLocalizations.tr('svc_tbl_invalid_type'));
     }
   }
 
@@ -387,7 +388,7 @@ class TransactionBusinessLogic {
     var deposits = <GoalDepositRecord>[];
 
     for (final tx in relevantTxs) {
-      final walletName = walletNamesById[tx.walletId] ?? 'Ví liên kết';
+      final walletName = walletNamesById[tx.walletId] ?? AppLocalizations.tr('svc_tbl_linked_wallet');
       if (tx.type == 'goal_deposit') {
         final existing = sources[tx.walletId];
         sources[tx.walletId] = GoalWalletSource(
@@ -561,7 +562,7 @@ class TransactionBusinessLogic {
         newTx.type == 'goal_deposit' ||
         newTx.type == 'goal_withdraw') {
       throw Exception(
-          'Giao dịch nạp/rút mục tiêu không thể sửa. Vui lòng xóa và tạo lại giao dịch.');
+          AppLocalizations.tr('svc_tbl_edit_goal_blocked'));
     }
 
     validateAmount(newTx.amount);
@@ -569,25 +570,25 @@ class TransactionBusinessLogic {
     // Kiểm tra ví chuyển tiền
     if (newTx.type == 'transfer') {
       if (newTx.toWalletId == null || newTx.toWalletId!.isEmpty) {
-        throw Exception('Giao dịch chuyển tiền cần chỉ định ví đích.');
+        throw Exception(AppLocalizations.tr('svc_tbl_trf_need_dst'));
       }
       if (newTx.walletId == newTx.toWalletId) {
-        throw Exception('Ví nguồn và ví đích không được trùng nhau.');
+        throw Exception(AppLocalizations.tr('svc_tbl_same_wallet'));
       }
     }
 
     // Kiểm tra ví mới isActive nếu đổi ví
     if (newTx.walletId != oldTx.walletId && !newWallet.isActive) {
-      throw Exception('Ví đã bị ẩn hoặc không hoạt động.');
+      throw Exception(AppLocalizations.tr('svc_tbl_wallet_inactive'));
     }
     if (newTx.type == 'transfer') {
       if (newToWallet == null) {
-        throw Exception('Ví đích không tồn tại.');
+        throw Exception(AppLocalizations.tr('svc_tbl_dst_missing'));
       }
       final isNewToWallet =
           oldTx.type != 'transfer' || newTx.toWalletId != oldTx.toWalletId;
       if (isNewToWallet && !newToWallet.isActive) {
-        throw Exception('Ví đích đã bị ẩn hoặc không hoạt động.');
+        throw Exception(AppLocalizations.tr('svc_tbl_dst_inactive'));
       }
     }
 
@@ -647,7 +648,7 @@ class TransactionBusinessLogic {
     // 3. Kiểm tra không ví nào bị âm số dư
     balanceMap.forEach((walletId, balance) {
       if (balance < 0) {
-        throw Exception('Số dư ví không đủ để thực hiện giao dịch này.');
+        throw Exception(AppLocalizations.tr('svc_tbl_insufficient_bal'));
       }
     });
 

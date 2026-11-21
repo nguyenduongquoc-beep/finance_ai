@@ -14,8 +14,9 @@ import '../models/category_model.dart';
 import '../models/financial_forecast_result.dart';
 import '../models/monthly_financial_plan.dart';
 import '../config/api_keys.dart';
-import '../services/ai_config_sync_service.dart';
+import '../utils/formatters.dart';
 import 'ai_prompt_builder.dart';
+import '../l10n/app_localizations.dart';
 
 /// ============================================================
 /// AI SERVICE
@@ -66,13 +67,13 @@ class AiService {
         _contentGeneratorOverride == null &&
         (geminiApiKey.isEmpty || geminiApiKey == 'YOUR_GEMINI_API_KEY_HERE')) {
       throw Exception(
-          'Gemini API key chưa được cấu hình trong config/api_keys.dart');
+          AppLocalizations.tr('svc_ai_no_api_key'));
     }
   }
 
-  /// Cấu hình AI Runtime hiệu lực (ưu tiên override từ Sandbox/Test, sau đó đến Published Config đã đồng bộ)
+  /// Cấu hình AI Runtime hiệu lực (ưu tiên override trong Test, mặc định dùng hằng số chuẩn cố định)
   AiRuntimeConfig get effectiveRuntimeConfig =>
-      _runtimeConfigOverride ?? AiConfigSyncService.instance.currentAiRuntime;
+      _runtimeConfigOverride ?? AiRuntimeConfig.defaults();
 
   /// Chuỗi model thực thi hiệu lực (Primary + Fallbacks từ AiRuntimeConfig, luôn thuộc Whitelist)
   List<String> get effectiveModelChain {
@@ -108,10 +109,13 @@ class AiService {
     return e.toString().contains('NO_NETWORK');
   }
 
-  // Hàm helper gọi generateContent có tự động thử model dự phòng khi gặp lỗi "not found"
+  // Hàm helper gọi generateContent có tự động thử model dự phòng khi gặp lỗi hoặc đầu ra không hợp lệ
   Future<GenerateContentResponse> _generateWithFallback(
     List<Content> content, {
     double? temperatureOverride,
+    String? responseMimeType,
+    bool Function(String text)? responseValidator,
+    Duration timeout = const Duration(seconds: 18),
   }) async {
     final cfg = effectiveRuntimeConfig;
     if (!cfg.isEnabled) {
@@ -135,6 +139,9 @@ class AiService {
             content,
             effectiveTemp,
           );
+          if (responseValidator != null && !responseValidator(text ?? '')) {
+            throw const FormatException('INVALID_STRUCTURED_RESPONSE');
+          }
           _lastModelUsed = modelName;
           return GenerateContentResponse([
             Candidate(
@@ -150,11 +157,16 @@ class AiService {
         final model = GenerativeModel(
           model: modelName,
           apiKey: geminiApiKey,
-          generationConfig: GenerationConfig(temperature: effectiveTemp),
+          generationConfig: GenerationConfig(
+            temperature: effectiveTemp,
+            responseMimeType: responseMimeType,
+          ),
         );
-        final response = await model
-            .generateContent(content)
-            .timeout(const Duration(seconds: 15));
+        final response = await model.generateContent(content).timeout(timeout);
+        if (responseValidator != null &&
+            !responseValidator(response.text ?? '')) {
+          throw const FormatException('INVALID_STRUCTURED_RESPONSE');
+        }
         _lastModelUsed = modelName;
         return response;
       } catch (e) {
@@ -169,7 +181,7 @@ class AiService {
         continue;
       }
     }
-    throw lastError ?? Exception('Tất cả model AI đều không khả dụng');
+    throw lastError ?? Exception(AppLocalizations.tr('svc_ai_all_failed'));
   }
 
   /// AI 1: Phân tích thói quen chi tiêu (30 ngày gần đây)
@@ -182,7 +194,9 @@ class AiService {
       categories: categories,
     );
     final response = await _generateWithFallback([Content.text(prompt)]);
-    return response.text ?? 'Không thể phân tích dữ liệu lúc này.';
+    return response.text != null
+        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
+        : AppLocalizations.tr('svc_ai_cant_analyze');
   }
 
   /// AI 3: Dự đoán số tiền chi tiêu cuối tháng
@@ -199,8 +213,10 @@ class AiService {
       totalDaysInMonth: totalDaysInMonth,
     );
     final response = await _generateWithFallback([Content.text(prompt)]);
-    return response.text ??
-        'Theo tốc độ hiện tại, dự kiến chi tiêu cuối tháng khoảng ${predicted.round()} đồng.';
+    return response.text != null
+        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
+        : AppLocalizations.tr('svc_ai_month_end_fb',
+            params: {'amount': AppFormatters.number(predicted)});
   }
 
   /// AI 4: Lập kế hoạch tiết kiệm có gắn ngữ cảnh thu nhập & chi tiêu thực tế
@@ -227,8 +243,12 @@ class AiService {
       runtimeConfig: effectiveRuntimeConfig,
     );
     final response = await _generateWithFallback([Content.text(prompt)]);
-    return response.text ??
-        'Bạn cần tiết kiệm khoảng ${monthlyRequired.round()} đồng/tháng để đạt mục tiêu "$goalName".';
+    return response.text != null
+        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
+        : AppLocalizations.tr('svc_ai_save_plan_fb', params: {
+            'amount': AppFormatters.number(monthlyRequired),
+            'goal': goalName,
+          });
   }
 
   /// AI 5: Chatbot tài chính - Trợ lý AI tài chính cá nhân dựa trên dữ liệu định lượng
@@ -242,7 +262,7 @@ class AiService {
       if (response.text != null) {
         _chatHistory.add(Content.model([TextPart(response.text!)]));
       }
-      return response.text ?? 'Xin lỗi, mình chưa thể trả lời câu hỏi này.';
+      return response.text ?? AppLocalizations.tr('svc_ai_cant_answer');
     } catch (e) {
       // Remove last user question to allow retrying
       if (_chatHistory.isNotEmpty) {
@@ -328,7 +348,7 @@ class AiService {
       try {
         debugPrint('⚠️ Chuyển sang fallback non-streaming cho câu trả lời');
         final response = await _generateWithFallback(_chatHistory);
-        final fullText = response.text ?? 'Xin lỗi, mình chưa thể trả lời câu hỏi này.';
+        final fullText = response.text ?? AppLocalizations.tr('svc_ai_cant_answer');
         accumulatedText.write(fullText);
         yield fullText;
         streamSucceeded = true;
@@ -380,7 +400,9 @@ class AiService {
     // Build prompt for Gemini
     final prompt = AiPromptBuilder.buildTrendPrompt(amounts: amounts);
     final response = await _generateWithFallback([Content.text(prompt)]);
-    final insight = response.text ?? 'Không thể phân tích xu hướng lúc này.';
+    final insight = response.text != null
+        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
+        : AppLocalizations.tr('svc_ai_cant_trend');
     return TrendResult(
       monthlyAmounts: amounts,
       insight: insight,
@@ -400,8 +422,9 @@ class AiService {
       targetDailyAvg: targetDailyAvg,
     );
     final response = await _generateWithFallback([Content.text(prompt)]);
-    return response.text ??
-        'Giảm chi tiêu cho $categoryName có thể giúp bạn tiết kiệm thêm.';
+    return response.text != null
+        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
+        : AppLocalizations.tr('svc_ai_cuts_fb', params: {'cat': categoryName});
   }
 
   /// AI 7: OCR trích xuất thông tin hoá đơn
@@ -505,11 +528,13 @@ class AiService {
   /// đề xuất phương án — KHÔNG đưa dữ liệu thô, không để Gemini tự tính %.
   Future<String> explainAndSuggestForIssues(List<FinancialIssue> issues) async {
     if (issues.isEmpty) {
-      return 'Chúc mừng bạn! Chưa phát hiện vấn đề tài chính đáng chú ý nào trong tháng này.';
+      return AppLocalizations.tr('svc_ai_no_issues');
     }
     final prompt = AiPromptBuilder.buildIssuesPrompt(issues);
     final response = await _generateWithFallback([Content.text(prompt)]);
-    return response.text ?? 'Không thể tạo đề xuất lúc này.';
+    return response.text != null
+        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
+        : AppLocalizations.tr('svc_ai_cant_suggest');
   }
 
   /// Giải thích + đề xuất cho ĐÚNG 1 vấn đề, gọi khi người dùng bấm xem chi
@@ -517,7 +542,9 @@ class AiService {
   Future<String> explainSingleIssue(FinancialIssue issue) async {
     final prompt = AiPromptBuilder.buildSingleIssuePrompt(issue);
     final response = await _generateWithFallback([Content.text(prompt)]);
-    return response.text ?? 'Không thể tạo đề xuất lúc này.';
+    return response.text != null
+        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
+        : AppLocalizations.tr('svc_ai_cant_suggest');
   }
 
   /// AI Cố vấn tài chính diễn giải tổng hợp FinancialInsightSummary đã được Dart tính sẵn.
@@ -526,7 +553,9 @@ class AiService {
       FinancialInsightSummary summary) async {
     final prompt = AiPromptBuilder.buildFinancialInsightsPrompt(summary);
     final response = await _generateWithFallback([Content.text(prompt)]);
-    return response.text ?? 'Không thể tải phần giải thích AI lúc này.';
+    return response.text != null
+        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
+        : AppLocalizations.tr('svc_ai_cant_explain');
   }
 
   /// Diễn giải và đề xuất kế hoạch tài chính theo định dạng JSON có cấu trúc,
@@ -537,15 +566,21 @@ class AiService {
   }) async {
     final tier = draftPlan.dataTierUsed;
     if (tier == DataSufficiencyTier.empty) {
-      return const AiStructuredPlanInsight(
+      return AiStructuredPlanInsight(
         executiveSummary:
-            'Chưa có dữ liệu giao dịch hoặc ngân sách để phân tích. Hãy thêm giao dịch thu chi hoặc thiết lập ngân sách đầu tiên.',
+            AppLocalizations.tr('svc_ai_empty_exec'),
         behavioralInsights: [],
         categoryActionTips: {},
         savingStrategyNote:
-            'Khởi tạo mục tiêu tiết kiệm và nhập thu nhập dự kiến để nhận kế hoạch tháng.',
+            AppLocalizations.tr('svc_ai_empty_strat'),
         isFromFallback: true,
       );
+    }
+
+    // Nếu quản trị viên tắt tính năng AI (isEnabled == false), bỏ qua hoàn toàn
+    // việc gọi Gemini API và trả về bản diễn giải định lượng nội bộ mượt mà.
+    if (!effectiveRuntimeConfig.isEnabled) {
+      return buildDeterministicFallbackInsight(draftPlan, summary: summary);
     }
 
     final prompt = AiPromptBuilder.buildStructuredPlanPrompt(
@@ -554,21 +589,28 @@ class AiService {
       runtimeConfig: effectiveRuntimeConfig,
     );
 
+    AiStructuredPlanInsight? parsedResult;
     try {
-      final response = await _generateWithFallback([Content.text(prompt)]);
-      final rawText = response.text ?? '';
-      final parsed = parseAndValidateStructuredInsight(
-        rawText: rawText,
-        draftPlan: draftPlan,
+      await _generateWithFallback(
+        [Content.text(prompt)],
+        responseMimeType: 'application/json',
+        timeout: const Duration(seconds: 22),
+        responseValidator: (rawText) {
+          parsedResult = parseAndValidateStructuredInsight(
+            rawText: rawText,
+            draftPlan: draftPlan,
+          );
+          return parsedResult != null;
+        },
       );
-      if (parsed != null) {
-        return parsed;
+      if (parsedResult != null) {
+        return parsedResult!;
       }
     } catch (e) {
       debugPrint('⚠️ Lỗi gọi/parse explainFinancialInsightsStructured: $e');
     }
 
-    return buildDeterministicFallbackInsight(draftPlan);
+    return buildDeterministicFallbackInsight(draftPlan, summary: summary);
   }
 
   /// Parse và kiểm duyệt JSON trả về từ Gemini; trả về null nếu JSON sai cấu trúc.
@@ -584,8 +626,13 @@ class AiService {
 
   /// Bản diễn giải định lượng dự phòng (Deterministic Fallback) khi mất mạng hoặc JSON lỗi.
   static AiStructuredPlanInsight buildDeterministicFallbackInsight(
-      MonthlyFinancialPlan draftPlan) {
-    return AiPromptBuilder.buildDeterministicFallbackInsight(draftPlan);
+    MonthlyFinancialPlan draftPlan, {
+    FinancialInsightSummary? summary,
+  }) {
+    return AiPromptBuilder.buildDeterministicFallbackInsight(
+      draftPlan,
+      summary: summary,
+    );
   }
 
   /// Giải thích khoản chi bất thường dựa trên số liệu Dart đã tính sẵn.
@@ -608,8 +655,10 @@ class AiService {
     );
 
     final response = await _generateWithFallback([Content.text(prompt)]);
-    return response.text ??
-        'Khoản chi này cao hơn khoảng $ratioFormatted lần mức chi thông thường của bạn cho $categoryName.';
+    return response.text != null
+        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
+        : AppLocalizations.tr('svc_ai_anom_fb',
+            params: {'ratio': ratioFormatted, 'cat': categoryName});
   }
 
   String _stripMarkdownCodeFence(String text) {

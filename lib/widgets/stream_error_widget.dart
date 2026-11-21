@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../l10n/app_localizations.dart';
 import '../utils/constants.dart';
 import 'app_button.dart';
 
@@ -14,6 +15,26 @@ class StreamErrorWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final normalized = error.toLowerCase();
+    final isPermissionDenied = normalized.contains('permission-denied') ||
+        normalized.contains('missing or insufficient permissions');
+    final isIndexBuilding = normalized.contains('failed-precondition') &&
+        normalized.contains('index');
+
+    final icon = isPermissionDenied
+        ? Icons.lock_outline_rounded
+        : (isIndexBuilding
+            ? Icons.sync_problem_rounded
+            : Icons.wifi_off_rounded);
+    final title = isPermissionDenied
+        ? context.tr('stream_err_permission_title')
+        : (isIndexBuilding
+            ? context.tr('stream_err_index_title')
+            : context.tr('stream_err_title'));
+    final subtitle = isPermissionDenied
+        ? context.tr('stream_err_permission_hint')
+        : (isIndexBuilding ? context.tr('stream_err_index_hint') : error);
+
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 32),
@@ -23,19 +44,21 @@ class StreamErrorWidget extends StatelessWidget {
           children: [
             Container(
               padding: const EdgeInsets.all(16),
-              decoration: const BoxDecoration(
-                color: AppColors.expenseBackground,
+              decoration: BoxDecoration(
+                color: isIndexBuilding
+                    ? AppColors.warningBackground
+                    : AppColors.expenseBackground,
                 shape: BoxShape.circle,
               ),
-              child: const Icon(
-                Icons.wifi_off_rounded,
-                color: AppColors.expense,
+              child: Icon(
+                icon,
+                color: isIndexBuilding ? AppColors.warning : AppColors.expense,
                 size: 36,
               ),
             ),
             const SizedBox(height: 16),
             Text(
-              'Không thể tải dữ liệu',
+              title,
               style: TextStyle(
                 fontSize: 16,
                 fontWeight: FontWeight.w600,
@@ -45,7 +68,7 @@ class StreamErrorWidget extends StatelessWidget {
             ),
             const SizedBox(height: 6),
             Text(
-              error,
+              subtitle,
               style: TextStyle(
                 fontSize: 13,
                 color: context.appTextSecondary,
@@ -57,7 +80,7 @@ class StreamErrorWidget extends StatelessWidget {
               SizedBox(
                 width: 140,
                 child: AppButton(
-                  text: 'Thử lại',
+                  text: context.tr('common_retry'),
                   icon: Icons.refresh_rounded,
                   onPressed: onRetry,
                   height: 42,

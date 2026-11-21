@@ -1348,5 +1348,424 @@ void main() {
       final wDoc = await fakeDb.collection('wallets').doc('w_1').get();
       expect(wDoc.data()!['balance'], equals(2000000.0));
     });
+
+    test('32. Manual confirmation throws InsufficientBalanceException when wallet balance is lower than expense amount', () async {
+      final firestoreService = FirestoreService(firestore: fakeDb);
+      final userId = 'u_insufficient';
+      final scheduleId = 'sch_insufficient';
+      final dueDate = DateTime(2026, 9, 20);
+
+      await fakeDb.collection('wallets').doc('w_low').set({
+        'userId': userId,
+        'walletName': 'Ví Tiết Kiệm',
+        'balance': 150000.0,
+        'type': 'cash',
+        'isActive': true,
+        'createdAt': DateTime.now().toIso8601String(),
+      });
+
+      final schedule = RecurringTransactionSchedule(
+        scheduleId: scheduleId,
+        userId: userId,
+        type: 'expense',
+        walletId: 'w_low',
+        categoryId: 'cat_bill',
+        amount: 500000.0,
+        frequency: 'monthly',
+        startDate: dueDate,
+        nextDueDate: dueDate,
+        postingMode: RecurringTransactionSchedule.postingModeManual,
+        createdAt: DateTime.now(),
+      );
+
+      await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .set(schedule.toMap());
+
+      expect(
+        () async => await firestoreService.confirmRecurringOccurrence(
+          userId: userId,
+          schedule: schedule,
+          occurrenceDate: dueDate,
+        ),
+        throwsA(isA<InsufficientBalanceException>().having(
+          (e) => e.shortfall,
+          'shortfall',
+          equals(350000.0),
+        )),
+      );
+
+      // Verify no transaction created
+      final txQuery = await fakeDb.collection('transactions').get();
+      expect(txQuery.docs, isEmpty);
+
+      // Verify balance not modified
+      final wDoc = await fakeDb.collection('wallets').doc('w_low').get();
+      expect(wDoc.data()!['balance'], equals(150000.0));
+    });
+
+    test('33. Reactivating a paused recurring schedule advances nextDueDate to prevent backlog spam', () async {
+      final firestoreService = FirestoreService(firestore: fakeDb);
+      final userId = 'u_reactivate';
+      final scheduleId = 'sch_reactivate';
+      // Old nextDueDate was far in the past
+      final pastDate = DateTime(2020, 1, 1);
+
+      final schedule = RecurringTransactionSchedule(
+        scheduleId: scheduleId,
+        userId: userId,
+        type: 'expense',
+        walletId: 'w_1',
+        categoryId: 'cat_rent',
+        amount: 2000000.0,
+        frequency: 'monthly',
+        startDate: pastDate,
+        nextDueDate: pastDate,
+        isActive: false,
+        createdAt: DateTime(2020, 1, 1),
+      );
+
+      await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .set(schedule.toMap());
+
+      // Reactivate
+      await firestoreService.setRecurringTransactionActive(
+        scheduleId,
+        true,
+      );
+
+      final updatedDoc = await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .get();
+      final data = updatedDoc.data()!;
+      expect(data['isActive'], isTrue);
+
+      final newNextDueDate = DateTime.parse(data['nextDueDate']);
+      // Must have advanced past pastDate and no longer be in 2020
+      expect(newNextDueDate.isAfter(pastDate), isTrue);
+      expect(newNextDueDate.year >= 2026, isTrue);
+    });
+
+    test('34. createRecurringNotificationIfNotExists dedupes in-app notifications with same occurrenceKey', () async {
+      final firestoreService = FirestoreService(firestore: fakeDb);
+      final userId = 'u_dedup';
+
+      await firestoreService.createRecurringNotificationIfNotExists(
+        userId: userId,
+        title: 'Nhắc nhở Internet',
+        content: '300.000đ đến hạn hôm nay',
+        type: 'recurring_due',
+        scheduleId: 'sch_internet',
+        occurrenceKey: '2026-09-20',
+      );
+
+      await firestoreService.createRecurringNotificationIfNotExists(
+        userId: userId,
+        title: 'Nhắc nhở Internet lặp lại',
+        content: '300.000đ đến hạn hôm nay',
+        type: 'recurring_due',
+        scheduleId: 'sch_internet',
+        occurrenceKey: '2026-09-20',
+      );
+
+      final snapshot = await fakeDb
+          .collection('notifications')
+          .where('userId', isEqualTo: userId)
+          .get();
+      // Should contain only 1 notification because occurrenceKey matches
+      expect(snapshot.docs.length, equals(1));
+      expect(snapshot.docs.first.data()['title'], equals('Nhắc nhở Internet'));
+    });
+
+    test(
+        '35. evaluateManualGracePeriod counts 3 days from nextDueDate (ignoring reminderDaysBefore) and preserves autoPost',
+        () {
+      final service = RecurringTransactionService();
+      final dueDate = DateTime(2026, 10, 10, 9, 0);
+      final manualSchedule = RecurringTransactionSchedule(
+        scheduleId: 'sch_grace_unit',
+        userId: 'u_1',
+        type: 'expense',
+        walletId: 'w_1',
+        categoryId: 'cat_bills',
+        amount: 250000,
+        frequency: 'monthly',
+        startDate: DateTime(2026, 8, 10, 9, 0),
+        nextDueDate: dueDate,
+        isActive: true,
+        createdAt: DateTime(2026, 8, 1),
+        postingMode: RecurringTransactionSchedule.postingModeManual,
+        reminderDaysBefore: 5, // Reminder was Oct 5, grace still counts from Oct 10!
+      );
+
+      // Day 0, Day 1, Day 2 -> stays within 3-day grace window
+      final day0 = service.evaluateManualGracePeriod(
+        schedule: manualSchedule,
+        referenceDate: DateTime(2026, 10, 10, 18, 0),
+      );
+      expect(day0.skippedDates, isEmpty);
+      expect(day0.isCurrentlyDueWithinGrace, isTrue);
+      expect(day0.remainingGraceDays, equals(3));
+
+      final day2 = service.evaluateManualGracePeriod(
+        schedule: manualSchedule,
+        referenceDate: DateTime(2026, 10, 12, 23, 0),
+      );
+      expect(day2.skippedDates, isEmpty);
+      expect(day2.isCurrentlyDueWithinGrace, isTrue);
+      expect(day2.remainingGraceDays, equals(1));
+
+      // Day 3 (Oct 13) -> auto-skipped to Nov 10, keeping monthly day=10 anchor
+      final day3 = service.evaluateManualGracePeriod(
+        schedule: manualSchedule,
+        referenceDate: DateTime(2026, 10, 13, 8, 0),
+      );
+      expect(day3.skippedDates.length, equals(1));
+      expect(day3.skippedDates.first, equals(DateTime(2026, 10, 10)));
+      expect(day3.newNextDueDate.year, equals(2026));
+      expect(day3.newNextDueDate.month, equals(11));
+      expect(day3.newNextDueDate.day, equals(10));
+      expect(day3.isCurrentlyDueWithinGrace, isFalse);
+
+      // autoPost must NEVER be skipped by evaluateManualGracePeriod
+      final autoSchedule = manualSchedule.copyWith(
+        postingMode: RecurringTransactionSchedule.postingModeAuto,
+      );
+      final autoEval = service.evaluateManualGracePeriod(
+        schedule: autoSchedule,
+        referenceDate: DateTime(2026, 10, 20),
+      );
+      expect(autoEval.skippedDates, isEmpty);
+      expect(autoEval.newNextDueDate, equals(dueDate));
+    });
+
+    test(
+        '36. processDueRecurringTransactions keeps manualConfirmation for 2 days after due date (even with reminderDaysBefore=5) and auto-skips on day 3 without creating tx or deleting template',
+        () async {
+      final firestoreService = FirestoreService(firestore: fakeDb);
+      const userId = 'u_grace_fs';
+      const walletId = 'w_grace';
+      const scheduleId = 'sch_grace_manual';
+
+      await fakeDb.collection('wallets').doc(walletId).set({
+        'userId': userId,
+        'walletName': 'Ví chính',
+        'balance': 5000000.0,
+        'type': 'bank',
+        'createdAt': '2026-01-01T00:00:00.000',
+      });
+
+      final dueDate = DateTime(2026, 10, 10, 9, 0);
+      final schedule = RecurringTransactionSchedule(
+        scheduleId: scheduleId,
+        userId: userId,
+        type: 'expense',
+        walletId: walletId,
+        categoryId: 'cat_internet',
+        amount: 300000.0,
+        frequency: 'monthly',
+        startDate: DateTime(2026, 8, 10, 9, 0),
+        nextDueDate: dueDate,
+        isActive: true,
+        createdAt: DateTime(2026, 8, 1),
+        postingMode: RecurringTransactionSchedule.postingModeManual,
+        reminderDaysBefore: 5,
+      );
+      await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .set(schedule.toMap());
+
+      // Day 2 (Oct 12 = 7 days after reminder Oct 5, but ONLY 2 days after Oct 10)
+      final day2Res = await firestoreService.processDueRecurringTransactions(
+        userId,
+        referenceDate: DateTime(2026, 10, 12, 15, 0),
+      );
+      expect(day2Res['autoSkippedManualCount'], equals(0));
+      expect(day2Res['processedCount'], equals(0));
+
+      final scheduleAfterDay2 = await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .get();
+      expect(
+        DateTime.parse(scheduleAfterDay2.data()!['nextDueDate']).day,
+        equals(10),
+      );
+      expect(
+        DateTime.parse(scheduleAfterDay2.data()!['nextDueDate']).month,
+        equals(10),
+      );
+
+      // Day 3 (Oct 13) -> auto-skip kicks in cleanly!
+      final day3Res = await firestoreService.processDueRecurringTransactions(
+        userId,
+        referenceDate: DateTime(2026, 10, 13, 9, 0),
+      );
+      expect(day3Res['autoSkippedManualCount'], equals(1));
+      expect(day3Res['processedCount'], equals(0));
+
+      final scheduleAfterDay3 = await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .get();
+      expect(scheduleAfterDay3.exists, isTrue);
+      expect(scheduleAfterDay3.data()!['isActive'], isTrue);
+      final advancedDate =
+          DateTime.parse(scheduleAfterDay3.data()!['nextDueDate']);
+      expect(advancedDate.month, equals(11));
+      expect(advancedDate.day, equals(10));
+
+      // No transaction was created & wallet balance untouched
+      final txSnap = await fakeDb
+          .collection('transactions')
+          .where('userId', isEqualTo: userId)
+          .get();
+      expect(txSnap.docs, isEmpty);
+      final walletSnap =
+          await fakeDb.collection('wallets').doc(walletId).get();
+      expect((walletSnap.data()!['balance'] as num).toDouble(), equals(5000000.0));
+
+      // Occurrence audit log recorded 'skipped'
+      final occDoc = await fakeDb
+          .collection('recurringTransactionOccurrences')
+          .doc('${scheduleId}_2026-10-10')
+          .get();
+      expect(occDoc.exists, isTrue);
+      expect(occDoc.data()!['action'], equals('skipped'));
+    });
+
+    test(
+        '37. Deferring manualConfirmation before day 3 resets grace period cleanly from deferred date without applying 3-day skip early',
+        () async {
+      final firestoreService = FirestoreService(firestore: fakeDb);
+      const userId = 'u_defer_grace';
+      const walletId = 'w_defer_grace';
+      const scheduleId = 'sch_defer_grace';
+
+      await fakeDb.collection('wallets').doc(walletId).set({
+        'userId': userId,
+        'walletName': 'Ví',
+        'balance': 3000000.0,
+        'type': 'cash',
+        'createdAt': '2026-01-01T00:00:00.000',
+      });
+
+      final schedule = RecurringTransactionSchedule(
+        scheduleId: scheduleId,
+        userId: userId,
+        type: 'expense',
+        walletId: walletId,
+        categoryId: 'cat_rent',
+        amount: 500000.0,
+        frequency: 'weekly',
+        startDate: DateTime(2026, 10, 5, 9, 0), // Monday
+        nextDueDate: DateTime(2026, 10, 5, 9, 0),
+        isActive: true,
+        createdAt: DateTime(2026, 10, 1),
+        postingMode: RecurringTransactionSchedule.postingModeManual,
+      );
+      await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .set(schedule.toMap());
+
+      // User defers on day 2 (Oct 7) to Oct 10
+      final deferredDate = DateTime(2026, 10, 10, 9, 0);
+      await firestoreService.deferRecurringOccurrence(
+        userId: userId,
+        schedule: schedule,
+        occurrenceDate: schedule.nextDueDate,
+        newDueDate: deferredDate,
+      );
+
+      // On Oct 12 (2 days after deferredDate, 7 days after original Oct 5): NOT auto-skipped!
+      final graceCheck = await firestoreService.processDueRecurringTransactions(
+        userId,
+        referenceDate: DateTime(2026, 10, 12, 12, 0),
+      );
+      expect(graceCheck['autoSkippedManualCount'], equals(0));
+      final stillDeferred = await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .get();
+      expect(
+        DateTime.parse(stillDeferred.data()!['nextDueDate']).day,
+        equals(10),
+      );
+
+      // Confirming on Oct 12 advances weekly cadence preserving original Monday weekday
+      final updatedSchedule = RecurringTransactionSchedule.fromMap(
+        stillDeferred.data()!,
+        scheduleId,
+      );
+      await firestoreService.confirmRecurringOccurrence(
+        userId: userId,
+        schedule: updatedSchedule,
+        occurrenceDate: deferredDate,
+      );
+      final afterConfirm = await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .get();
+      final nextAfterConfirm =
+          DateTime.parse(afterConfirm.data()!['nextDueDate']);
+      expect(nextAfterConfirm.weekday, equals(DateTime.monday));
+      expect(nextAfterConfirm.isAfter(deferredDate), isTrue);
+    });
+
+    test(
+        '38. autoPost schedule overdue >= 3 days is NEVER auto-skipped and posts transaction normally',
+        () async {
+      final firestoreService = FirestoreService(firestore: fakeDb);
+      const userId = 'u_auto_no_skip';
+      const walletId = 'w_auto_no_skip';
+      const scheduleId = 'sch_auto_no_skip';
+
+      await fakeDb.collection('wallets').doc(walletId).set({
+        'userId': userId,
+        'walletName': 'Ví Auto',
+        'balance': 2000000.0,
+        'type': 'bank',
+        'createdAt': '2026-01-01T00:00:00.000',
+      });
+
+      final schedule = RecurringTransactionSchedule(
+        scheduleId: scheduleId,
+        userId: userId,
+        type: 'expense',
+        walletId: walletId,
+        categoryId: 'cat_sub',
+        amount: 150000.0,
+        frequency: 'monthly',
+        startDate: DateTime(2026, 10, 1, 9, 0),
+        nextDueDate: DateTime(2026, 10, 1, 9, 0),
+        isActive: true,
+        createdAt: DateTime(2026, 9, 15),
+        postingMode: RecurringTransactionSchedule.postingModeAuto,
+      );
+      await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .set(schedule.toMap());
+
+      final res = await firestoreService.processDueRecurringTransactions(
+        userId,
+        referenceDate: DateTime(2026, 10, 10, 9, 0), // 9 days overdue!
+      );
+      expect(res['autoSkippedManualCount'], equals(0));
+      expect(res['processedCount'], equals(1));
+
+      final txSnap = await fakeDb
+          .collection('transactions')
+          .where('userId', isEqualTo: userId)
+          .get();
+      expect(txSnap.docs.length, equals(1));
+      expect((txSnap.docs.first.data()['amount'] as num).toDouble(), equals(150000.0));
+    });
   });
 }

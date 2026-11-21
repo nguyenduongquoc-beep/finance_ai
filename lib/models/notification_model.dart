@@ -13,6 +13,10 @@ class AppNotification {
   final DateTime createdAt;
   final String? scheduleId;
   final String? occurrenceKey;
+  final String? titleKey;
+  final Map<String, String>? titleParams;
+  final String? contentKey;
+  final Map<String, String>? contentParams;
 
   AppNotification({
     required this.notificationId,
@@ -24,9 +28,24 @@ class AppNotification {
     required this.createdAt,
     this.scheduleId,
     this.occurrenceKey,
+    this.titleKey,
+    this.titleParams,
+    this.contentKey,
+    this.contentParams,
   });
 
   bool get isUnread => status.trim().toLowerCase() != 'read';
+
+  static Map<String, String>? _parseStringMap(dynamic raw) {
+    if (raw is! Map) return null;
+    final parsed = <String, String>{};
+    raw.forEach((key, value) {
+      if (key != null && value != null) {
+        parsed[key.toString()] = value.toString();
+      }
+    });
+    return parsed.isEmpty ? null : parsed;
+  }
 
   factory AppNotification.fromMap(Map<String, dynamic> map, String id) {
     DateTime parsedDate = DateTime.now();
@@ -67,6 +86,10 @@ class AppNotification {
       createdAt: parsedDate,
       scheduleId: map['scheduleId'],
       occurrenceKey: map['occurrenceKey'],
+      titleKey: map['titleKey']?.toString(),
+      titleParams: _parseStringMap(map['titleParams']),
+      contentKey: map['contentKey']?.toString(),
+      contentParams: _parseStringMap(map['contentParams']),
     );
   }
 
@@ -80,6 +103,12 @@ class AppNotification {
       'createdAt': createdAt.toIso8601String(),
       if (scheduleId != null) 'scheduleId': scheduleId,
       if (occurrenceKey != null) 'occurrenceKey': occurrenceKey,
+      if (titleKey != null) 'titleKey': titleKey,
+      if (titleParams != null && titleParams!.isNotEmpty)
+        'titleParams': titleParams,
+      if (contentKey != null) 'contentKey': contentKey,
+      if (contentParams != null && contentParams!.isNotEmpty)
+        'contentParams': contentParams,
     };
   }
 }

@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../../l10n/app_localizations.dart';
 import '../../models/category_model.dart';
 import '../../models/transaction_model.dart';
 import '../../services/firestore_service.dart';
 import '../../utils/category_icons.dart';
+import '../../utils/category_localization_helper.dart';
 import '../../utils/constants.dart';
 import '../../utils/formatters.dart';
 import '../../widgets/app_card.dart';
@@ -36,19 +38,19 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
     Color(0xFF475569), // Slate
   ];
 
-  static const List<Map<String, dynamic>> _iconOptions = [
-    {'name': 'restaurant', 'label': 'Ăn uống'},
-    {'name': 'shopping_bag', 'label': 'Mua sắm'},
-    {'name': 'local_gas_station', 'label': 'Di chuyển'},
-    {'name': 'receipt_long', 'label': 'Hóa đơn'},
-    {'name': 'work', 'label': 'Lương/Công việc'},
-    {'name': 'card_giftcard', 'label': 'Thưởng/Quà'},
-    {'name': 'storefront', 'label': 'Kinh doanh'},
-    {'name': 'school', 'label': 'Giáo dục'},
-    {'name': 'movie', 'label': 'Giải trí'},
-    {'name': 'flight', 'label': 'Du lịch'},
-    {'name': 'local_hospital', 'label': 'Y tế'},
-    {'name': 'category', 'label': 'Khác'},
+  static const List<String> _iconKeys = [
+    'restaurant',
+    'shopping_bag',
+    'local_gas_station',
+    'receipt_long',
+    'work',
+    'card_giftcard',
+    'storefront',
+    'school',
+    'movie',
+    'flight',
+    'local_hospital',
+    'category',
   ];
 
   @override
@@ -60,7 +62,7 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surface,
       appBar: AppBar(
-        title: const Text('Danh mục phân loại'),
+        title: Text(context.tr('cat_mgmt_title')),
         elevation: 0,
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
@@ -70,8 +72,8 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
         elevation: 3,
         onPressed: () => _showCategorySheet(context, uid),
         icon: const Icon(Icons.add_rounded),
-        label: const Text('Thêm danh mục',
-            style: TextStyle(fontWeight: FontWeight.w600)),
+        label: Text(context.tr('bud_set_add_cat_btn'),
+            style: const TextStyle(fontWeight: FontWeight.w600)),
       ),
       body: StreamBuilder<List<Category>>(
         stream: _firestoreService.streamCategories(uid),
@@ -130,7 +132,7 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                         children: [
                           Expanded(
                             child: _buildTabButton(
-                              label: 'Chi tiêu',
+                              label: context.tr('common_expense'),
                               count: expenseCategories.length,
                               isSelected: _selectedType == 'expense',
                               activeColor: AppColors.expense,
@@ -140,7 +142,7 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                           ),
                           Expanded(
                             child: _buildTabButton(
-                              label: 'Thu nhập',
+                              label: context.tr('common_income'),
                               count: incomeCategories.length,
                               isSelected: _selectedType == 'income',
                               activeColor: AppColors.income,
@@ -198,8 +200,9 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
     required double totalAmount,
   }) {
     final isExpense = type == 'expense';
-    final label =
-        isExpense ? 'Tổng chi tiêu tháng này' : 'Tổng thu nhập tháng này';
+    final label = isExpense
+        ? context.tr('cat_mgmt_total_expense')
+        : context.tr('cat_mgmt_total_income');
     final themeColor =
         isExpense ? const Color(0xFFC0453A) : const Color(0xFF2E8B57);
 
@@ -230,8 +233,8 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
             ),
             child: Icon(
               isExpense
-                  ? Icons.arrow_outward_rounded
-                  : Icons.arrow_downward_rounded,
+                  ? Icons.arrow_downward_rounded
+                  : Icons.arrow_upward_rounded,
               color: themeColor,
               size: 24,
             ),
@@ -266,18 +269,27 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
               ],
             ),
           ),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-            decoration: BoxDecoration(
-              color: context.appInputFill,
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Text(
-              '$categoryCount danh mục',
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: context.appTextSecondary,
+          const SizedBox(width: 8),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 130),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: context.appInputFill,
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  context.tr('bud_set_cat_count',
+                      params: {'count': '$categoryCount'}),
+                  maxLines: 1,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: context.appTextSecondary,
+                  ),
+                ),
               ),
             ),
           ),
@@ -313,39 +325,49 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                 ]
               : null,
         ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
-                color: isSelected
-                    ? context.appTextPrimary
-                    : context.appTextSecondary,
-              ),
-            ),
-            const SizedBox(width: 6),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: isSelected
-                    ? activeColor.withValues(
-                        alpha: context.isDarkMode ? 0.25 : 0.12)
-                    : context.appBorder.withValues(alpha: 0.4),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                '$count',
-                style: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w700,
-                  color: isSelected ? activeColor : context.appTextSecondary,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight:
+                          isSelected ? FontWeight.w700 : FontWeight.w500,
+                      color: isSelected
+                          ? context.appTextPrimary
+                          : context.appTextSecondary,
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ],
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: isSelected
+                      ? activeColor.withValues(
+                          alpha: context.isDarkMode ? 0.25 : 0.12)
+                      : context.appBorder.withValues(alpha: 0.4),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  '$count',
+                  style: TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: isSelected ? activeColor : context.appTextSecondary,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -386,21 +408,80 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      category.name,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w600,
-                        color: context.appTextPrimary,
-                      ),
+                    Row(
+                      children: [
+                        Flexible(
+                          child: Text(
+                            CategoryLocalizationHelper.localizeNameWithContext(
+                                context, category.name),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              color: context.appTextPrimary,
+                            ),
+                          ),
+                        ),
+                        if (category.type == 'expense') ...[
+                          const SizedBox(width: 8),
+                          InkWell(
+                            borderRadius: BorderRadius.circular(6),
+                            onTap: () async {
+                              final nextVal = !category.isEssential;
+                              await _firestoreService.updateCategory(
+                                category.categoryId,
+                                {'isEssential': nextVal},
+                              );
+                              if (context.mounted) {
+                                AppSnackbar.show(
+                                  context,
+                                  context.tr('cat_mgmt_moved_group', params: {
+                                    'name': CategoryLocalizationHelper
+                                        .localizeNameWithContext(
+                                            context, category.name),
+                                    'group': nextVal
+                                        ? context.tr('cat_mgmt_essential')
+                                        : context.tr('cat_mgmt_flexible'),
+                                  }),
+                                );
+                              }
+                            },
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 7, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: category.isEssential
+                                    ? AppColors.primary.withValues(alpha: 0.14)
+                                    : AppColors.warning.withValues(alpha: 0.14),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Text(
+                                category.isEssential
+                                    ? context.tr('cat_mgmt_essential')
+                                    : context.tr('cat_mgmt_flexible'),
+                                style: TextStyle(
+                                  fontSize: 10.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: category.isEssential
+                                      ? AppColors.primary
+                                      : AppColors.warning,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                     const SizedBox(height: 2),
                     Text(
                       monthlyAmount > 0
-                          ? 'Tháng này: ${AppFormatters.compactCurrency(monthlyAmount, unit: '₫')}'
-                          : 'Chưa có giao dịch tháng này',
+                          ? context.tr('cat_mgmt_this_month_amt', params: {
+                              'amount': AppFormatters.compactCurrency(
+                                  monthlyAmount,
+                                  unit: '₫')
+                            })
+                          : context.tr('cat_mgmt_no_tx_month'),
                       style: TextStyle(
                         fontSize: 12,
                         color: monthlyAmount > 0
@@ -417,7 +498,7 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
               PopupMenuButton<String>(
                 icon: Icon(Icons.more_vert_rounded,
                     color: context.appTextSecondary, size: 20),
-                tooltip: 'Tùy chọn',
+                tooltip: context.tr('cat_mgmt_options_tooltip'),
                 onSelected: (action) {
                   if (action == 'edit') {
                     _showCategorySheet(context, uid, category: category);
@@ -427,25 +508,25 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                   }
                 },
                 itemBuilder: (ctx) => [
-                  const PopupMenuItem(
+                  PopupMenuItem(
                     value: 'edit',
                     child: Row(
                       children: [
-                        Icon(Icons.edit_outlined, size: 18),
-                        SizedBox(width: 8),
-                        Text('Chỉnh sửa'),
+                        const Icon(Icons.edit_outlined, size: 18),
+                        const SizedBox(width: 8),
+                        Text(ctx.tr('cat_mgmt_edit')),
                       ],
                     ),
                   ),
-                  const PopupMenuItem(
+                  PopupMenuItem(
                     value: 'delete',
                     child: Row(
                       children: [
-                        Icon(Icons.delete_outline_rounded,
+                        const Icon(Icons.delete_outline_rounded,
                             size: 18, color: AppColors.expense),
-                        SizedBox(width: 8),
-                        Text('Xóa danh mục',
-                            style: TextStyle(color: AppColors.expense)),
+                        const SizedBox(width: 8),
+                        Text(ctx.tr('cat_mgmt_delete_cat'),
+                            style: const TextStyle(color: AppColors.expense)),
                       ],
                     ),
                   ),
@@ -489,7 +570,9 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
   }
 
   Widget _buildEmptyState(BuildContext context, String type, String uid) {
-    final label = type == 'expense' ? 'chi tiêu' : 'thu nhập';
+    final label = type == 'expense'
+        ? context.tr('cat_mgmt_type_exp_lower')
+        : context.tr('cat_mgmt_type_inc_lower');
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(32),
@@ -510,7 +593,7 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
               ),
               const SizedBox(height: 16),
               Text(
-                'Chưa có danh mục $label nào',
+                context.tr('cat_mgmt_empty_title', params: {'type': label}),
                 style: TextStyle(
                     fontSize: 17,
                     fontWeight: FontWeight.w700,
@@ -518,7 +601,7 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
               ),
               const SizedBox(height: 8),
               Text(
-                'Tạo các danh mục để phân loại dòng tiền và theo dõi chi tiêu thông minh hơn.',
+                context.tr('cat_mgmt_empty_desc'),
                 textAlign: TextAlign.center,
                 style: TextStyle(
                     fontSize: 13, height: 1.4, color: context.appTextSecondary),
@@ -527,7 +610,7 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
               ElevatedButton.icon(
                 onPressed: () => _showCategorySheet(context, uid),
                 icon: const Icon(Icons.add_rounded),
-                label: const Text('Thêm danh mục'),
+                label: Text(context.tr('bud_set_add_cat_btn')),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.primary,
                   foregroundColor: Colors.white,
@@ -553,27 +636,38 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
         if (!context.mounted) return;
         final confirm = await showDialog<bool>(
           context: context,
-          builder: (ctx) => AlertDialog(
-            title: const Text('Xóa danh mục?'),
-            content: Text(
-              'Bạn có chắc chắn muốn xóa danh mục "${c.name}"? Hành động này không thể hoàn tác.',
-            ),
-            actions: [
-              TextButton(
-                  onPressed: () => Navigator.pop(ctx, false),
-                  child: const Text('Hủy')),
-              TextButton(
-                onPressed: () => Navigator.pop(ctx, true),
-                child: const Text('Xóa',
-                    style: TextStyle(color: AppColors.expense)),
+          builder: (ctx) {
+            final displayCatName =
+                CategoryLocalizationHelper.localizeNameWithContext(ctx, c.name);
+            return AlertDialog(
+              title: Text(ctx.tr('cat_mgmt_del_dialog_title')),
+              content: Text(
+                ctx.tr('cat_mgmt_del_dialog_msg',
+                    params: {'name': displayCatName}),
               ),
-            ],
-          ),
+              actions: [
+                TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: Text(ctx.tr('common_cancel'))),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx, true),
+                  child: Text(ctx.tr('common_delete'),
+                      style: const TextStyle(color: AppColors.expense)),
+                ),
+              ],
+            );
+          },
         );
         if (confirm == true) {
           await _firestoreService.deleteCategory(c.categoryId);
           if (context.mounted) {
-            AppSnackbar.show(context, 'Đã xóa danh mục "${c.name}".');
+            final displayCatName =
+                CategoryLocalizationHelper.localizeNameWithContext(
+                    context, c.name);
+            AppSnackbar.show(
+                context,
+                context.tr('cat_mgmt_del_success',
+                    params: {'name': displayCatName}));
           }
         }
         return;
@@ -585,7 +679,7 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
         if (context.mounted) {
           AppSnackbar.show(
             context,
-            'Không thể xóa danh mục duy nhất đang chứa giao dịch/ngân sách.',
+            context.tr('cat_mgmt_del_only_err'),
             isError: true,
           );
         }
@@ -599,26 +693,30 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
         builder: (ctx) {
           return StatefulBuilder(
             builder: (ctx, setDlgState) => AlertDialog(
-              title: const Text('Danh mục đang được dùng'),
+              title: Text(ctx.tr('cat_mgmt_in_use_title')),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Text(
-                    'Danh mục này đang có giao dịch hoặc ngân sách liên kết. '
-                    'Vui lòng chọn danh mục thay thế để chuyển toàn bộ dữ liệu sang trước khi xóa:',
-                    style: TextStyle(fontSize: 13),
+                  Text(
+                    ctx.tr('cat_mgmt_in_use_desc'),
+                    style: const TextStyle(fontSize: 13),
                   ),
                   const SizedBox(height: 14),
                   DropdownButtonFormField<String>(
                     initialValue: selectedCategoryId,
-                    decoration: const InputDecoration(
-                      labelText: 'Chuyển sang danh mục',
-                      border: OutlineInputBorder(),
+                    decoration: InputDecoration(
+                      labelText: ctx.tr('cat_mgmt_reassign_label'),
+                      border: const OutlineInputBorder(),
                     ),
                     items: otherCategories.map((cat) {
                       return DropdownMenuItem(
-                          value: cat.categoryId, child: Text(cat.name));
+                        value: cat.categoryId,
+                        child: Text(
+                          CategoryLocalizationHelper.localizeNameWithContext(
+                              ctx, cat.name),
+                        ),
+                      );
                     }).toList(),
                     onChanged: (v) {
                       if (v != null) setDlgState(() => selectedCategoryId = v);
@@ -629,11 +727,11 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
               actions: [
                 TextButton(
                     onPressed: () => Navigator.pop(ctx, false),
-                    child: const Text('Hủy')),
+                    child: Text(ctx.tr('common_cancel'))),
                 TextButton(
                   onPressed: () => Navigator.pop(ctx, true),
-                  child: const Text('Xóa & Chuyển',
-                      style: TextStyle(color: AppColors.expense)),
+                  child: Text(ctx.tr('cat_mgmt_del_transfer_btn'),
+                      style: const TextStyle(color: AppColors.expense)),
                 ),
               ],
             ),
@@ -645,8 +743,13 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
         await _firestoreService.reassignAndDeleteCategory(
             uid, c.categoryId, selectedCategoryId);
         if (context.mounted) {
+          final displayCatName =
+              CategoryLocalizationHelper.localizeNameWithContext(
+                  context, c.name);
           AppSnackbar.show(
-              context, 'Đã chuyển dữ liệu và xóa danh mục "${c.name}".');
+              context,
+              context.tr('cat_mgmt_del_transfer_ok',
+                  params: {'name': displayCatName}));
         }
       }
     } catch (e) {
@@ -654,7 +757,7 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
       if (context.mounted) {
         AppSnackbar.show(
           context,
-          'Không thể xóa danh mục. Vui lòng thử lại sau.',
+          context.tr('cat_mgmt_del_error'),
           isError: true,
         );
       }
@@ -663,11 +766,18 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
 
   void _showCategorySheet(BuildContext context, String uid,
       {Category? category}) {
-    final nameController = TextEditingController(text: category?.name ?? '');
+    final isSystemCategory = category != null &&
+        CategoryLocalizationHelper.isSystemCategoryName(category.name);
+    final initialDisplayName = category != null
+        ? CategoryLocalizationHelper.localizeNameWithContext(
+            context, category.name)
+        : '';
+    final nameController = TextEditingController(text: initialDisplayName);
     String type = category?.type ?? _selectedType;
     String selectedIcon = category?.icon ?? 'category';
     Color selectedColor =
         category != null ? Color(category.color) : _colorOptions.first;
+    bool isEssential = category?.isEssential ?? false;
     bool isSaving = false;
     String? nameError;
 
@@ -684,7 +794,8 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
           Future<void> submit() async {
             final newName = nameController.text.trim();
             if (newName.isEmpty) {
-              setSheetState(() => nameError = 'Vui lòng nhập tên danh mục');
+              setSheetState(
+                  () => nameError = ctx.tr('cat_mgmt_name_empty_err'));
               return;
             }
 
@@ -693,19 +804,36 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
               final categoriesInType = await _firestoreService
                   .streamCategories(uid, type: type)
                   .first;
-              final isDuplicate = categoriesInType.any((existing) =>
-                  existing.categoryId != category?.categoryId &&
-                  existing.name.trim().toLowerCase() == newName.toLowerCase());
+              final isDuplicate = categoriesInType.any((existing) {
+                if (existing.categoryId == category?.categoryId) return false;
+                final target = newName.toLowerCase();
+                final rawMatch = existing.name.trim().toLowerCase() == target;
+                final localizedMatch =
+                    CategoryLocalizationHelper.localizeNameWithContext(
+                                ctx, existing.name)
+                            .trim()
+                            .toLowerCase() ==
+                        target;
+                return rawMatch || localizedMatch;
+              });
 
               if (isDuplicate) {
                 if (ctx.mounted) {
                   setSheetState(() {
                     isSaving = false;
-                    nameError = 'Danh mục "$newName" đã tồn tại';
+                    nameError = ctx.tr('cat_mgmt_name_dup_err',
+                        params: {'name': newName});
                   });
                 }
                 return;
               }
+
+              // Nếu danh mục hệ thống giữ nguyên tên hiển thị khi sửa màu/icon/nhóm,
+              // bảo toàn tên chuẩn gốc để vẫn tự dịch khi chuyển ngôn ngữ.
+              final savedName = (isSystemCategory &&
+                      newName.toLowerCase() == initialDisplayName.toLowerCase())
+                  ? category.name
+                  : newName;
 
               if (category == null) {
                 await _firestoreService.createCategory(Category(
@@ -715,13 +843,15 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                   type: type,
                   icon: selectedIcon,
                   color: selectedColor.toARGB32(),
+                  isEssential: type == 'expense' ? isEssential : false,
                 ));
               } else {
                 await _firestoreService.updateCategory(category.categoryId, {
-                  'name': newName,
+                  'name': savedName,
                   'type': type,
                   'icon': selectedIcon,
                   'color': selectedColor.toARGB32(),
+                  'isEssential': type == 'expense' ? isEssential : false,
                 });
               }
 
@@ -730,16 +860,15 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                 AppSnackbar.show(
                   context,
                   category == null
-                      ? 'Đã tạo danh mục "$newName"!'
-                      : 'Đã cập nhật danh mục!',
+                      ? ctx.tr('cat_mgmt_created_ok', params: {'name': newName})
+                      : ctx.tr('cat_mgmt_updated_ok'),
                 );
               }
             } catch (e) {
               debugPrint('❌ Lỗi khi lưu danh mục: $e');
               if (ctx.mounted) {
                 setSheetState(() => isSaving = false);
-                AppSnackbar.show(
-                    ctx, 'Không thể lưu danh mục. Vui lòng thử lại.',
+                AppSnackbar.show(ctx, ctx.tr('cat_mgmt_save_error'),
                     isError: true);
               }
             }
@@ -787,8 +916,8 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                           children: [
                             Text(
                               category == null
-                                  ? 'Thêm danh mục mới'
-                                  : 'Chỉnh sửa danh mục',
+                                  ? ctx.tr('cat_mgmt_sheet_add')
+                                  : ctx.tr('cat_mgmt_sheet_edit'),
                               style: TextStyle(
                                 fontSize: 19,
                                 fontWeight: FontWeight.w700,
@@ -798,8 +927,8 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                             const SizedBox(height: 2),
                             Text(
                               type == 'expense'
-                                  ? 'Phân loại cho khoản Chi tiêu'
-                                  : 'Phân loại cho khoản Thu nhập',
+                                  ? ctx.tr('cat_mgmt_sub_exp')
+                                  : ctx.tr('cat_mgmt_sub_inc'),
                               style: TextStyle(
                                   fontSize: 12,
                                   color: context.appTextSecondary),
@@ -813,7 +942,7 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                   // Type selection if creating new
                   if (category == null) ...[
                     Text(
-                      'Loại giao dịch',
+                      ctx.tr('cat_mgmt_tx_type'),
                       style: TextStyle(
                           fontSize: 13,
                           fontWeight: FontWeight.w600,
@@ -827,7 +956,8 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                             showCheckmark: false,
                             selected: type == 'expense',
                             selectedColor: AppColors.expense,
-                            label: const Center(child: Text('Chi tiêu')),
+                            label:
+                                Center(child: Text(ctx.tr('common_expense'))),
                             labelStyle: TextStyle(
                               fontWeight: FontWeight.w600,
                               color: type == 'expense'
@@ -844,7 +974,7 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                             showCheckmark: false,
                             selected: type == 'income',
                             selectedColor: AppColors.income,
-                            label: const Center(child: Text('Thu nhập')),
+                            label: Center(child: Text(ctx.tr('common_income'))),
                             labelStyle: TextStyle(
                               fontWeight: FontWeight.w600,
                               color: type == 'income'
@@ -861,7 +991,7 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                   ],
                   // Name input
                   Text(
-                    'Tên danh mục',
+                    ctx.tr('cat_mgmt_name_label'),
                     style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
@@ -877,16 +1007,69 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                         setSheetState(() => nameError = null);
                     },
                     decoration: InputDecoration(
-                      hintText: 'VD: Cà phê, Học phí, Xăng xe...',
+                      hintText: ctx.tr('cat_mgmt_name_hint'),
                       errorText: nameError,
                       prefixIcon:
                           const Icon(Icons.label_outline_rounded, size: 20),
                     ),
                   ),
+                  if (type == 'expense') ...[
+                    const SizedBox(height: 16),
+                    Text(
+                      ctx.tr('cat_mgmt_cost_group'),
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: context.appTextSecondary,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: ChoiceChip(
+                            showCheckmark: false,
+                            selected: isEssential,
+                            selectedColor: AppColors.primary,
+                            label: Center(
+                                child: Text(ctx.tr('cat_mgmt_essential_full'))),
+                            labelStyle: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600,
+                              color: isEssential
+                                  ? Colors.white
+                                  : context.appTextPrimary,
+                            ),
+                            onSelected: (_) =>
+                                setSheetState(() => isEssential = true),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: ChoiceChip(
+                            showCheckmark: false,
+                            selected: !isEssential,
+                            selectedColor: AppColors.warning,
+                            label: Center(
+                                child: Text(ctx.tr('cat_mgmt_flexible_full'))),
+                            labelStyle: TextStyle(
+                              fontSize: 12.5,
+                              fontWeight: FontWeight.w600,
+                              color: !isEssential
+                                  ? Colors.white
+                                  : context.appTextPrimary,
+                            ),
+                            onSelected: (_) =>
+                                setSheetState(() => isEssential = false),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
                   const SizedBox(height: 18),
                   // Icon picker
                   Text(
-                    'Biểu tượng',
+                    ctx.tr('cat_mgmt_icon_label'),
                     style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
@@ -897,11 +1080,10 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                     height: 52,
                     child: ListView.separated(
                       scrollDirection: Axis.horizontal,
-                      itemCount: _iconOptions.length,
+                      itemCount: _iconKeys.length,
                       separatorBuilder: (_, __) => const SizedBox(width: 8),
                       itemBuilder: (ctx, i) {
-                        final iconItem = _iconOptions[i];
-                        final iconKey = iconItem['name'] as String;
+                        final iconKey = _iconKeys[i];
                         final isSelected = selectedIcon == iconKey;
 
                         return InkWell(
@@ -939,7 +1121,7 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                   const SizedBox(height: 18),
                   // Color picker
                   Text(
-                    'Màu sắc nhận diện',
+                    ctx.tr('cat_mgmt_color_label'),
                     style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
@@ -997,8 +1179,9 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                               foregroundColor: context.appTextPrimary,
                               side: BorderSide(color: context.appBorder),
                             ),
-                            child: const Text('Hủy',
-                                style: TextStyle(fontWeight: FontWeight.w600)),
+                            child: Text(ctx.tr('common_cancel'),
+                                style: const TextStyle(
+                                    fontWeight: FontWeight.w600)),
                           ),
                         ),
                       ),
@@ -1025,8 +1208,8 @@ class _CategoryManagementScreenState extends State<CategoryManagementScreen> {
                                   )
                                 : Text(
                                     category == null
-                                        ? 'Tạo danh mục'
-                                        : 'Lưu thay đổi',
+                                        ? ctx.tr('cat_mgmt_create_btn')
+                                        : ctx.tr('cat_mgmt_save_changes'),
                                     style: const TextStyle(
                                         fontSize: 15,
                                         fontWeight: FontWeight.w600),

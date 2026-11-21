@@ -170,6 +170,18 @@ class CashFlowAnalytics {
   });
 }
 
+/// Mức độ khả thi của từng mục tiêu tiết kiệm khi xét đồng thời với các mục tiêu khác
+enum GoalFeasibilityStatus {
+  /// Đủ dòng tiền thặng dư cho toàn bộ mục tiêu chạy song song
+  onTrack,
+
+  /// Đủ nếu xét riêng mục tiêu này, nhưng thiếu khi phải chia sẻ thặng dư cùng các mục tiêu khác
+  sharedSurplusTight,
+
+  /// Dòng tiền âm hoặc riêng mục tiêu này đã vượt toàn bộ thặng dư khả dụng
+  atRisk,
+}
+
 /// 8. Đánh giá tính khả thi từng mục tiêu tiết kiệm
 class GoalFeasibilityItem {
   final String goalId;
@@ -180,6 +192,8 @@ class GoalFeasibilityItem {
   final int monthsRemaining;
   final double percentComplete;
   final bool isAtRisk;
+  final GoalFeasibilityStatus feasibilityStatus;
+  final double? allocatedMonthlyCashFlow;
   final String statusText;
   final String suggestion;
 
@@ -192,9 +206,14 @@ class GoalFeasibilityItem {
     required this.monthsRemaining,
     required this.percentComplete,
     required this.isAtRisk,
+    GoalFeasibilityStatus? feasibilityStatus,
+    this.allocatedMonthlyCashFlow,
     required this.statusText,
     required this.suggestion,
-  });
+  }) : feasibilityStatus = feasibilityStatus ??
+            (isAtRisk
+                ? GoalFeasibilityStatus.atRisk
+                : GoalFeasibilityStatus.onTrack);
 }
 
 /// 9. Tổng hợp đánh giá toàn bộ mục tiêu tiết kiệm
@@ -263,10 +282,34 @@ class FinancialInsightSummary {
   final IncomeAnalytics incomeAnalytics;
   final CashFlowAnalytics cashFlowAnalytics;
   final SavingsGoalAssessment? savingsGoalAssessment;
-  final FinancialActionPlan actionPlan;
+  final FinancialActionPlan? _actionPlan;
+  final FinancialActionPlan Function()? _actionPlanBuilder;
+  FinancialActionPlan? _cachedLazyActionPlan;
   final DateTime referenceDate;
 
-  const FinancialInsightSummary({
+  /// Kế hoạch hành động legacy (chỉ còn dùng trong prompt fallback khi `draftPlan == null`).
+  /// Tính lười (lazy/on-demand) ở lần truy cập đầu tiên để không tốn tính toán thừa
+  /// trong mọi lần tải bình thường của `AiInsightScreen`.
+  FinancialActionPlan get actionPlan {
+    if (_actionPlan != null) return _actionPlan;
+    final cached = _cachedLazyActionPlan;
+    if (cached != null) return cached;
+    final built = _actionPlanBuilder?.call() ??
+        const FinancialActionPlan(
+          targetMonthlySavings: 0,
+          items: [],
+          totalProjectedSavings: 0,
+          actionSummary: '',
+        );
+    _cachedLazyActionPlan = built;
+    return built;
+  }
+
+  /// Cho biết `actionPlan` đã được cung cấp sẵn hay đã được khởi tạo lười hay chưa.
+  bool get hasComputedActionPlan =>
+      _actionPlan != null || _cachedLazyActionPlan != null;
+
+  FinancialInsightSummary({
     required this.monthEndForecast,
     required this.budgetForecasts,
     required this.anomalies,
@@ -278,7 +321,9 @@ class FinancialInsightSummary {
     required this.incomeAnalytics,
     required this.cashFlowAnalytics,
     this.savingsGoalAssessment,
-    required this.actionPlan,
+    FinancialActionPlan? actionPlan,
+    FinancialActionPlan Function()? actionPlanBuilder,
     this.strengths = const [],
-  });
+  })  : _actionPlan = actionPlan,
+        _actionPlanBuilder = actionPlanBuilder;
 }

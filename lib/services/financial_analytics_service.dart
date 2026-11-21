@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import '../l10n/app_localizations.dart';
 import '../models/ai_runtime_config_model.dart';
 import '../models/budget_model.dart';
 import '../models/transaction_model.dart';
@@ -8,8 +9,8 @@ import '../models/financial_forecast_result.dart';
 import '../models/monthly_financial_plan.dart';
 import '../models/saving_goal_model.dart';
 import '../models/wallet_model.dart';
+import '../utils/category_localization_helper.dart';
 import '../utils/formatters.dart';
-import 'ai_config_sync_service.dart';
 
 /// ============================================================
 /// FINANCIAL ANALYTICS SERVICE
@@ -19,7 +20,7 @@ import 'ai_config_sync_service.dart';
 /// "hệ thống phải tự tính toán, không giao phó hết cho AI".
 /// ============================================================
 class FinancialAnalyticsService {
-  // Ngưỡng mặc định — dùng làm cơ sở fallback khi chưa có cấu hình từ xa
+  // Ngưỡng mặc định — hằng số chuẩn cố định
   static const double kCategorySpikeThreshold = 0.30; // tăng >30% so tháng trước
   static const double kCategoryShareThreshold = 0.25; // 1 danh mục chiếm >25% thu nhập
   static const double kLowSavingRateThreshold = 0.20; // tỷ lệ tiết kiệm <20%
@@ -29,10 +30,10 @@ class FinancialAnalyticsService {
   FinancialAnalyticsService({FinancialHeuristicsConfig? heuristicsOverride})
       : _heuristicsOverride = heuristicsOverride;
 
-  /// Lấy bộ ngưỡng định lượng đang hiệu lực (ưu tiên override từ Sandbox/Test,
-  /// sau đó đến cấu hình Published trong AiConfigSyncService, cuối cùng là mặc định).
+  /// Lấy bộ ngưỡng định lượng đang hiệu lực (ưu tiên override trong Test,
+  /// mặc định dùng hằng số chuẩn cố định `FinancialHeuristicsConfig.defaults()`).
   FinancialHeuristicsConfig get effectiveHeuristics =>
-      _heuristicsOverride ?? AiConfigSyncService.instance.currentHeuristics;
+      _heuristicsOverride ?? FinancialHeuristicsConfig.defaults();
 
   /// Tính "Điểm tin cậy" — mức độ vi phạm ngưỡng càng xa, tin cậy càng cao
   double _calculateConfidence(double currentValue, double thresholdValue) {
@@ -83,28 +84,35 @@ class FinancialAnalyticsService {
       if (lastAmount > 0) {
         final percentChange = (currentAmount - lastAmount) / lastAmount;
         if (percentChange > spikeThreshold) {
-          final catName = categories
-              .firstWhere(
-                (c) => c.categoryId == categoryId,
-                orElse: () => Category(
-                  categoryId: categoryId,
-                  userId: '',
-                  name: 'Khác',
-                  type: 'expense',
-                  icon: 'category',
-                  color: 0xFF9E9E9E,
-                ),
-              )
-              .name;
+          final catName = CategoryLocalizationHelper.localizeName(
+            categories
+                .firstWhere(
+                  (c) => c.categoryId == categoryId,
+                  orElse: () => Category(
+                    categoryId: categoryId,
+                    userId: '',
+                    name: AppLocalizations.tr('common_other'),
+                    type: 'expense',
+                    icon: 'category',
+                    color: 0xFF9E9E9E,
+                  ),
+                )
+                .name,
+          );
           final threshold = lastAmount * (1 + spikeThreshold);
           final diff = currentAmount - lastAmount;
           final criticalSpike = math.max(0.5, spikeThreshold + 0.20);
+          final pctStr = '${(percentChange * 100).round()}';
 
           issues.add(FinancialIssue(
-            title:
-                '$catName tăng ${(percentChange * 100).round()}% so với tháng trước',
-            description:
-                'Tháng trước: ${lastAmount.round()}đ → Tháng này: ${currentAmount.round()}đ',
+            title: AppLocalizations.tr('svc_fa_spike_title', params: {
+              'cat': catName,
+              'pct': pctStr,
+            }),
+            description: AppLocalizations.tr('svc_fa_spike_desc', params: {
+              'last': AppFormatters.number(lastAmount),
+              'cur': AppFormatters.number(currentAmount),
+            }),
             severity: percentChange > criticalSpike
                 ? IssueSeverity.critical
                 : IssueSeverity.warning,
@@ -113,12 +121,17 @@ class FinancialAnalyticsService {
             categoryName: catName,
             currentValue: currentAmount,
             thresholdValue: threshold,
-            rootCause:
-                'Chi tiêu danh mục $catName tăng đột biến ${(percentChange * 100).round()}% so với mức trung bình tháng trước (${AppFormatters.compactCurrency(lastAmount, unit: 'đ')}).',
-            impact:
-                'Làm phát sinh thêm ${AppFormatters.compactCurrency(diff, unit: 'đ')} ngoài định mức, thu hẹp thặng dư dòng tiền.',
-            recommendation:
-                'Đặt hạn mức tối đa ${AppFormatters.compactCurrency(threshold, unit: 'đ')} và rà soát các khoản chi lớn trong các tuần tiếp theo.',
+            rootCause: AppLocalizations.tr('svc_fa_spike_root', params: {
+              'cat': catName,
+              'pct': pctStr,
+              'lastAmt': AppFormatters.compactCurrency(lastAmount),
+            }),
+            impact: AppLocalizations.tr('svc_fa_spike_impact', params: {
+              'diff': AppFormatters.compactCurrency(diff),
+            }),
+            recommendation: AppLocalizations.tr('svc_fa_spike_rec', params: {
+              'threshold': AppFormatters.compactCurrency(threshold),
+            }),
           ));
         }
       }
@@ -129,26 +142,32 @@ class FinancialAnalyticsService {
       currentByCategory.forEach((categoryId, amount) {
         final share = amount / effectiveIncome;
         if (share > shareThreshold) {
-          final catName = categories
-              .firstWhere(
-                (c) => c.categoryId == categoryId,
-                orElse: () => Category(
-                  categoryId: categoryId,
-                  userId: '',
-                  name: 'Khác',
-                  type: 'expense',
-                  icon: 'category',
-                  color: 0xFF9E9E9E,
-                ),
-              )
-              .name;
+          final catName = CategoryLocalizationHelper.localizeName(
+            categories
+                .firstWhere(
+                  (c) => c.categoryId == categoryId,
+                  orElse: () => Category(
+                    categoryId: categoryId,
+                    userId: '',
+                    name: AppLocalizations.tr('common_other'),
+                    type: 'expense',
+                    icon: 'category',
+                    color: 0xFF9E9E9E,
+                  ),
+                )
+                .name,
+          );
           final shareRecPct = (shareThreshold * 100).round();
           final criticalShare = math.max(0.4, shareThreshold + 0.15);
+          final sharePctStr = '${(share * 100).round()}';
           issues.add(FinancialIssue(
-            title:
-                '$catName chiếm ${(share * 100).round()}% thu nhập tháng này',
-            description:
-                'Vượt ngưỡng khuyến nghị $shareRecPct%',
+            title: AppLocalizations.tr('svc_fa_share_title', params: {
+              'cat': catName,
+              'pct': sharePctStr,
+            }),
+            description: AppLocalizations.tr('svc_fa_share_desc', params: {
+              'recPct': '$shareRecPct',
+            }),
             severity:
                 share > criticalShare ? IssueSeverity.critical : IssueSeverity.warning,
             category: IssueCategory.budgetShare,
@@ -157,12 +176,15 @@ class FinancialAnalyticsService {
             categoryName: catName,
             currentValue: share,
             thresholdValue: shareThreshold,
-            rootCause:
-                'Một danh mục duy nhất ($catName) chiếm tới ${(share * 100).round()}% tổng thu nhập.',
-            impact:
-                'Gây mất cân bằng cơ cấu chi tiêu, làm giảm khả năng ứng phó khi có biến cố tài chính.',
-            recommendation:
-                'Cân đối tinh giản các khoản chi chưa cấp thiết trong nhóm $catName về dưới $shareRecPct% thu nhập.',
+            rootCause: AppLocalizations.tr('svc_fa_share_root', params: {
+              'cat': catName,
+              'pct': sharePctStr,
+            }),
+            impact: AppLocalizations.tr('svc_fa_share_impact'),
+            recommendation: AppLocalizations.tr('svc_fa_share_rec', params: {
+              'cat': catName,
+              'recPct': '$shareRecPct',
+            }),
           ));
         }
       });
@@ -173,10 +195,15 @@ class FinancialAnalyticsService {
       final savingRate = (effectiveIncome - totalExpense) / effectiveIncome;
       if (savingRate < lowSavingThreshold) {
         final lowSavingPct = (lowSavingThreshold * 100).round();
+        final saveRateStr = '${(savingRate * 100).round()}';
+        final spentShareStr = '${(totalExpense / effectiveIncome * 100).round()}';
         issues.add(FinancialIssue(
-          title: 'Tỷ lệ tiết kiệm chỉ đạt ${(savingRate * 100).round()}%',
-          description:
-              'Thấp hơn ngưỡng khuyến nghị $lowSavingPct%',
+          title: AppLocalizations.tr('svc_fa_low_save_title', params: {
+            'pct': saveRateStr,
+          }),
+          description: AppLocalizations.tr('svc_fa_low_save_desc', params: {
+            'recPct': '$lowSavingPct',
+          }),
           severity:
               savingRate < 0.05 ? IssueSeverity.critical : IssueSeverity.warning,
           category: IssueCategory.lowSaving,
@@ -184,12 +211,13 @@ class FinancialAnalyticsService {
               _calculateConfidence(savingRate, lowSavingThreshold),
           currentValue: savingRate,
           thresholdValue: lowSavingThreshold,
-          rootCause:
-              'Chi tiêu đã chiếm ${(totalExpense / effectiveIncome * 100).round()}% tổng thu nhập trong kỳ.',
-          impact:
-              'Khả năng tích lũy tài sản và tiến độ các mục tiêu tiết kiệm bị đình trệ.',
-          recommendation:
-              'Cắt giảm bớt các khoản chi linh hoạt (mua sắm, giải trí) để nâng tỷ lệ tích lũy lên tối thiểu $lowSavingPct%.',
+          rootCause: AppLocalizations.tr('svc_fa_low_save_root', params: {
+            'pct': spentShareStr,
+          }),
+          impact: AppLocalizations.tr('svc_fa_low_save_impact'),
+          recommendation: AppLocalizations.tr('svc_fa_low_save_rec', params: {
+            'recPct': '$lowSavingPct',
+          }),
         ));
       }
     }
@@ -198,20 +226,21 @@ class FinancialAnalyticsService {
     if (totalIncome > 0 && totalExpense > totalIncome) {
       final deficit = totalExpense - totalIncome;
       issues.add(FinancialIssue(
-        title:
-            'Chi tiêu vượt thu nhập ${AppFormatters.compactCurrency(deficit, unit: 'đ')}',
-        description: 'Dòng tiền tháng này đang bị âm',
+        title: AppLocalizations.tr('svc_fa_neg_cf_title', params: {
+          'deficit': AppFormatters.compactCurrency(deficit),
+        }),
+        description: AppLocalizations.tr('svc_fa_neg_cf_desc'),
         severity: IssueSeverity.critical,
         category: IssueCategory.negativeCashflow,
         confidenceScore: 95.0,
         currentValue: deficit,
         thresholdValue: 0,
-        rootCause:
-            'Tổng chi tiêu (${AppFormatters.compactCurrency(totalExpense, unit: 'đ')}) vượt quá tổng thu (${AppFormatters.compactCurrency(totalIncome, unit: 'đ')}).',
-        impact:
-            'Dòng tiền thâm hụt trực tiếp làm suy giảm số dư các ví tài khoản.',
-        recommendation:
-            'Tạm dừng các khoản chi tiêu không bắt buộc để chặn đà suy giảm số dư.',
+        rootCause: AppLocalizations.tr('svc_fa_neg_cf_root', params: {
+          'expense': AppFormatters.compactCurrency(totalExpense),
+          'income': AppFormatters.compactCurrency(totalIncome),
+        }),
+        impact: AppLocalizations.tr('svc_fa_neg_cf_impact'),
+        recommendation: AppLocalizations.tr('svc_fa_neg_cf_rec'),
       ));
     }
 
@@ -222,22 +251,26 @@ class FinancialAnalyticsService {
     if (lastMonthIncome > 0 && totalIncome > 0) {
       final dropRate = (lastMonthIncome - totalIncome) / lastMonthIncome;
       if (dropRate > incomeDropWarnThreshold) {
+        final dropPctStr = '${(dropRate * 100).round()}';
         issues.add(FinancialIssue(
-          title: 'Thu nhập giảm ${(dropRate * 100).round()}% so với tháng trước',
-          description:
-              'Tháng trước: ${AppFormatters.compactCurrency(lastMonthIncome, unit: 'đ')} → Tháng này: ${AppFormatters.compactCurrency(totalIncome, unit: 'đ')}',
+          title: AppLocalizations.tr('svc_fa_inc_drop_title', params: {
+            'pct': dropPctStr,
+          }),
+          description: AppLocalizations.tr('svc_fa_inc_drop_desc', params: {
+            'last': AppFormatters.compactCurrency(lastMonthIncome),
+            'cur': AppFormatters.compactCurrency(totalIncome),
+          }),
           severity:
               dropRate > incomeDropCritThreshold ? IssueSeverity.critical : IssueSeverity.warning,
           category: IssueCategory.incomeDrop,
           confidenceScore: 90.0,
           currentValue: dropRate,
           thresholdValue: incomeDropWarnThreshold,
-          rootCause:
-              'Các nguồn thu trong kỳ ghi nhận sụt giảm ${(dropRate * 100).round()}%.',
-          impact:
-              'Thu hẹp hạn mức chi tiêu an toàn và khả năng tích lũy tiền mặt.',
-          recommendation:
-              'Chủ động thắt chặt ngân sách chi tiêu để duy trì trạng thái dòng tiền cân bằng.',
+          rootCause: AppLocalizations.tr('svc_fa_inc_drop_root', params: {
+            'pct': dropPctStr,
+          }),
+          impact: AppLocalizations.tr('svc_fa_inc_drop_impact'),
+          recommendation: AppLocalizations.tr('svc_fa_inc_drop_rec'),
         ));
       }
     }
@@ -287,7 +320,7 @@ class FinancialAnalyticsService {
             orElse: () => Category(
               categoryId: entry.key,
               userId: '',
-              name: 'Thu nhập khác',
+              name: AppLocalizations.tr('svc_fa_cat_other_income'),
               type: 'income',
               icon: 'account_balance_wallet',
               color: 0xFF4CAF50,
@@ -304,65 +337,104 @@ class FinancialAnalyticsService {
       ));
     }
 
-    // Đánh giá mức độ ổn định thu nhập
-    String stability = 'Ổn định';
+    // Đánh giá mức độ ổn định thu nhập (khử trùng lặp lastMonthTx nếu caller
+    // truyền precedingMonthsTx đã bao gồm cả tháng liền trước m1).
+    String stability = AppLocalizations.tr('svc_fa_stab_stable');
+    final List<double> history = [];
+    final Set<String> lastIncomeTxIds = lastIncomeTx
+        .map((t) => t.transactionId)
+        .where((id) => id.isNotEmpty)
+        .toSet();
+
     if (precedingMonthsTx != null && precedingMonthsTx.isNotEmpty) {
-      final List<double> history = [];
       for (final mTx in precedingMonthsTx) {
-        final val = mTx
-            .where((t) => t.type == 'income')
-            .fold<double>(0, (sum, t) => sum + t.amount);
+        if (identical(mTx, lastMonthTx)) continue;
+        final mIncomeTx = mTx.where((t) => t.type == 'income').toList();
+        if (mIncomeTx.isEmpty) continue;
+        if (lastIncomeTxIds.isNotEmpty) {
+          final mIncomeIds = mIncomeTx
+              .map((t) => t.transactionId)
+              .where((id) => id.isNotEmpty)
+              .toSet();
+          if (mIncomeIds.isNotEmpty &&
+              mIncomeIds.length == lastIncomeTxIds.length &&
+              lastIncomeTxIds.containsAll(mIncomeIds)) {
+            continue;
+          }
+        }
+        final val = mIncomeTx.fold<double>(0, (sum, t) => sum + t.amount);
         if (val > 0) history.add(val);
       }
-      if (lastTotalIncome > 0) history.add(lastTotalIncome);
-      if (currentTotalIncome > 0) history.add(currentTotalIncome);
+    }
+    if (lastTotalIncome > 0) history.add(lastTotalIncome);
+    if (currentTotalIncome > 0) history.add(currentTotalIncome);
 
-      if (history.length >= 2) {
-        final avg = history.reduce((a, b) => a + b) / history.length;
-        if (avg > 0) {
-          final variance = history
-                  .map((x) => (x - avg) * (x - avg))
-                  .reduce((a, b) => a + b) /
-              history.length;
-          final stdDev = math.sqrt(variance);
-          final cv = stdDev / avg;
-          if (cv > 0.35) {
-            stability = 'Biến động mạnh';
-          } else if (cv > 0.15) {
-            stability = 'Biến động nhẹ';
-          }
+    if (history.length >= 2) {
+      final avg = history.reduce((a, b) => a + b) / history.length;
+      if (avg > 0) {
+        final variance = history
+                .map((x) => (x - avg) * (x - avg))
+                .reduce((a, b) => a + b) /
+            history.length;
+        final stdDev = math.sqrt(variance);
+        final cv = stdDev / avg;
+        if (cv > 0.35) {
+          stability = AppLocalizations.tr('svc_fa_stab_volatile');
+        } else if (cv > 0.15) {
+          stability = AppLocalizations.tr('svc_fa_stab_mild');
         }
       }
     }
 
     // Câu bình luận phân tích ý nghĩa
-    final topSourceName = sources.isNotEmpty ? sources.first.categoryName : null;
+    final topSourceName = sources.isNotEmpty
+        ? CategoryLocalizationHelper.localizeName(sources.first.categoryName)
+        : null;
     final topSourcePct =
         sources.isNotEmpty ? (sources.first.percentage * 100).round() : 0;
     String commentary;
 
     if (currentTotalIncome == 0) {
-      commentary = 'Chưa ghi nhận nguồn thu nhập trong tháng này.';
+      commentary = AppLocalizations.tr('svc_fa_inc_none');
     } else if (lastTotalIncome > 0) {
       final growthPct = (growthRate * 100).round();
       if (growthRate >= 0.05) {
-        commentary =
-            'Thu nhập tháng này tăng $growthPct% so với tháng trước'
-            '${topSourceName != null ? ', chủ yếu từ nguồn $topSourceName ($topSourcePct%)' : ''}.'
-            ' Mức độ nguồn thu $stability.';
+        final topPart = topSourceName != null
+            ? AppLocalizations.tr('svc_fa_inc_up_top', params: {
+                'top': topSourceName,
+                'pct': '$topSourcePct',
+              })
+            : '';
+        commentary = AppLocalizations.tr('svc_fa_inc_up', params: {
+          'pct': '$growthPct',
+          'topPart': topPart,
+          'stability': stability,
+        });
       } else if (growthRate <= -0.05) {
-        commentary =
-            'Thu nhập tháng này giảm ${-growthPct}% so với tháng trước.'
-            ' Khuyến nghị điều chỉnh kế hoạch chi tiêu phù hợp.';
+        commentary = AppLocalizations.tr('svc_fa_inc_down', params: {
+          'pct': '${-growthPct}',
+        });
       } else {
-        commentary =
-            'Thu nhập duy trì ổn định so với tháng trước'
-            '${topSourceName != null ? ' (nguồn chính: $topSourceName chiếm $topSourcePct%)' : ''}.';
+        final topPart = topSourceName != null
+            ? AppLocalizations.tr('svc_fa_inc_flat_top', params: {
+                'top': topSourceName,
+                'pct': '$topSourcePct',
+              })
+            : '';
+        commentary = AppLocalizations.tr('svc_fa_inc_flat', params: {
+          'topPart': topPart,
+        });
       }
     } else {
-      commentary =
-          'Tổng thu nhập đạt ${AppFormatters.compactCurrency(currentTotalIncome, unit: 'đ')}'
-          '${topSourceName != null ? ', chủ yếu từ nguồn $topSourceName' : ''}.';
+      final topPart = topSourceName != null
+          ? AppLocalizations.tr('svc_fa_inc_first_top', params: {
+              'top': topSourceName,
+            })
+          : '';
+      commentary = AppLocalizations.tr('svc_fa_inc_first', params: {
+        'amount': AppFormatters.compactCurrency(currentTotalIncome),
+        'topPart': topPart,
+      });
     }
 
     return IncomeAnalytics(
@@ -393,29 +465,33 @@ class FinancialAnalyticsService {
 
     final String sustainabilityStatus;
     if (!isPositive) {
-      sustainabilityStatus = 'Thâm hụt rủi ro';
+      sustainabilityStatus = AppLocalizations.tr('svc_fa_cf_deficit_risk');
     } else if (savingsRate >= 30) {
-      sustainabilityStatus = 'Rất vững chắc';
+      sustainabilityStatus = AppLocalizations.tr('svc_fa_cf_very_solid');
     } else if (savingsRate >= 15) {
-      sustainabilityStatus = 'Bền vững';
+      sustainabilityStatus = AppLocalizations.tr('svc_fa_cf_sustainable');
     } else {
-      sustainabilityStatus = 'Cần chú ý';
+      sustainabilityStatus = AppLocalizations.tr('svc_fa_cf_caution');
     }
 
     final String summaryComment;
     final double minRecSavePct =
         effectiveHeuristics.minRecommendedSavingRate * 100;
     if (isPositive) {
-      summaryComment =
-          'Bạn có thu nhập ${AppFormatters.compactCurrency(currentMonthIncome, unit: 'đ')} '
-          'và chi tiêu ${AppFormatters.compactCurrency(currentMonthExpense, unit: 'đ')}, '
-          'còn lại ${AppFormatters.compactCurrency(netCashFlow, unit: 'đ')} '
-          '(${savingsRate.round()}% thu nhập). Dòng tiền tích cực, khả năng tiết kiệm ${savingsRate >= minRecSavePct ? 'rất tốt' : 'ổn định'}.';
+      summaryComment = AppLocalizations.tr('svc_fa_cf_pos_comment', params: {
+        'inc': AppFormatters.compactCurrency(currentMonthIncome),
+        'exp': AppFormatters.compactCurrency(currentMonthExpense),
+        'net': AppFormatters.compactCurrency(netCashFlow),
+        'pct': '${savingsRate.round()}',
+        'quality': savingsRate >= minRecSavePct
+            ? AppLocalizations.tr('svc_fa_cf_quality_great')
+            : AppLocalizations.tr('svc_fa_cf_quality_steady'),
+      });
     } else {
       final deficit = -netCashFlow;
-      summaryComment =
-          'Chi tiêu đang vượt thu nhập ${AppFormatters.compactCurrency(deficit, unit: 'đ')}. '
-          'Nếu xu hướng này tiếp tục, số dư các ví có nguy cơ suy giảm nhanh chóng trong các tháng tiếp theo.';
+      summaryComment = AppLocalizations.tr('svc_fa_cf_neg_comment', params: {
+        'deficit': AppFormatters.compactCurrency(deficit),
+      });
     }
 
     return CashFlowAnalytics(
@@ -431,7 +507,7 @@ class FinancialAnalyticsService {
     );
   }
 
-  /// 4. Đánh giá tính khả thi mục tiêu tiết kiệm
+  /// 4. Đánh giá tính khả thi mục tiêu tiết kiệm (đồng bộ giữa tổng quan và từng mục tiêu)
   SavingsGoalAssessment evaluateSavingGoals({
     required List<SavingGoal> goals,
     required double netCashFlow,
@@ -439,43 +515,87 @@ class FinancialAnalyticsService {
     final activeGoals =
         goals.where((g) => g.savedAmount < g.targetAmount).toList();
     if (activeGoals.isEmpty) {
-      return const SavingsGoalAssessment(
+      return SavingsGoalAssessment(
         totalMonthlyRequired: 0,
         availableCashFlow: 0,
         gapAmount: 0,
         canFulfillAllGoals: true,
-        goals: [],
-        overallAdvice:
-            'Bạn chưa có mục tiêu tiết kiệm nào đang hoạt động. Hãy tạo mục tiêu để định hướng tài chính hiệu quả hơn.',
+        goals: const [],
+        overallAdvice: AppLocalizations.tr('svc_fa_goal_empty_advice'),
       );
     }
 
-    double totalMonthlyRequired = 0;
+    final double totalMonthlyRequired = activeGoals.fold<double>(
+      0.0,
+      (sum, g) => sum + g.monthlyRequired,
+    );
+    final double gapAmount = (totalMonthlyRequired - netCashFlow)
+        .clamp(0.0, double.infinity)
+        .toDouble();
+    final bool canFulfill =
+        netCashFlow >= totalMonthlyRequired && netCashFlow > 0;
+    final bool hasMultipleGoals = activeGoals.length > 1;
     final List<GoalFeasibilityItem> items = [];
 
     for (final g in activeGoals) {
       final monthlyReq = g.monthlyRequired;
-      totalMonthlyRequired += monthlyReq;
+      final remainingAmount =
+          (g.targetAmount - g.savedAmount).clamp(0.0, double.infinity);
 
-      final isAtRisk = netCashFlow < monthlyReq || netCashFlow <= 0;
-      final statusText = isAtRisk
-          ? (netCashFlow <= 0 ? 'Nguy cơ trễ hạn cao' : 'Tiến độ bị chậm')
-          : 'Đang đúng tiến độ';
+      final GoalFeasibilityStatus status;
+      final String statusText;
+      final String suggestion;
+      final double allocatedCashFlow;
 
-      String suggestion;
-      if (isAtRisk) {
-        final deficit = (monthlyReq - (netCashFlow > 0 ? netCashFlow : 0)).round();
-        final remainingAmount = g.targetAmount - g.savedAmount;
-        final achievableMonths = (netCashFlow > 100000)
-            ? (remainingAmount / netCashFlow).ceil()
+      if (netCashFlow <= 0 || netCashFlow < monthlyReq) {
+        status = GoalFeasibilityStatus.atRisk;
+        allocatedCashFlow = netCashFlow > 0
+            ? (totalMonthlyRequired > 0
+                ? netCashFlow * (monthlyReq / totalMonthlyRequired)
+                : netCashFlow)
+            : 0.0;
+        statusText = netCashFlow <= 0
+            ? AppLocalizations.tr('svc_fa_goal_high_risk')
+            : AppLocalizations.tr('svc_fa_goal_behind');
+
+        final double effectiveAvailable =
+            hasMultipleGoals ? allocatedCashFlow : (netCashFlow > 0 ? netCashFlow : 0.0);
+        final deficit = (monthlyReq - effectiveAvailable).clamp(0.0, double.infinity).round();
+        final achievableMonths = (effectiveAvailable > 100000)
+            ? (remainingAmount / effectiveAvailable).ceil()
             : (g.months + 3);
         final extraMonths = (achievableMonths - g.months).clamp(1, 24);
 
-        suggestion =
-            'Thiếu ${AppFormatters.compactCurrency(deficit.toDouble(), unit: 'đ')}/tháng. '
-            'Đề xuất: Tối ưu chi tiêu hoặc gia hạn thêm $extraMonths tháng.';
+        suggestion = AppLocalizations.tr('svc_fa_goal_sugg_risk', params: {
+          'deficit': AppFormatters.compactCurrency(deficit.toDouble()),
+          'months': '$extraMonths',
+        });
+      } else if (!canFulfill && hasMultipleGoals) {
+        // Xét riêng mục tiêu này thì đủ (netCashFlow >= monthlyReq), nhưng chạy
+        // song song nhiều mục tiêu thì tổng vượt thặng dư -> phân bổ theo tỷ lệ.
+        status = GoalFeasibilityStatus.sharedSurplusTight;
+        allocatedCashFlow = totalMonthlyRequired > 0
+            ? netCashFlow * (monthlyReq / totalMonthlyRequired)
+            : 0.0;
+        final sharedDeficit =
+            (monthlyReq - allocatedCashFlow).clamp(0.0, double.infinity);
+        final achievableMonths = (allocatedCashFlow > 100000)
+            ? (remainingAmount / allocatedCashFlow).ceil()
+            : (g.months + 3);
+        final extraMonths = (achievableMonths - g.months).clamp(1, 24);
+
+        statusText = AppLocalizations.tr('svc_fa_goal_shared_tight');
+        suggestion = AppLocalizations.tr('svc_fa_goal_sugg_shared', params: {
+          'others': '${activeGoals.length - 1}',
+          'alloc': AppFormatters.compactCurrency(allocatedCashFlow),
+          'deficit': AppFormatters.compactCurrency(sharedDeficit),
+          'months': '$extraMonths',
+        });
       } else {
-        suggestion = 'Thặng dư dòng tiền đủ để tích lũy đều đặn mỗi tháng.';
+        status = GoalFeasibilityStatus.onTrack;
+        allocatedCashFlow = monthlyReq;
+        statusText = AppLocalizations.tr('svc_fa_goal_on_track');
+        suggestion = AppLocalizations.tr('svc_fa_goal_sugg_ok');
       }
 
       items.add(GoalFeasibilityItem(
@@ -486,27 +606,26 @@ class FinancialAnalyticsService {
         monthlyRequired: monthlyReq,
         monthsRemaining: g.months,
         percentComplete: g.percentComplete,
-        isAtRisk: isAtRisk,
+        isAtRisk: status != GoalFeasibilityStatus.onTrack,
+        feasibilityStatus: status,
+        allocatedMonthlyCashFlow: allocatedCashFlow,
         statusText: statusText,
         suggestion: suggestion,
       ));
     }
 
-    final gapAmount =
-        (totalMonthlyRequired - netCashFlow).clamp(0.0, double.infinity).toDouble();
-    final canFulfill = netCashFlow >= totalMonthlyRequired && netCashFlow > 0;
-
     final String overallAdvice;
     if (canFulfill) {
-      overallAdvice =
-          'Dòng tiền thặng dư (${AppFormatters.compactCurrency(netCashFlow, unit: 'đ')}) '
-          'hoàn toàn đáp ứng đủ tổng mức tích lũy cho ${items.length} mục tiêu '
-          '(${AppFormatters.compactCurrency(totalMonthlyRequired, unit: 'đ')}/tháng).';
+      overallAdvice = AppLocalizations.tr('svc_fa_goal_advice_ok', params: {
+        'net': AppFormatters.compactCurrency(netCashFlow),
+        'count': '${items.length}',
+        'req': AppFormatters.compactCurrency(totalMonthlyRequired),
+      });
     } else {
-      overallAdvice =
-          'Tổng nhu cầu tích lũy là ${AppFormatters.compactCurrency(totalMonthlyRequired, unit: 'đ')}/tháng, '
-          'thặng dư dòng tiền hiện thiếu hụt ${AppFormatters.compactCurrency(gapAmount, unit: 'đ')}. '
-          'Cần thực hiện kế hoạch cắt giảm chi tiêu bên dưới.';
+      overallAdvice = AppLocalizations.tr('svc_fa_goal_advice_gap', params: {
+        'req': AppFormatters.compactCurrency(totalMonthlyRequired),
+        'gap': AppFormatters.compactCurrency(gapAmount),
+      });
     }
 
     return SavingsGoalAssessment(
@@ -545,15 +664,20 @@ class FinancialAnalyticsService {
 
         final targetBudget = (spent - reduction).clamp(0.0, double.infinity).toDouble();
 
+        final displayCat = CategoryLocalizationHelper.localizeName(b.categoryName);
         items.add(ActionPlanItem(
-          categoryName: b.categoryName,
-          actionTitle: 'Giảm chi tiêu ${b.categoryName}',
+          categoryName: displayCat,
+          actionTitle: AppLocalizations.tr('svc_fa_act_reduce_title', params: {
+            'cat': displayCat,
+          }),
           currentSpend: spent,
           targetReduction: reduction,
           suggestedBudget: targetBudget,
           rationales: b.status == BudgetForecastStatus.exceeded
-              ? 'Đã vượt hạn mức ngân sách ${AppFormatters.compactCurrency(excess, unit: 'đ')}'
-              : 'Có nguy cơ vượt hạn mức trước khi kết thúc tháng',
+              ? AppLocalizations.tr('svc_fa_act_exceeded_rat', params: {
+                  'excess': AppFormatters.compactCurrency(excess),
+                })
+              : AppLocalizations.tr('svc_fa_act_atrisk_rat'),
         ));
         processedCategoryIds.add(b.categoryId);
       }
@@ -569,14 +693,19 @@ class FinancialAnalyticsService {
         final targetBudget =
             (a.currentSpend - reduction).clamp(0.0, double.infinity).toDouble();
 
+        final displayCat =
+            CategoryLocalizationHelper.localizeName(a.categoryName);
         items.add(ActionPlanItem(
-          categoryName: a.categoryName,
-          actionTitle: 'Tối ưu danh mục ${a.categoryName}',
+          categoryName: displayCat,
+          actionTitle: AppLocalizations.tr('svc_fa_act_opt_title', params: {
+            'cat': displayCat,
+          }),
           currentSpend: a.currentSpend,
           targetReduction: reduction,
           suggestedBudget: targetBudget,
-          rationales:
-              'Chi tiêu đột biến cao hơn ${(a.excessRatio * 100 - 100).round()}% so với mức thông thường',
+          rationales: AppLocalizations.tr('svc_fa_act_anom_rat', params: {
+            'pct': '${(a.excessRatio * 100 - 100).round()}',
+          }),
         ));
         processedCategoryIds.add(a.categoryId);
       }
@@ -596,7 +725,7 @@ class FinancialAnalyticsService {
           orElse: () => Category(
             categoryId: entry.key,
             userId: '',
-            name: 'Khác',
+            name: AppLocalizations.tr('common_other'),
             type: 'expense',
             icon: '',
             color: 0,
@@ -607,14 +736,17 @@ class FinancialAnalyticsService {
           double reduction = (entry.value * 0.15 / 50000).ceil() * 50000.0;
           reduction = reduction.clamp(50000.0, entry.value * 0.25);
           final targetBudget = entry.value - reduction;
+          final displayCat = CategoryLocalizationHelper.localizeName(cat.name);
 
           items.add(ActionPlanItem(
-            categoryName: cat.name,
-            actionTitle: 'Cân đối lại ${cat.name}',
+            categoryName: displayCat,
+            actionTitle: AppLocalizations.tr('svc_fa_act_bal_title', params: {
+              'cat': displayCat,
+            }),
             currentSpend: entry.value,
             targetReduction: reduction,
             suggestedBudget: targetBudget,
-            rationales: 'Danh mục chi tiêu lớn, có thể tinh giản 15% chi phí linh hoạt',
+            rationales: AppLocalizations.tr('svc_fa_act_bal_rat'),
           ));
           processedCategoryIds.add(entry.key);
         }
@@ -627,9 +759,11 @@ class FinancialAnalyticsService {
         savingsShortfall > 0 ? savingsShortfall : totalProjectedSavings;
 
     final actionSummary = items.isEmpty
-        ? 'Duy trì kỷ luật chi tiêu hiện tại. Tất cả các danh mục đều đang trong giới hạn an toàn.'
-        : 'Mục tiêu: Tiết kiệm thêm ${AppFormatters.compactCurrency(totalProjectedSavings, unit: 'đ')}/tháng '
-            'bằng cách tối ưu ${items.length} danh mục chi tiêu lớn.';
+        ? AppLocalizations.tr('svc_fa_act_sum_empty')
+        : AppLocalizations.tr('svc_fa_act_sum_target', params: {
+            'save': AppFormatters.compactCurrency(totalProjectedSavings),
+            'count': '${items.length}',
+          });
 
     return FinancialActionPlan(
       targetMonthlySavings: targetMonthlySavings,
@@ -650,36 +784,42 @@ class FinancialAnalyticsService {
     final double minRecSavePct =
         effectiveHeuristics.minRecommendedSavingRate * 100;
     if (cashFlow.isPositive && cashFlow.savingsRate >= minRecSavePct) {
-      strengths.add(
-          'Tỷ lệ tiết kiệm đạt chuẩn tốt (${cashFlow.savingsRate.round()}%)');
+      strengths.add(AppLocalizations.tr('svc_fa_str_saving', params: {
+        'pct': '${cashFlow.savingsRate.round()}',
+      }));
     }
     if (cashFlow.isPositive) {
-      strengths.add(
-          'Dòng tiền ròng duy trì thặng dư dương (+${AppFormatters.compactCurrency(cashFlow.netCashFlow, unit: 'đ')})');
+      strengths.add(AppLocalizations.tr('svc_fa_str_surplus', params: {
+        'net': AppFormatters.compactCurrency(cashFlow.netCashFlow),
+      }));
     }
     if (income.growthRate > 0.03) {
-      strengths.add(
-          'Thu nhập tăng trưởng (+${(income.growthRate * 100).round()}% so với tháng trước)');
+      strengths.add(AppLocalizations.tr('svc_fa_str_inc_growth', params: {
+        'pct': '${(income.growthRate * 100).round()}',
+      }));
     }
-    if (income.stability == 'Ổn định') {
-      strengths.add('Nguồn thu nhập duy trì ổn định');
+    if (income.stability == AppLocalizations.tr('svc_fa_stab_stable') ||
+        income.stability == 'Ổn định' ||
+        income.stability == 'Stable') {
+      strengths.add(AppLocalizations.tr('svc_fa_str_inc_stable'));
     }
     final allBudgetsSafe = budgetForecasts.isNotEmpty &&
         budgetForecasts.every((b) => b.status == BudgetForecastStatus.safe);
     if (allBudgetsSafe) {
-      strengths.add('Tuân thủ ngân sách xuất sắc (100% danh mục an toàn)');
+      strengths.add(AppLocalizations.tr('svc_fa_str_budget_ok'));
     }
     if (anomalies.isEmpty) {
-      strengths.add('Không có khoản chi tiêu phát sinh bất thường');
+      strengths.add(AppLocalizations.tr('svc_fa_str_no_anom'));
     }
     if (strengths.isEmpty) {
-      strengths.add('Đã chủ động ghi chép và theo dõi giao dịch định kỳ');
+      strengths.add(AppLocalizations.tr('svc_fa_str_tracking'));
     }
     return strengths;
   }
 
-  /// Tính Điểm sức khỏe tài chính (0-100) có khử trùng lặp theo danh mục
-  /// để đồng bộ kết quả giữa AiInsightScreen và FinancialExportService.
+  /// Helper cũ tính Điểm sức khỏe chỉ dựa trên danh sách `FinancialIssue`
+  /// (giữ lại cho tương thích ngược). Nguồn sự thật duy nhất trên UI & Xuất báo cáo
+  /// là `FinancialForecastService.calculateOverallHealthScore`.
   int calculateHealthScore(List<FinancialIssue> issues) {
     double penalty = 0;
     final Set<String> penalizedCategories = {};
@@ -778,8 +918,7 @@ class FinancialAnalyticsService {
         hasWalletBalance: false,
         hasSavingGoals: false,
         hasActivePlan: false,
-        limitationNote:
-            'Chưa có giao dịch, ngân sách, ví có số dư hay mục tiêu tiết kiệm nào. Hãy nhập giao dịch hoặc thiết lập ngân sách đầu tiên.',
+        limitationNote: AppLocalizations.tr('svc_fa_ds_empty'),
       );
     }
 
@@ -802,8 +941,10 @@ class FinancialAnalyticsService {
         hasWalletBalance: hasWalletBalance,
         hasSavingGoals: hasSavingGoals,
         hasActivePlan: hasActivePlan,
-        limitationNote:
-            'Dữ liệu chi tiêu trong tháng còn ít (${expenseTx.length} giao dịch trên ${activeDayKeys.length} ngày). Hệ thống chỉ đưa ra nhận xét sơ bộ về cơ cấu hiện tại và không ngoại suy dự báo cuối tháng.',
+        limitationNote: AppLocalizations.tr('svc_fa_ds_prelim', params: {
+          'txCount': '${expenseTx.length}',
+          'dayCount': '${activeDayKeys.length}',
+        }),
       );
     }
 
@@ -824,8 +965,11 @@ class FinancialAnalyticsService {
         hasSavingGoals: hasSavingGoals,
         hasActivePlan: hasActivePlan,
         limitationNote: isPartialMonth
-            ? 'Đủ dữ liệu phân tích trong tháng (tính đến ngày $daysElapsed/$totalDaysInMonth). Chưa có tháng lịch sử liền kề đủ chuẩn nên không so sánh biến động liên tháng (MoM).'
-            : 'Đủ dữ liệu phân tích trong tháng. Chưa có dữ liệu lịch sử tháng trước để so sánh liên tháng.',
+            ? AppLocalizations.tr('svc_fa_ds_cur_partial', params: {
+                'elapsed': '$daysElapsed',
+                'total': '$totalDaysInMonth',
+              })
+            : AppLocalizations.tr('svc_fa_ds_cur_full'),
       );
     }
 
@@ -845,8 +989,7 @@ class FinancialAnalyticsService {
         hasWalletBalance: hasWalletBalance,
         hasSavingGoals: hasSavingGoals,
         hasActivePlan: hasActivePlan,
-        limitationNote:
-            'Đủ dữ liệu để phân tích trong tháng và so sánh với 1 tháng liền trước (MoM). Chưa kết luận xu hướng dài hạn đa tháng.',
+        limitationNote: AppLocalizations.tr('svc_fa_ds_mom'),
       );
     }
 
@@ -866,8 +1009,12 @@ class FinancialAnalyticsService {
       hasSavingGoals: hasSavingGoals,
       hasActivePlan: hasActivePlan,
       limitationNote: isPartialMonth
-          ? 'Đủ dữ liệu phân tích xu hướng qua ${qualifiedHistoryMonths + 1} tháng (tháng hiện tại tính đến ngày $daysElapsed/$totalDaysInMonth).'
-          : 'Đủ dữ liệu phân tích xu hướng đa tháng và hành vi chi tiêu toàn diện.',
+          ? AppLocalizations.tr('svc_fa_ds_multi_partial', params: {
+              'months': '${qualifiedHistoryMonths + 1}',
+              'elapsed': '$daysElapsed',
+              'total': '$totalDaysInMonth',
+            })
+          : AppLocalizations.tr('svc_fa_ds_multi_full'),
     );
   }
 
@@ -919,8 +1066,9 @@ class FinancialAnalyticsService {
         currentTotalBudget: currentTotalBudget,
         isIncomeLikelyIncompleteInCurrentMonth: isPartialMonth &&
             actualCurrentIncome < declaredExpectedIncome * 0.85,
-        explanation:
-            'Sử dụng mức thu nhập dự kiến do bạn xác nhận (${AppFormatters.compactCurrency(declaredExpectedIncome, unit: 'đ')}).',
+        explanation: AppLocalizations.tr('svc_fa_ri_declared', params: {
+          'amount': AppFormatters.compactCurrency(declaredExpectedIncome),
+        }),
       );
     }
 
@@ -944,8 +1092,12 @@ class FinancialAnalyticsService {
           currentTotalBudget: currentTotalBudget,
           isIncomeLikelyIncompleteInCurrentMonth: incompleteCurrent,
           explanation: incompleteCurrent
-              ? 'Thu nhập các tháng trước ổn định (~${AppFormatters.compactCurrency(histMean, unit: 'đ')}/tháng). Tháng này chưa ghi nhận đủ kỳ lương nên tạm tham chiếu mức ổn định lịch sử.'
-              : 'Thu nhập duy trì ổn định qua các tháng (~${AppFormatters.compactCurrency(refIncome, unit: 'đ')}/tháng).',
+              ? AppLocalizations.tr('svc_fa_ri_stable_partial', params: {
+                  'amount': AppFormatters.compactCurrency(histMean),
+                })
+              : AppLocalizations.tr('svc_fa_ri_stable_full', params: {
+                  'amount': AppFormatters.compactCurrency(refIncome),
+                }),
         );
       } else {
         final minHist = historicalIncomes.reduce(math.min);
@@ -959,8 +1111,10 @@ class FinancialAnalyticsService {
           historicalStdDevIncome: histStdDev,
           currentTotalBudget: currentTotalBudget,
           isIncomeLikelyIncompleteInCurrentMonth: incompleteCurrent,
-          explanation:
-              'Thu nhập có độ biến động giữa các tháng (CV ${(cv * 100).round()}%). Hệ thống dùng mức thu nhập thận trọng (${AppFormatters.compactCurrency(conservativeIncome, unit: 'đ')}) để lập kế hoạch an toàn.',
+          explanation: AppLocalizations.tr('svc_fa_ri_variable', params: {
+            'cv': '${(cv * 100).round()}',
+            'amount': AppFormatters.compactCurrency(conservativeIncome),
+          }),
         );
       }
     }
@@ -980,12 +1134,14 @@ class FinancialAnalyticsService {
         historicalStdDevIncome: 0,
         currentTotalBudget: currentTotalBudget,
         isIncomeLikelyIncompleteInCurrentMonth: incompleteCurrent,
-        explanation:
-            'Tham chiếu từ dữ liệu thu nhập 1 tháng (${AppFormatters.compactCurrency(refIncome, unit: 'đ')}). Bạn có thể nhập Thu nhập dự kiến để điều chỉnh chính xác hơn.',
+        explanation: AppLocalizations.tr('svc_fa_ri_single_hist', params: {
+          'amount': AppFormatters.compactCurrency(refIncome),
+        }),
       );
     }
 
     if (actualCurrentIncome > 0) {
+      final curFmt = AppFormatters.compactCurrency(actualCurrentIncome);
       return ReferenceIncomeAssessment(
         mode: IncomeStabilityMode.singleMonth,
         referenceIncome: _roundMoney(actualCurrentIncome),
@@ -995,8 +1151,10 @@ class FinancialAnalyticsService {
         currentTotalBudget: currentTotalBudget,
         isIncomeLikelyIncompleteInCurrentMonth: isPartialMonth,
         explanation: isPartialMonth
-            ? 'Tính theo thu nhập đã ghi nhận từ đầu tháng (${AppFormatters.compactCurrency(actualCurrentIncome, unit: 'đ')}). Nếu cuối tháng còn khoản thu khác, bạn có thể cập nhật Thu nhập dự kiến.'
-            : 'Tham chiếu theo thu nhập thực tế trong tháng (${AppFormatters.compactCurrency(actualCurrentIncome, unit: 'đ')}).',
+            ? AppLocalizations.tr('svc_fa_ri_cur_partial',
+                params: {'amount': curFmt})
+            : AppLocalizations.tr('svc_fa_ri_cur_full',
+                params: {'amount': curFmt}),
       );
     }
 
@@ -1008,8 +1166,7 @@ class FinancialAnalyticsService {
       historicalStdDevIncome: 0,
       currentTotalBudget: currentTotalBudget,
       isIncomeLikelyIncompleteInCurrentMonth: true,
-      explanation:
-          'Chưa có dữ liệu thu nhập. Hệ thống không tự suy đoán thu nhập từ ngân sách chi tiêu; chỉ phân tích cơ cấu chi tiêu và tiến độ ngân sách hiện tại.',
+      explanation: AppLocalizations.tr('svc_fa_ri_none'),
     );
   }
 
@@ -1086,7 +1243,7 @@ class FinancialAnalyticsService {
           Category(
             categoryId: catId,
             userId: userId,
-            name: 'Danh mục khác',
+            name: AppLocalizations.tr('svc_fa_cat_other_named'),
             type: 'expense',
             icon: 'category',
             color: 0xFF9E9E9E,
@@ -1123,19 +1280,22 @@ class FinancialAnalyticsService {
           s.sourceSpent > s.historicalMedian * 1.25 &&
           s.regularSpent < s.sourceSpent) {
         limit = _roundMoney(math.max(s.regularSpent, s.historicalMedian));
-        basis =
-            'Danh mục thiết yếu có khoản phát sinh đột biến trong kỳ phân tích; đưa về mức chi thiết yếu ổn định (${AppFormatters.compactCurrency(limit, unit: 'đ')}).';
+        basis = AppLocalizations.tr('svc_fa_plan_ess_spike', params: {
+          'amount': AppFormatters.compactCurrency(limit),
+        });
       } else if (s.sourceSpent > 0) {
         limit = _roundMoney(s.sourceSpent);
-        basis =
-            'Giữ nguyên mức chi phí thiết yếu (${AppFormatters.compactCurrency(limit, unit: 'đ')}) — không cắt giảm chi phí thiết yếu.';
+        basis = AppLocalizations.tr('svc_fa_plan_ess_keep', params: {
+          'amount': AppFormatters.compactCurrency(limit),
+        });
       } else if (s.existingBudget != null && s.existingBudget! > 0) {
         limit = _roundMoney(s.existingBudget!);
-        basis =
-            'Duy trì theo hạn mức ngân sách thiết yếu đã đặt (${AppFormatters.compactCurrency(limit, unit: 'đ')}).';
+        basis = AppLocalizations.tr('svc_fa_plan_ess_budget', params: {
+          'amount': AppFormatters.compactCurrency(limit),
+        });
       } else {
         limit = _roundMoney(s.historicalMedian);
-        basis = 'Tham chiếu theo mức trung vị lịch sử của danh mục thiết yếu.';
+        basis = AppLocalizations.tr('svc_fa_plan_ess_hist');
       }
       essentialLimits[s.category.categoryId] = limit;
       essentialBasis[s.category.categoryId] = basis;
@@ -1175,8 +1335,7 @@ class FinancialAnalyticsService {
             recommendedLimit: rec,
             deltaFromCurrent: rec - s.sourceSpent,
             calculationBasis: essentialBasis[s.category.categoryId] ?? '',
-            aiActionTip:
-                'Duy trì theo dõi hóa đơn/chi phí thiết yếu định kỳ trong tháng.',
+            aiActionTip: AppLocalizations.tr('svc_fa_plan_ess_tip'),
           ),
         );
       }
@@ -1199,10 +1358,12 @@ class FinancialAnalyticsService {
             recommendedLimit: rec,
             deltaFromCurrent: rec - s.sourceSpent,
             calculationBasis: s.existingBudget != null
-                ? 'Chưa có dữ liệu thu nhập; đối chiếu theo hạn mức ngân sách hiện tại (${AppFormatters.compactCurrency(s.existingBudget!, unit: 'đ')}).'
-                : 'Chưa có dữ liệu thu nhập; giữ ở mức chi tiêu thường xuyên.',
-            aiActionTip:
-                'Hãy bổ sung giao dịch Thu nhập hoặc nhập Thu nhập dự kiến để hệ thống tính toán mục tiêu tiết kiệm chính xác.',
+                ? AppLocalizations.tr('svc_fa_plan_noinc_budget', params: {
+                    'amount':
+                        AppFormatters.compactCurrency(s.existingBudget!),
+                  })
+                : AppLocalizations.tr('svc_fa_plan_noinc_reg'),
+            aiActionTip: AppLocalizations.tr('svc_fa_plan_noinc_tip'),
           ),
         );
       }
@@ -1234,8 +1395,7 @@ class FinancialAnalyticsService {
         isEssentialDeficit: false,
         currentAllocations: noIncomeAllocations,
         originalSnapshot: snapshot,
-        aiExecutiveSummary:
-            'Chưa có dữ liệu thu nhập nên hệ thống chỉ thiết lập khung kiểm soát chi tiêu theo ngân sách và lịch sử hiện có. Vui lòng nhập Thu nhập dự kiến để tính kế hoạch tiết kiệm.',
+        aiExecutiveSummary: AppLocalizations.tr('svc_fa_plan_noinc_summary'),
         behavioralInsights: [
           incomeAssessment.explanation,
           sufficiency.limitationNote,
@@ -1262,9 +1422,10 @@ class FinancialAnalyticsService {
             recommendedLimit: rec,
             deltaFromCurrent: rec - s.sourceSpent,
             calculationBasis:
-                'Chi phí thiết yếu được giữ nguyên (${AppFormatters.compactCurrency(rec, unit: 'đ')}), nhưng tổng nhóm thiết yếu đã vượt thu nhập tham chiếu.',
-            aiActionTip:
-                'Kiểm tra xem danh mục này có khoản chi linh hoạt nào bị gộp nhầm vào nhóm Thiết yếu hay không.',
+                AppLocalizations.tr('svc_fa_plan_def_ess_basis', params: {
+              'amount': AppFormatters.compactCurrency(rec),
+            }),
+            aiActionTip: AppLocalizations.tr('svc_fa_plan_def_ess_tip'),
           ),
         );
       }
@@ -1281,10 +1442,8 @@ class FinancialAnalyticsService {
             floorLimit: 0,
             recommendedLimit: 0,
             deltaFromCurrent: -s.sourceSpent,
-            calculationBasis:
-                'Thu nhập tham chiếu không đủ bù đắp chi phí thiết yếu nên không còn dư địa cho chi tiêu linh hoạt.',
-            aiActionTip:
-                'Tạm dừng tối đa các khoản chi không bắt buộc cho đến khi cân đối lại nguồn thu hoặc cơ cấu chi thiết yếu.',
+            calculationBasis: AppLocalizations.tr('svc_fa_plan_def_flex_basis'),
+            aiActionTip: AppLocalizations.tr('svc_fa_plan_def_flex_tip'),
           ),
         );
       }
@@ -1317,9 +1476,15 @@ class FinancialAnalyticsService {
         currentAllocations: deficitAllocations,
         originalSnapshot: snapshot,
         aiExecutiveSummary:
-            'Cảnh báo: Tổng chi phí thiết yếu (${AppFormatters.compactCurrency(totalEssentialPlanned, unit: 'đ')}) đang vượt quá thu nhập tham chiếu (${AppFormatters.compactCurrency(refIncome, unit: 'đ')}). Hệ thống không tự ý cắt giảm chi phí thiết yếu; bạn cần rà soát lại phân loại Thiết yếu/Linh hoạt hoặc cập nhật thu nhập.',
+            AppLocalizations.tr('svc_fa_plan_def_summary', params: {
+          'ess': AppFormatters.compactCurrency(totalEssentialPlanned),
+          'inc': AppFormatters.compactCurrency(refIncome),
+        }),
         behavioralInsights: [
-          'Chi phí thiết yếu vượt thu nhập ${AppFormatters.compactCurrency(totalEssentialPlanned - refIncome, unit: 'đ')}.',
+          AppLocalizations.tr('svc_fa_plan_def_insight', params: {
+            'diff': AppFormatters.compactCurrency(
+                totalEssentialPlanned - refIncome),
+          }),
           incomeAssessment.explanation,
         ],
         createdAt: now,
@@ -1394,8 +1559,9 @@ class FinancialAnalyticsService {
         final catId = s.category.categoryId;
         final floorVal = flexFloor[catId] ?? 0.0;
         flexRecommended[catId] = floorVal;
-        flexBasis[catId] =
-            'Đã tối ưu tối đa về ngưỡng sàn khả thi trong tháng (${AppFormatters.compactCurrency(floorVal, unit: 'đ')}) để ưu tiên dòng tiền cho mục tiêu tiết kiệm.';
+        flexBasis[catId] = AppLocalizations.tr('svc_fa_plan_flex_floor', params: {
+          'amount': AppFormatters.compactCurrency(floorVal),
+        });
       }
     } else if (neededCutFromFlex <= 0) {
       final double capRatio = totalFlexCurrent > availableAfterEssential &&
@@ -1407,8 +1573,7 @@ class FinancialAnalyticsService {
         final cur = flexCurrentRef[catId] ?? 0.0;
         final rec = _roundMoney(cur * capRatio);
         flexRecommended[catId] = rec;
-        flexBasis[catId] =
-            'Chi tiêu đang nằm trong giới hạn cân đối với thu nhập và mục tiêu tiết kiệm.';
+        flexBasis[catId] = AppLocalizations.tr('svc_fa_plan_flex_ok');
       }
     } else {
       if (neededCutFromFlex <= totalPrimaryExcess && totalPrimaryExcess > 0) {
@@ -1420,8 +1585,10 @@ class FinancialAnalyticsService {
           final rec = _roundMoney(math.max(flexFloor[catId] ?? 0.0, cur - cut));
           flexRecommended[catId] = rec;
           flexBasis[catId] = excess > 0
-              ? 'Điều chỉnh giảm phần chi vượt ngân sách/trung vị lịch sử (${AppFormatters.compactCurrency(cur - rec, unit: 'đ')}) để đạt mục tiêu tiết kiệm.'
-              : 'Giữ nguyên mức chi tiêu ổn định.';
+              ? AppLocalizations.tr('svc_fa_plan_flex_p1', params: {
+                  'amount': AppFormatters.compactCurrency(cur - rec),
+                })
+              : AppLocalizations.tr('svc_fa_plan_flex_p1_keep');
         }
       } else {
         final double remainingToCut =
@@ -1440,8 +1607,11 @@ class FinancialAnalyticsService {
           flexRecommended[catId] = rec;
           final totalCut = (flexCurrentRef[catId] ?? 0.0) - rec;
           flexBasis[catId] = totalCut > 0
-              ? 'Loại bỏ phần chi vượt ngưỡng và tinh giản thêm ${AppFormatters.compactCurrency(phase2Cut, unit: 'đ')} chi phí linh hoạt (tổng giảm ${AppFormatters.compactCurrency(totalCut, unit: 'đ')}).'
-              : 'Duy trì trong hạn mức ổn định.';
+              ? AppLocalizations.tr('svc_fa_plan_flex_p2', params: {
+                  'cut': AppFormatters.compactCurrency(phase2Cut),
+                  'totalCut': AppFormatters.compactCurrency(totalCut),
+                })
+              : AppLocalizations.tr('svc_fa_plan_flex_p2_keep');
         }
       }
     }
@@ -1494,8 +1664,7 @@ class FinancialAnalyticsService {
           recommendedLimit: rec,
           deltaFromCurrent: rec - s.sourceSpent,
           calculationBasis: essentialBasis[catId] ?? '',
-          aiActionTip:
-              'Khoản chi thiết yếu được bảo toàn hạn mức; nên thanh toán đúng kỳ hạn để tránh phí phạt.',
+          aiActionTip: AppLocalizations.tr('svc_fa_plan_ess_tip2'),
         ),
       );
     }
@@ -1518,8 +1687,11 @@ class FinancialAnalyticsService {
           deltaFromCurrent: rec - s.sourceSpent,
           calculationBasis: flexBasis[catId] ?? '',
           aiActionTip: rec < s.sourceSpent
-              ? 'Chia hạn mức ${AppFormatters.compactCurrency(rec, unit: 'đ')} thành trần chi tiêu theo từng tuần (~${AppFormatters.compactCurrency(rec / 4, unit: 'đ')}/tuần).'
-              : 'Duy trì thói quen chi tiêu hợp lý hiện tại.',
+              ? AppLocalizations.tr('svc_fa_plan_flex_tip_cut', params: {
+                  'rec': AppFormatters.compactCurrency(rec),
+                  'weekly': AppFormatters.compactCurrency(rec / 4),
+                })
+              : AppLocalizations.tr('svc_fa_plan_flex_tip_ok'),
         ),
       );
     }
@@ -1533,9 +1705,27 @@ class FinancialAnalyticsService {
       capturedAt: now,
     );
 
+    final extendNote = recommendedMonths != null
+        ? AppLocalizations.tr('svc_fa_plan_extend_note', params: {
+            'months': '$recommendedMonths',
+          })
+        : '';
     final String summaryText = isGoalFeasible
-        ? 'Kế hoạch tháng $targetMonth cân đối trên thu nhập tham chiếu ${AppFormatters.compactCurrency(refIncome, unit: 'đ')}: bảo toàn ${AppFormatters.compactCurrency(totalEssentialPlanned, unit: 'đ')} chi phí thiết yếu, giới hạn ${AppFormatters.compactCurrency(totalFlexiblePlanned, unit: 'đ')} chi phí linh hoạt và dành ${AppFormatters.compactCurrency(plannedSaving, unit: 'đ')} cho tiết kiệm.'
-        : 'Với thu nhập tham chiếu ${AppFormatters.compactCurrency(refIncome, unit: 'đ')} và chi phí thiết yếu ${AppFormatters.compactCurrency(totalEssentialPlanned, unit: 'đ')}, mức tiết kiệm khả thi tối đa là ${AppFormatters.compactCurrency(plannedSaving, unit: 'đ')}/tháng (thiếu ${AppFormatters.compactCurrency(infeasibleGap, unit: 'đ')}/tháng so với mục tiêu ${AppFormatters.compactCurrency(desiredSaving, unit: 'đ')}).${recommendedMonths != null ? ' Khuyến nghị giãn thời hạn mục tiêu sang $recommendedMonths tháng.' : ''}';
+        ? AppLocalizations.tr('svc_fa_plan_summary_feasible', params: {
+            'month': targetMonth,
+            'inc': AppFormatters.compactCurrency(refIncome),
+            'ess': AppFormatters.compactCurrency(totalEssentialPlanned),
+            'flex': AppFormatters.compactCurrency(totalFlexiblePlanned),
+            'save': AppFormatters.compactCurrency(plannedSaving),
+          })
+        : AppLocalizations.tr('svc_fa_plan_summary_infeasible', params: {
+            'inc': AppFormatters.compactCurrency(refIncome),
+            'ess': AppFormatters.compactCurrency(totalEssentialPlanned),
+            'save': AppFormatters.compactCurrency(plannedSaving),
+            'gap': AppFormatters.compactCurrency(infeasibleGap),
+            'desired': AppFormatters.compactCurrency(desiredSaving),
+            'extendNote': extendNote,
+          });
 
     return MonthlyFinancialPlan(
       planId: '${userId}_${targetMonth.replaceAll('/', '-')}',
@@ -1581,12 +1771,56 @@ class FinancialAnalyticsService {
     final int y =
         parts.length == 2 ? (int.tryParse(parts[1]) ?? now.year) : now.year;
     final int totalDays = DateTime(y, m + 1, 0).day;
+    final DateTime targetMonthStart = DateTime(y, m, 1);
+    final DateTime currentMonthStart = DateTime(now.year, now.month, 1);
+    final bool isFutureMonth = targetMonthStart.isAfter(currentMonthStart);
+
+    // Kế hoạch của tháng tương lai (chưa đến ngày 01/{targetMonth}) không chấm
+    // điểm thực thi sớm để tránh điểm giả (VD 60/100) do dữ liệu tháng mới rỗng.
+    if (isFutureMonth) {
+      final upcomingStatuses = plan.currentAllocations
+          .map(
+            (alloc) => CategoryAdherenceStatus(
+              categoryId: alloc.categoryId,
+              categoryName: alloc.categoryName,
+              isEssential: alloc.isEssential,
+              plannedLimit: alloc.recommendedLimit,
+              actualSpent: 0.0,
+              remainingAmount: alloc.recommendedLimit,
+              usageRatio: 0.0,
+              status: 'upcoming',
+            ),
+          )
+          .toList();
+
+      return PlanExecutionTrackerResult(
+        targetMonth: plan.targetMonth,
+        elapsedMonthRatio: 0.0,
+        isUpcoming: true,
+        plannedTotalExpense: plan.plannedTotalExpense,
+        actualTotalExpense: 0.0,
+        budgetUsageRatio: 0.0,
+        budgetAdherenceScore: 0.0,
+        onTrackCategoryCount: 0,
+        exceededCategoryCount: 0,
+        categoryStatuses: upcomingStatuses,
+        targetSavingAmount: plan.targetSavingAmount,
+        actualIncomeInMonth: 0.0,
+        netGoalContributions: 0.0,
+        totalNetCashflowSurplus: 0.0,
+        unallocatedWalletSurplus: 0.0,
+        effectiveMonthlySaved: 0.0,
+        savingExecutionRatio: 0.0,
+        savingAdherenceScore: 0.0,
+        overallAdherenceScore: 0.0,
+        needsRebalance: false,
+        totalOverrunAmount: 0.0,
+      );
+    }
 
     double elapsedRatio = 1.0;
     if (now.year == y && now.month == m) {
       elapsedRatio = (now.day / totalDays).clamp(0.05, 1.0);
-    } else if (DateTime(y, m, 1).isAfter(now)) {
-      elapsedRatio = 0.0;
     }
 
     final Map<String, double> actualByCategory = _sumByCategory(targetMonthTx);
@@ -1779,15 +2013,16 @@ class FinancialAnalyticsService {
         orElse: () => Category(
           categoryId: tx.categoryId,
           userId: '',
-          name: 'Khác',
+          name: AppLocalizations.tr('common_other'),
           type: 'expense',
           icon: 'category',
           color: 0xFF9E9E9E,
         ),
       );
       final weekday = tx.date.weekday - 1; // 0 = Thứ 2
-      sums.putIfAbsent(cat.name, () => List.filled(7, 0));
-      sums[cat.name]![weekday] += tx.amount;
+      final displayCat = CategoryLocalizationHelper.localizeName(cat.name);
+      sums.putIfAbsent(displayCat, () => List.filled(7, 0));
+      sums[displayCat]![weekday] += tx.amount;
     }
     // Chỉ giữ topN danh mục theo tổng chi tiêu, chuẩn hóa mỗi ô về thang 0-4
     final sortedEntries = sums.entries.toList()

@@ -5,11 +5,25 @@ import '../models/transaction_anomaly_result.dart';
 import '../models/transaction_model.dart';
 import '../models/wallet_model.dart';
 import '../models/wallet_suggestion.dart';
-import 'ai_config_sync_service.dart';
+import '../l10n/app_localizations.dart';
+import '../utils/category_localization_helper.dart';
 
 class _PaymentProviderRule {
   final String key;
   final String displayLabel;
+
+  String get localizedLabel {
+    switch (key) {
+      case 'cash':
+        return AppLocalizations.tr('svc_ti_provider_cash');
+      case 'generic_bank':
+        return AppLocalizations.tr('svc_ti_provider_bank');
+      case 'generic_ewallet':
+        return AppLocalizations.tr('svc_ti_provider_ewallet');
+      default:
+        return displayLabel;
+    }
+  }
   final String walletType; // cash | eWallet | bank
   final List<String> receiptKeywords;
   final List<String> walletNameAliases;
@@ -42,13 +56,13 @@ class TransactionIntelligenceService {
   })  : _rulesOverride = rulesOverride,
         _heuristicsOverride = heuristicsOverride;
 
-  /// Cấu hình từ điển nhận diện giao dịch đang hiệu lực
+  /// Cấu hình từ điển nhận diện giao dịch đang hiệu lực (mặc định dùng bộ từ khóa tích hợp sẵn)
   TransactionIntelligenceConfig get effectiveRules =>
-      _rulesOverride ?? AiConfigSyncService.instance.currentTransactionRules;
+      _rulesOverride ?? TransactionIntelligenceConfig.defaults();
 
   /// Cấu hình ngưỡng bất thường giao dịch đơn lẻ đang hiệu lực
   FinancialHeuristicsConfig get effectiveHeuristics =>
-      _heuristicsOverride ?? AiConfigSyncService.instance.currentHeuristics;
+      _heuristicsOverride ?? FinancialHeuristicsConfig.defaults();
 
   /// Truy cập chỉ đọc bộ từ khóa hệ thống mặc định (phục vụ kiểm tra xung đột trên Admin/Sandbox)
   static Map<String, List<String>> get builtInExpenseKeywords =>
@@ -439,7 +453,7 @@ class TransactionIntelligenceService {
             detectedPaymentLabel: w.walletName,
             detectedWalletType: w.type,
             confidence: 90,
-            reason: 'Khớp tên ví "${w.walletName}" từ hóa đơn',
+            reason: AppLocalizations.tr('svc_ti_wallet_match', params: {'wallet': w.walletName}),
             source: 'ocr',
             isMatched: true,
           );
@@ -462,7 +476,7 @@ class TransactionIntelligenceService {
         detectedPaymentLabel: cleanLabel,
         detectedWalletType: 'other',
         confidence: 85,
-        reason: 'Bạn không có loại ví "$cleanLabel" như trên hóa đơn',
+        reason: AppLocalizations.tr('svc_ti_wallet_missing', params: {'label': cleanLabel}),
         source: 'ocr',
         isMatched: false,
       );
@@ -508,7 +522,7 @@ class TransactionIntelligenceService {
             detectedPaymentLabel: w.walletName,
             detectedWalletType: w.type,
             confidence: 85,
-            reason: 'Khớp tên ví "${w.walletName}" từ hóa đơn',
+            reason: AppLocalizations.tr('svc_ti_wallet_match', params: {'wallet': w.walletName}),
             source: 'ocr',
             isMatched: true,
           );
@@ -535,10 +549,10 @@ class TransactionIntelligenceService {
         return WalletSuggestion(
           walletId: w.walletId,
           walletName: w.walletName,
-          detectedPaymentLabel: rule.displayLabel,
+          detectedPaymentLabel: rule.localizedLabel,
           detectedWalletType: rule.walletType,
           confidence: 90,
-          reason: 'Nhận diện thanh toán qua ${rule.displayLabel} từ hóa đơn',
+          reason: AppLocalizations.tr('svc_ti_wallet_provider', params: {'label': rule.localizedLabel}),
           source: 'ocr',
           isMatched: true,
         );
@@ -553,10 +567,10 @@ class TransactionIntelligenceService {
           return WalletSuggestion(
             walletId: w.walletId,
             walletName: w.walletName,
-            detectedPaymentLabel: rule.displayLabel,
+            detectedPaymentLabel: rule.localizedLabel,
             detectedWalletType: rule.walletType,
             confidence: rule.walletType == 'cash' ? 90 : 85,
-            reason: 'Nhận diện thanh toán qua ${rule.displayLabel} từ hóa đơn',
+            reason: AppLocalizations.tr('svc_ti_wallet_provider', params: {'label': rule.localizedLabel}),
             source: 'ocr',
             isMatched: true,
           );
@@ -568,11 +582,11 @@ class TransactionIntelligenceService {
     return WalletSuggestion(
       walletId: '',
       walletName: '',
-      detectedPaymentLabel: rule.displayLabel,
+      detectedPaymentLabel: rule.localizedLabel,
       detectedWalletType: rule.walletType,
       confidence: 85,
       reason:
-          'Bạn không có loại ví "${rule.displayLabel}" như trên hóa đơn',
+          AppLocalizations.tr('svc_ti_wallet_missing', params: {'label': rule.localizedLabel}),
       source: 'ocr',
       isMatched: false,
     );
@@ -608,19 +622,23 @@ class TransactionIntelligenceService {
 
     // 1. Ưu tiên từ OCR merchant
     if (normalizedOcr.isNotEmpty) {
-      // 1a. So khớp trực tiếp tên OCR với danh mục
+      // 1a. So khớp trực tiếp tên OCR với danh mục (hỗ trợ đa ngôn ngữ cho danh mục hệ thống)
       for (final cat in validCategories) {
-        final catNameNorm = removeVietnameseDiacritics(cat.name);
-        if (catNameNorm.isNotEmpty &&
-            (normalizedOcr.contains(catNameNorm) ||
-                catNameNorm.contains(normalizedOcr))) {
-          return CategorySuggestion(
-            categoryId: cat.categoryId,
-            categoryName: cat.name,
-            confidence: 90,
-            reason: 'Gợi ý từ tên cửa hàng trên hóa đơn ($ocrMerchant)',
-            source: 'ocr',
-          );
+        for (final variant
+            in CategoryLocalizationHelper.allSearchVariants(cat.name)) {
+          final catNameNorm = removeVietnameseDiacritics(variant);
+          if (catNameNorm.isNotEmpty &&
+              (normalizedOcr.contains(catNameNorm) ||
+                  catNameNorm.contains(normalizedOcr))) {
+            return CategorySuggestion(
+              categoryId: cat.categoryId,
+              categoryName: cat.name,
+              confidence: 90,
+              reason: AppLocalizations.tr('svc_ti_cat_merchant',
+                  params: {'merchant': ocrMerchant ?? ''}),
+              source: 'ocr',
+            );
+          }
         }
       }
       // 1b. So khớp OCR merchant với bảng từ khóa
@@ -631,7 +649,7 @@ class TransactionIntelligenceService {
           categoryId: keywordMatchFromOcr.categoryId,
           categoryName: keywordMatchFromOcr.name,
           confidence: 85,
-          reason: 'Gợi ý từ cửa hàng nhận diện từ hóa đơn ($ocrMerchant)',
+          reason: AppLocalizations.tr('svc_ti_cat_merchant_kw', params: {'merchant': ocrMerchant ?? ''}),
           source: 'ocr',
         );
       }
@@ -639,19 +657,24 @@ class TransactionIntelligenceService {
 
     // 2. Từ khóa trong note
     if (normalizedNote.isNotEmpty) {
-      // 2a. So khớp trực tiếp tên danh mục trong note
+      // 2a. So khớp trực tiếp tên danh mục trong note (hỗ trợ đa ngôn ngữ cho danh mục hệ thống)
       for (final cat in validCategories) {
-        final catNameNorm = removeVietnameseDiacritics(cat.name);
-        if (catNameNorm.length >= 3 &&
-            (normalizedNote.contains(catNameNorm) ||
-                catNameNorm.contains(normalizedNote))) {
-          return CategorySuggestion(
-            categoryId: cat.categoryId,
-            categoryName: cat.name,
-            confidence: 85,
-            reason: 'Khớp tên danh mục "${cat.name}" trong ghi chú',
-            source: 'keyword',
-          );
+        for (final variant
+            in CategoryLocalizationHelper.allSearchVariants(cat.name)) {
+          final catNameNorm = removeVietnameseDiacritics(variant);
+          if (catNameNorm.length >= 3 &&
+              (normalizedNote.contains(catNameNorm) ||
+                  catNameNorm.contains(normalizedNote))) {
+            return CategorySuggestion(
+              categoryId: cat.categoryId,
+              categoryName: cat.name,
+              confidence: 85,
+              reason: AppLocalizations.tr('svc_ti_cat_note_name', params: {
+                'cat': CategoryLocalizationHelper.localizeName(cat.name),
+              }),
+              source: 'keyword',
+            );
+          }
         }
       }
 
@@ -663,7 +686,7 @@ class TransactionIntelligenceService {
           categoryId: keywordMatchFromNote.categoryId,
           categoryName: keywordMatchFromNote.name,
           confidence: 85,
-          reason: 'Khớp từ khóa trong ghi chú',
+          reason: AppLocalizations.tr('svc_ti_cat_note_kw'),
           source: 'keyword',
         );
       }
@@ -710,7 +733,7 @@ class TransactionIntelligenceService {
               categoryId: cat.categoryId,
               categoryName: cat.name,
               confidence: 80,
-              reason: 'Dựa trên lịch sử giao dịch tương tự ($maxCount lần)',
+              reason: AppLocalizations.tr('svc_ti_cat_history', params: {'count': '$maxCount'}),
               source: 'history',
             );
           }
@@ -880,20 +903,26 @@ class TransactionIntelligenceService {
             : text.contains(kw),
       );
       if (matched) {
-        // Tìm category nào khớp nhất với categoryGroupKey
+        // Tìm category nào khớp nhất với categoryGroupKey (cả tiếng Việt & tiếng Anh)
         for (final cat in validCategories) {
-          final catNorm = removeVietnameseDiacritics(cat.name);
-          if (catNorm.contains(categoryGroupKey) ||
-              categoryGroupKey.contains(catNorm)) {
-            return cat;
+          for (final variant
+              in CategoryLocalizationHelper.allSearchVariants(cat.name)) {
+            final catNorm = removeVietnameseDiacritics(variant);
+            if (catNorm.contains(categoryGroupKey) ||
+                categoryGroupKey.contains(catNorm)) {
+              return cat;
+            }
           }
         }
         // Thử tìm category đầu tiên có tên chứa một trong các keyword
         for (final cat in validCategories) {
-          final catNorm = removeVietnameseDiacritics(cat.name);
-          for (final kw in keywords) {
-            if (catNorm.contains(kw) || kw.contains(catNorm)) {
-              return cat;
+          for (final variant
+              in CategoryLocalizationHelper.allSearchVariants(cat.name)) {
+            final catNorm = removeVietnameseDiacritics(variant);
+            for (final kw in keywords) {
+              if (catNorm.contains(kw) || kw.contains(catNorm)) {
+                return cat;
+              }
             }
           }
         }
@@ -970,8 +999,10 @@ class TransactionIntelligenceService {
     if (ratio >= warnMultiplier && difference >= minDiffVnd) {
       final severity = ratio >= critMultiplier ? 'critical' : 'warning';
       final ratioFormatted = ratio.toStringAsFixed(1).replaceAll('.0', '');
-      final reason =
-          'Khoản chi này cao hơn khoảng $ratioFormatted lần mức chi $categoryName thông thường của bạn trong 90 ngày gần đây.';
+      final reason = AppLocalizations.tr('svc_ti_anom_reason', params: {
+        'ratio': ratioFormatted,
+        'cat': CategoryLocalizationHelper.localizeName(categoryName),
+      });
 
       return TransactionAnomalyResult(
         isAnomalous: true,

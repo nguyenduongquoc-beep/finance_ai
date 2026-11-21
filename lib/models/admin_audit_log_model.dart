@@ -44,6 +44,10 @@ class AdminAuditLog {
         return 'Mở khóa tài khoản người dùng';
       case 'SET_USER_ROLE':
         return 'Cập nhật phân quyền tài khoản';
+      case 'ADMIN_DELETE_USER':
+        return 'Xóa vĩnh viễn tài khoản người dùng';
+      case 'CLEANUP_DELETED_AUTH_USER':
+        return 'Dọn dữ liệu tài khoản đã xóa';
       case 'CREATE_SYSTEM_CATEGORY':
         return 'Thêm danh mục hệ thống';
       case 'UPDATE_SYSTEM_CATEGORY':

@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../../l10n/app_localizations.dart';
+import '../../models/user_model.dart';
 import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 import '../../utils/constants.dart';
 import '../../widgets/app_button.dart';
 import '../../widgets/app_text_field.dart';
 import '../../widgets/main_navigation.dart';
-import '../setup/profile_setup_screen.dart';
+import '../setup/wallet_setup_screen.dart';
 import 'register_screen.dart';
 import 'forgot_password_screen.dart';
 
@@ -36,48 +39,98 @@ class _LoginScreenState extends State<LoginScreen> {
       _errorMessage = null;
     });
     try {
-      await _authService.loginWithEmail(
+      final credential = await _authService.loginWithEmail(
         email: _emailController.text.trim(),
         password: _passwordController.text,
       );
+      final user = credential.user;
+      if (user != null) {
+        final firestore = FirestoreService();
+        final profile = await firestore.getUserProfile(user.uid);
+        if (profile != null && profile.isLocked) {
+          await _authService.signOut();
+          if (!mounted) return;
+          setState(() {
+            _errorMessage = AppLocalizations.tr('auth_err_locked');
+          });
+          return;
+        }
+      }
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
         MaterialPageRoute(builder: (_) => const MainNavigation()),
       );
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'user-disabled') {
+        setState(() {
+          _errorMessage = AppLocalizations.tr('auth_err_locked');
+        });
+      } else {
+        setState(() => _errorMessage = AppLocalizations.tr('auth_err_invalid_creds'));
+      }
     } catch (e) {
-      setState(() => _errorMessage = 'Email hoặc mật khẩu không đúng.');
+      setState(() => _errorMessage = AppLocalizations.tr('auth_err_invalid_creds'));
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
   }
 
   Future<void> _handleGoogleLogin() async {
-    setState(() => _isLoading = true);
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
     try {
       final credential = await _authService.loginWithGoogle();
       if (credential == null || !mounted) return;
 
-      final bool isNewUser = credential.additionalUserInfo?.isNewUser ?? false;
-      if (isNewUser) {
+      final user = credential.user!;
+      final firestore = FirestoreService();
+      final profile = await firestore.getUserProfile(user.uid);
+      if (profile != null && profile.isLocked) {
+        await _authService.signOut();
+        if (!mounted) return;
+        setState(() {
+          _errorMessage = AppLocalizations.tr('auth_err_locked');
+        });
+        return;
+      }
+
+      if (profile == null) {
+        final displayName = (user.displayName?.trim().isNotEmpty == true)
+            ? user.displayName!.trim()
+            : AppLocalizations.tr('common_user');
+        await firestore.createUserProfile(
+          AppUser(
+            uid: user.uid,
+            name: displayName,
+            email: user.email ?? '',
+            createdAt: DateTime.now(),
+          ),
+        );
+      }
+
+      final wallets = await firestore.getWalletsSafely(user.uid);
+      if (!mounted) return;
+      if (wallets.isEmpty) {
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const ProfileSetupScreen()),
+          MaterialPageRoute(builder: (_) => const WalletSetupScreen()),
         );
       } else {
-        final profile =
-            await FirestoreService().getUserProfile(credential.user!.uid);
-        if (!mounted) return;
-        if (profile == null) {
-          Navigator.of(context).pushReplacement(
-            MaterialPageRoute(builder: (_) => const ProfileSetupScreen()),
-          );
-        } else {
-          Navigator.of(context).pushReplacement(
-            MaterialPageRoute(builder: (_) => const MainNavigation()),
-          );
-        }
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const MainNavigation()),
+        );
+      }
+    } on FirebaseAuthException catch (e) {
+      if (e.code == 'user-disabled') {
+        setState(() {
+          _errorMessage = AppLocalizations.tr('auth_err_locked');
+        });
+      } else {
+        setState(() => _errorMessage = AppLocalizations.tr('auth_err_google_failed'));
       }
     } catch (e) {
-      setState(() => _errorMessage = 'Đăng nhập Google thất bại.');
+      setState(() => _errorMessage = AppLocalizations.tr('auth_err_google_failed'));
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -94,36 +147,40 @@ class _LoginScreenState extends State<LoginScreen> {
             child: Form(
               key: _formKey,
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   const SizedBox(height: 12),
-                  // App Icon Branding
-                  Container(
-                    width: 52,
-                    height: 52,
-                    decoration: BoxDecoration(
-                      color: AppColors.primary,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: const Icon(
-                      Icons.account_balance_wallet_rounded,
-                      color: Colors.white,
-                      size: 28,
+                  // App Icon Branding & Tiêu đề căn giữa cân đối (màu gốc dự án)
+                  Center(
+                    child: Container(
+                      width: 52,
+                      height: 52,
+                      decoration: BoxDecoration(
+                        color: AppColors.primary,
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: const Icon(
+                        Icons.account_balance_wallet_rounded,
+                        color: Colors.white,
+                        size: 28,
+                      ),
                     ),
                   ),
                   const SizedBox(height: 20),
                   Text(
-                    'Chào mừng trở lại 👋',
+                    context.tr('auth_welcome_back'),
+                    textAlign: TextAlign.center,
                     style: GoogleFonts.inter(
                       fontSize: 26,
-                      fontWeight: FontWeight.w600,
+                      fontWeight: FontWeight.w700,
                       color: context.appTextPrimary,
                     ),
                   ),
                   const SizedBox(height: 6),
                   Text(
-                    'Đăng nhập để tiếp tục quản lý tài chính của bạn',
+                    context.tr('auth_login_sub'),
+                    textAlign: TextAlign.center,
                     style: GoogleFonts.inter(
                       fontSize: 14,
                       color: context.appTextSecondary,
@@ -134,12 +191,12 @@ class _LoginScreenState extends State<LoginScreen> {
                   // Email Input
                   AppTextField(
                     controller: _emailController,
-                    labelText: 'Địa chỉ Email',
-                    hintText: 'nguyenvana@gmail.com',
+                    labelText: context.tr('auth_email_label'),
+                    hintText: context.tr('auth_email_hint'),
                     prefixIcon: Icons.email_outlined,
                     keyboardType: TextInputType.emailAddress,
                     validator: (v) => (v == null || !v.contains('@'))
-                        ? 'Email không hợp lệ'
+                        ? context.tr('auth_email_invalid')
                         : null,
                   ),
                   const SizedBox(height: 16),
@@ -147,7 +204,7 @@ class _LoginScreenState extends State<LoginScreen> {
                   // Password Input
                   AppTextField(
                     controller: _passwordController,
-                    labelText: 'Mật khẩu',
+                    labelText: context.tr('auth_password_label'),
                     hintText: '••••••••',
                     prefixIcon: Icons.lock_outline_rounded,
                     obscureText: _obscurePassword,
@@ -163,7 +220,7 @@ class _LoginScreenState extends State<LoginScreen> {
                           setState(() => _obscurePassword = !_obscurePassword),
                     ),
                     validator: (v) => (v == null || v.length < 6)
-                        ? 'Mật khẩu tối thiểu 6 ký tự'
+                        ? context.tr('auth_password_min')
                         : null,
                   ),
                   const SizedBox(height: 10),
@@ -172,45 +229,58 @@ class _LoginScreenState extends State<LoginScreen> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Row(
-                        children: [
-                          SizedBox(
-                            width: 24,
-                            height: 24,
-                            child: Checkbox(
-                              value: _rememberMe,
-                              activeColor: AppColors.primary,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(4),
+                      Expanded(
+                        child: Row(
+                          children: [
+                            SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: Checkbox(
+                                value: _rememberMe,
+                                activeColor: AppColors.primary,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(4),
+                                ),
+                                side: BorderSide(
+                                    color: context.appBorder, width: 1.5),
+                                onChanged: (v) =>
+                                    setState(() => _rememberMe = v ?? false),
                               ),
-                              side: BorderSide(
-                                  color: context.appBorder, width: 1.5),
-                              onChanged: (v) =>
-                                  setState(() => _rememberMe = v ?? false),
                             ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            'Ghi nhớ tôi',
-                            style: GoogleFonts.inter(
-                              fontSize: 13,
-                              color: context.appTextSecondary,
-                              fontWeight: FontWeight.w500,
+                            const SizedBox(width: 8),
+                            Flexible(
+                              child: Text(
+                                context.tr('auth_remember_me'),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: GoogleFonts.inter(
+                                  fontSize: 13,
+                                  color: context.appTextSecondary,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
                             ),
-                          ),
-                        ],
-                      ),
-                      TextButton(
-                        onPressed: () => Navigator.of(context).push(
-                          MaterialPageRoute(
-                              builder: (_) => const ForgotPasswordScreen()),
+                          ],
                         ),
-                        child: Text(
-                          'Quên mật khẩu?',
-                          style: GoogleFonts.inter(
-                            fontSize: 13,
-                            color: AppColors.primaryLight,
-                            fontWeight: FontWeight.w600,
+                      ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: TextButton(
+                          onPressed: () => Navigator.of(context).push(
+                            MaterialPageRoute(
+                                builder: (_) => const ForgotPasswordScreen()),
+                          ),
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              context.tr('auth_forgot_password'),
+                              maxLines: 1,
+                              style: GoogleFonts.inter(
+                                fontSize: 13,
+                                color: AppColors.primaryLight,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           ),
                         ),
                       ),
@@ -238,9 +308,11 @@ class _LoginScreenState extends State<LoginScreen> {
                     const SizedBox(height: 16),
                   ],
 
-                  // CTA Button
+                  // CTA Button (Đồng bộ màu Dark Slate #161F28 của thẻ màn hình chính)
                   AppButton(
-                    text: 'Đăng nhập',
+                    text: context.tr('auth_login_btn'),
+                    backgroundColor: const Color(0xFF161F28),
+                    textColor: Colors.white,
                     isLoading: _isLoading,
                     onPressed: _handleLogin,
                   ),
@@ -253,7 +325,7 @@ class _LoginScreenState extends State<LoginScreen> {
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                         child: Text(
-                          'hoặc đăng nhập bằng',
+                          context.tr('auth_or_login_with'),
                           style: GoogleFonts.inter(
                             color: context.appTextSecondary,
                             fontSize: 12,
@@ -265,11 +337,11 @@ class _LoginScreenState extends State<LoginScreen> {
                   ),
                   const SizedBox(height: 24),
 
-                  // Google SSO Button
+                  // Google SSO Button với logo Google chuẩn 4 màu
                   AppOutlinedButton(
-                    text: 'Đăng nhập bằng Google',
+                    text: context.tr('auth_login_google'),
                     isLoading: _isLoading,
-                    icon: Icons.g_mobiledata_rounded,
+                    leading: const GoogleLogoIcon(size: 20),
                     onPressed: _handleGoogleLogin,
                   ),
                   const SizedBox(height: 28),
@@ -283,14 +355,14 @@ class _LoginScreenState extends State<LoginScreen> {
                       ),
                       child: Text.rich(
                         TextSpan(
-                          text: 'Chưa có tài khoản? ',
+                          text: context.tr('auth_no_account'),
                           style: GoogleFonts.inter(
                             color: context.appTextSecondary,
                             fontSize: 14,
                           ),
                           children: [
                             TextSpan(
-                              text: 'Đăng ký ngay',
+                              text: context.tr('auth_register_now'),
                               style: GoogleFonts.inter(
                                 color: AppColors.primaryLight,
                                 fontWeight: FontWeight.w600,

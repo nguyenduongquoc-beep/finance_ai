@@ -8,11 +8,13 @@ import '../models/saving_goal_model.dart';
 import '../models/user_model.dart';
 import '../models/financial_issue.dart';
 import '../models/monthly_financial_plan.dart';
-import '../services/ai_config_sync_service.dart';
 import '../services/firestore_service.dart';
 import '../services/financial_analytics_service.dart';
 import '../services/financial_context_revision_tracker.dart';
+import '../l10n/app_localizations.dart';
+import '../utils/category_localization_helper.dart';
 import '../utils/formatters.dart';
+import 'language_controller.dart';
 
 /// Loại thẻ Insight hiển thị tương tác trong cuộc trò chuyện
 enum ChatInsightCardType {
@@ -71,7 +73,7 @@ class ChatInsightCardData {
       primaryMetric: map['primaryMetric'] ?? '',
       secondaryMetric: map['secondaryMetric'],
       progressPercent: (map['progressPercent'] as num?)?.toDouble(),
-      actionLabel: map['actionLabel'] ?? 'Xem chi tiết',
+      actionLabel: map['actionLabel'] ?? AppLocalizations.tr('svc_chat_view_details'),
       targetId: map['targetId'],
     );
   }
@@ -163,10 +165,9 @@ class FinancialChatContextService {
       _firestoreService ??= FirestoreService();
 
   FinancialHeuristicsConfig get effectiveHeuristics =>
-      _heuristicsOverride ?? AiConfigSyncService.instance.currentHeuristics;
+      _heuristicsOverride ?? FinancialHeuristicsConfig.defaults();
 
   Future<FinancialChatContext> buildContext(String userId) async {
-    await AiConfigSyncService.instance.syncPublishedConfigsIfNeeded();
     final now = DateTime.now();
     final startOfTwoMonthsAgo = DateTime(now.year, now.month - 2, 1);
     final endOfCurrentMonth = DateTime(now.year, now.month + 1, 0, 23, 59, 59);
@@ -399,9 +400,10 @@ class FinancialChatContextService {
       activePlan: activePlan,
     );
 
-    // 8. Tạo Prompts gợi ý động theo ngữ cảnh thực tế + gợi ý Admin (nếu có)
-    final customFromConfig = AiConfigSyncService
-        .instance.currentAiRuntime.customSuggestedChatPrompts.values
+    // 8. Tạo Prompts gợi ý động theo ngữ cảnh thực tế
+    final defaultCustomPrompts = AiRuntimeConfig.defaults()
+        .customSuggestedChatPrompts
+        .values
         .expand((list) => list)
         .toList();
     final dynamicPrompts = _generateDynamicPrompts(
@@ -412,7 +414,7 @@ class FinancialChatContextService {
       categories: categories,
       currentExpenseByCat: currentExpenseByCat,
       issues: issues,
-      customSuggestedPrompts: customSuggestedPrompts ?? customFromConfig,
+      customSuggestedPrompts: customSuggestedPrompts ?? defaultCustomPrompts,
     );
 
     // 9. Xây dựng chuỗi prompt context hoàn chỉnh (đã lọc PII và kiểm soát kích thước)
@@ -483,17 +485,17 @@ class FinancialChatContextService {
     final List<DynamicPromptChip> prompts = [];
 
     if (isEmptyData) {
-      prompts.add(const DynamicPromptChip(
-        label: 'Làm thế nào để bắt đầu quản lý tài chính?',
+      prompts.add(DynamicPromptChip(
+        label: AppLocalizations.tr('svc_chat_prompt_empty_1'),
         category: 'featured',
         icon: '💡',
       ));
-      prompts.add(const DynamicPromptChip(
-        label: 'Ứng dụng có thể giúp gì cho tôi?',
+      prompts.add(DynamicPromptChip(
+        label: AppLocalizations.tr('svc_chat_prompt_empty_2'),
         category: 'overview',
       ));
-      prompts.add(const DynamicPromptChip(
-        label: 'Nguyên tắc phân bổ thu nhập 50/30/20 là gì?',
+      prompts.add(DynamicPromptChip(
+        label: AppLocalizations.tr('svc_chat_prompt_empty_3'),
         category: 'saving',
       ));
       return prompts;
@@ -501,8 +503,8 @@ class FinancialChatContextService {
 
     // 1. Nhóm Nổi Bật / Cảnh Báo theo tình trạng thực tế
     if (overBudgets.isNotEmpty) {
-      prompts.add(const DynamicPromptChip(
-        label: 'Tôi đang vượt ngân sách ở đâu?',
+      prompts.add(DynamicPromptChip(
+        label: AppLocalizations.tr('svc_chat_prompt_over_budget'),
         category: 'featured',
         isAlert: true,
         icon: '⚠️',
@@ -510,8 +512,8 @@ class FinancialChatContextService {
     }
 
     if (netCashFlow < 0) {
-      prompts.add(const DynamicPromptChip(
-        label: 'Tại sao tháng này tôi chi nhiều hơn thu?',
+      prompts.add(DynamicPromptChip(
+        label: AppLocalizations.tr('svc_chat_prompt_neg_cf'),
         category: 'featured',
         isAlert: true,
         icon: '⚠️',
@@ -519,8 +521,8 @@ class FinancialChatContextService {
     }
 
     if (issues.any((i) => i.category == IssueCategory.spike)) {
-      prompts.add(const DynamicPromptChip(
-        label: 'Khoản chi nào đang tăng bất thường?',
+      prompts.add(DynamicPromptChip(
+        label: AppLocalizations.tr('svc_chat_prompt_spike'),
         category: 'featured',
         isAlert: true,
         icon: '📈',
@@ -528,84 +530,84 @@ class FinancialChatContextService {
     }
 
     if (savingGoals.isNotEmpty) {
-      prompts.add(const DynamicPromptChip(
-        label: 'Tôi có thể đạt mục tiêu đúng hạn không?',
+      prompts.add(DynamicPromptChip(
+        label: AppLocalizations.tr('svc_chat_prompt_goal_due'),
         category: 'featured',
         icon: '🎯',
       ));
     }
 
     // Luôn bổ sung các câu hỏi chiến lược giá trị cao trong nhóm Nổi bật
-    prompts.add(const DynamicPromptChip(
-      label: 'Tôi đang có vấn đề tài chính nào cần chú ý?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_issue'),
       category: 'featured',
       icon: '🔥',
     ));
-    prompts.add(const DynamicPromptChip(
-      label: 'Tôi nên cải thiện khoản chi nào trước?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_improve'),
       category: 'featured',
       icon: '💡',
     ));
-    prompts.add(const DynamicPromptChip(
-      label: 'Làm thế nào để tôi tiết kiệm thêm mỗi tháng?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_save_more'),
       category: 'featured',
       icon: '💎',
     ));
-    prompts.add(const DynamicPromptChip(
-      label: 'Mục tiêu tài chính hiện tại có khả thi không?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_feasible'),
       category: 'featured',
       icon: '🎯',
     ));
 
     // 2. Nhóm Tổng quan
-    prompts.add(const DynamicPromptChip(
-      label: 'Tình hình tài chính tháng này của tôi thế nào?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_ov_status'),
       category: 'overview',
     ));
-    prompts.add(const DynamicPromptChip(
-      label: 'Thu nhập và chi tiêu của tôi đang thay đổi ra sao?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_ov_change'),
       category: 'overview',
     ));
-    prompts.add(const DynamicPromptChip(
-      label: 'Tôi còn lại bao nhiêu tiền trong tháng này?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_ov_left'),
       category: 'overview',
     ));
 
     // 3. Nhóm Chi tiêu
-    prompts.add(const DynamicPromptChip(
-      label: 'Tôi đang tiêu nhiều nhất vào đâu?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_exp_top'),
       category: 'expense',
     ));
-    prompts.add(const DynamicPromptChip(
-      label: 'Khoản chi nào tôi có thể cắt giảm?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_exp_cut'),
       category: 'expense',
     ));
-    prompts.add(const DynamicPromptChip(
-      label: 'Tại sao tháng này tôi chi nhiều hơn tháng trước?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_exp_more'),
       category: 'expense',
     ));
 
     // 4. Nhóm Ngân sách
-    prompts.add(const DynamicPromptChip(
-      label: 'Tôi đang sử dụng ngân sách như thế nào?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_bud_use'),
       category: 'budget',
     ));
-    prompts.add(const DynamicPromptChip(
-      label: 'Nếu cứ chi như hiện tại thì có đủ đến cuối tháng không?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_bud_end'),
       category: 'budget',
     ));
 
     // 5. Nhóm Tiết kiệm & Mục tiêu
-    prompts.add(const DynamicPromptChip(
-      label: 'Tôi có thể tiết kiệm thêm bao nhiêu mỗi tháng?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_sav_howmuch'),
       category: 'saving',
     ));
-    prompts.add(const DynamicPromptChip(
-      label: 'Tôi nên giảm khoản nào để tiết kiệm thêm 2 triệu?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_sav_2m'),
       category: 'saving',
     ));
-    prompts.add(const DynamicPromptChip(
-      label: 'Tôi muốn tiết kiệm 10 triệu trong 3 tháng có khả thi không?',
+    prompts.add(DynamicPromptChip(
+      label: AppLocalizations.tr('svc_chat_prompt_sav_10m'),
       category: 'saving',
     ));
 
@@ -630,13 +632,13 @@ class FinancialChatContextService {
 
   /// Lọc PII khỏi tên hiển thị (không bao giờ gửi email, SĐT hoặc UID cho Gemini)
   static String _sanitizeDisplayName(String? rawName) {
-    if (rawName == null || rawName.trim().isEmpty) return 'Khách';
+    if (rawName == null || rawName.trim().isEmpty) return AppLocalizations.tr('svc_chat_guest');
     var cleaned = rawName.trim();
     if (cleaned.contains('@')) {
       cleaned = cleaned.split('@').first.trim();
     }
-    cleaned = cleaned.replaceAll(RegExp(r'\b\d{9,12}\b'), '[ẩn]');
-    if (cleaned.isEmpty) return 'Khách';
+    cleaned = cleaned.replaceAll(RegExp(r'\b\d{9,12}\b'), AppLocalizations.tr('svc_chat_hidden_phone'));
+    if (cleaned.isEmpty) return AppLocalizations.tr('svc_chat_guest');
     return cleaned.length > 40 ? cleaned.substring(0, 40) : cleaned;
   }
 
@@ -675,6 +677,162 @@ class FinancialChatContextService {
     final effectiveDeclared = declaredMonthlyIncome > 0
         ? declaredMonthlyIncome
         : (userProfile?.monthlyIncome ?? 0.0);
+
+    if (LanguageController.isEnglish) {
+      buffer.writeln('=== USER ACTUAL FINANCIAL DATA ===');
+      buffer.writeln('- User: ${_sanitizeDisplayName(userProfile?.name)}');
+      if (effectiveDeclared > 0) {
+        buffer.writeln(
+            '- Declared expected monthly income in profile: ${AppFormatters.number(effectiveDeclared)} VND/month (AI Note: Use as baseline for 50/30/20 or planning only; DO NOT add to actual wallet balance or recorded transaction income)');
+      }
+      buffer.writeln('- Analysis date: Day $dayOfMonth of $monthStr');
+      buffer.writeln('- Total recorded transactions: $totalTxCount transactions');
+      if (sufficiency != null) {
+        buffer.writeln(
+            '- Data sufficiency tier (${sufficiency.tier.name}): ${sufficiency.limitationNote}');
+      }
+
+      if (isEmptyData) {
+        buffer.writeln('\n[DATA STATUS]: NO TRANSACTIONS YET.');
+        buffer.writeln(
+            'AI Instruction: Gently remind the user to add income and expense transactions to enable personalized financial analysis.');
+        return buffer.toString();
+      }
+
+      if (!hasSufficientData) {
+        buffer.writeln(
+            '\n[DATA STATUS]: LIMITED DATA ($totalTxCount transactions).');
+        buffer.writeln(
+            'AI Instruction: Explicitly note that data covers only a short period and is insufficient for long-term trend conclusions.');
+      }
+
+      // 1. Current month metrics
+      buffer.writeln('\n1. THIS MONTH OVERVIEW ($monthStr):');
+      buffer.writeln('- Total income: ${AppFormatters.number(incomeThisMonth)} VND');
+      buffer.writeln('- Total expense: ${AppFormatters.number(expenseThisMonth)} VND');
+      buffer.writeln(
+          '- Net Cash Flow (Income - Expense): ${netCashFlow >= 0 ? '+' : ''}${AppFormatters.number(netCashFlow)} VND (${netCashFlow >= 0 ? 'SURPLUS' : 'DEFICIT'})');
+      buffer.writeln('- Savings rate: $savingsRate%');
+      buffer.writeln(
+          '- Total active wallet balance: ${AppFormatters.number(totalActiveBalance)} VND');
+
+      // 2. Last month comparison
+      buffer.writeln('\n2. COMPARISON WITH LAST MONTH:');
+      buffer.writeln(
+          '- Last month income: ${AppFormatters.number(incomeLastMonth)} VND');
+      buffer.writeln(
+          '- Last month expense: ${AppFormatters.number(expenseLastMonth)} VND');
+      final diffExpense = expenseThisMonth - expenseLastMonth;
+      buffer.writeln(
+          '- Expense change: ${diffExpense >= 0 ? 'Increased +' : 'Decreased '}${AppFormatters.number(diffExpense.abs())} VND');
+      buffer.writeln(
+          '- 3-month average monthly savings: ${AppFormatters.number(averageMonthlySavings)} VND/month');
+
+      // 3. Category breakdown
+      buffer.writeln('\n3. THIS MONTH SPENDING BY CATEGORY:');
+      final sortedCatEntries = currentExpenseByCat.entries.toList()
+        ..sort((a, b) => b.value.compareTo(a.value));
+
+      for (final entry in sortedCatEntries) {
+        final cat = categories.firstWhere(
+          (c) => c.categoryId == entry.key,
+          orElse: () => Category(
+              categoryId: entry.key,
+              userId: '',
+              name: 'Other',
+              type: 'expense',
+              icon: '',
+              color: 0),
+        );
+        final share = expenseThisMonth > 0
+            ? (entry.value / expenseThisMonth * 100).round()
+            : 0;
+        final lastVal = lastExpenseByCat[entry.key] ?? 0;
+        final diff = entry.value - lastVal;
+        final diffStr = lastVal > 0
+            ? ' (vs last month: ${diff >= 0 ? '+' : ''}${((diff / lastVal) * 100).round()}%)'
+            : ' (no spending last month)';
+        final displayCatName = CategoryLocalizationHelper.localizeName(cat.name);
+        buffer.writeln(
+            '- $displayCatName: ${AppFormatters.number(entry.value)} VND ($share% of total)$diffStr');
+      }
+
+      // 4. Budget status
+      final nearLimitPctThreshold =
+          (heuristics.budgetNearLimitRatio * 100).round();
+      buffer.writeln('\n4. THIS MONTH BUDGET STATUS:');
+      if (budgets.isEmpty) {
+        buffer.writeln('- The user has not set up any budgets for this month.');
+      } else {
+        for (final b in budgets) {
+          final spent = currentExpenseByCat[b.categoryId] ?? 0;
+          final percent = b.limit > 0 ? (spent / b.limit * 100).round() : 0;
+          final cat = categories.firstWhere(
+            (c) => c.categoryId == b.categoryId,
+            orElse: () => Category(
+                categoryId: b.categoryId,
+                userId: '',
+                name: 'Other',
+                type: 'expense',
+                icon: '',
+                color: 0),
+          );
+          final status = spent > b.limit
+              ? '⚠️ OVER BUDGET (+${AppFormatters.number(spent - b.limit)} VND)'
+              : (percent >= nearLimitPctThreshold
+                  ? '⚡ NEAR LIMIT ($percent%)'
+                  : 'Safe ($percent%)');
+          final displayCatName = CategoryLocalizationHelper.localizeName(cat.name);
+          buffer.writeln(
+              '- $displayCatName: spent ${AppFormatters.number(spent)}/${AppFormatters.number(b.limit)} VND → $status');
+        }
+      }
+
+      // 5. Saving goals
+      buffer.writeln('\n5. SAVING GOAL PROGRESS:');
+      if (savingGoals.isEmpty) {
+        buffer.writeln('- The user does not have any active saving goals.');
+      } else {
+        for (final g in savingGoals) {
+          final percent = (g.percentComplete * 100).round();
+          final remaining = math.max(0.0, g.targetAmount - g.savedAmount);
+          buffer.writeln(
+              '- "${g.name}": Saved ${AppFormatters.number(g.savedAmount)}/${AppFormatters.number(g.targetAmount)} VND ($percent%), short ${AppFormatters.number(remaining)} VND, requires ${AppFormatters.number(g.monthlyRequired)} VND/month over ${g.months} months.');
+        }
+      }
+
+      // 6. Detected issues
+      buffer.writeln('\n6. QUANTITATIVE FINANCIAL ALERTS:');
+      if (issues.isEmpty) {
+        buffer.writeln('- No critical anomalies detected.');
+      } else {
+        for (final issue in issues) {
+          buffer.writeln(
+              '- [${issue.severity.name.toUpperCase()}] ${issue.title}: ${issue.rootCause}. Impact: ${issue.impact}. Recommendation: ${issue.recommendation}');
+        }
+      }
+
+      // 7. Active plan
+      if (activePlan != null) {
+        final exec = _analyticsService.evaluatePlanExecution(
+          plan: activePlan,
+          targetMonthTx: currentMonthTx,
+          referenceToday: now,
+        );
+        buffer.writeln(
+            '\n7. COMMITTED MONTHLY FINANCIAL PLAN (${activePlan.targetMonth} - Status: ${activePlan.status.name}, Revision v${activePlan.revision}):');
+        buffer.writeln(
+            '- Plan reference income: ${AppFormatters.number(activePlan.referenceIncome)} VND');
+        buffer.writeln(
+            '- Essential expense cap: ${AppFormatters.number(activePlan.essentialExpenseCap)} VND | Flexible expense cap: ${AppFormatters.number(activePlan.flexibleExpenseCap)} VND');
+        buffer.writeln(
+            '- Monthly saving target: ${AppFormatters.number(activePlan.targetSavingAmount)} VND (Actual saved: ${AppFormatters.number(exec.effectiveMonthlySaved)} VND, deposited to goals: ${AppFormatters.number(exec.netGoalContributions)} VND, unallocated wallet surplus: ${AppFormatters.number(exec.unallocatedWalletSurplus)} VND)');
+        buffer.writeln(
+            '- Composite plan adherence score: ${exec.overallAdherenceScore.round()}/100 (${exec.onTrackCategoryCount}/${exec.categoryStatuses.length} categories on track)');
+      }
+
+      return buffer.toString();
+    }
 
     buffer.writeln('=== DỮ LIỆU TÀI CHÍNH THỰC TẾ CỦA NGƯỜI DÙNG ===');
     buffer.writeln('- Người dùng: ${_sanitizeDisplayName(userProfile?.name)}');
@@ -751,8 +909,9 @@ class FinancialChatContextService {
       final diffStr = lastVal > 0
           ? ' (so tháng trước: ${diff >= 0 ? '+' : ''}${((diff / lastVal) * 100).round()}%)'
           : ' (tháng trước không chi)';
+      final displayCatName = CategoryLocalizationHelper.localizeName(cat.name);
       buffer.writeln(
-          '- ${cat.name}: ${AppFormatters.number(entry.value)} đ ($share% tổng chi)$diffStr');
+          '- $displayCatName: ${AppFormatters.number(entry.value)} đ ($share% tổng chi)$diffStr');
     }
 
     // 4. Tình trạng Ngân sách
@@ -780,8 +939,9 @@ class FinancialChatContextService {
             : (percent >= nearLimitPctThreshold
                 ? '⚡ SẮP CHẠM HẠN MỨC ($percent%)'
                 : 'An toàn ($percent%)');
+        final displayCatName = CategoryLocalizationHelper.localizeName(cat.name);
         buffer.writeln(
-            '- ${cat.name}: đã chi ${AppFormatters.number(spent)}/${AppFormatters.number(b.limit)} đ → $status');
+            '- $displayCatName: đã chi ${AppFormatters.number(spent)}/${AppFormatters.number(b.limit)} đ → $status');
       }
     }
 
@@ -839,12 +999,12 @@ class FinancialChatContextService {
     required List<Category> categories,
   }) {
     if (context.isEmptyData) {
-      return const ChatInsightCardData(
+      return ChatInsightCardData(
         type: ChatInsightCardType.emptyDataPrompt,
-        title: 'Bắt đầu quản lý tài chính',
-        subtitle: 'Thêm giao dịch đầu tiên để AI có thể phân tích cho bạn',
-        primaryMetric: '0 giao dịch',
-        actionLabel: 'Thêm giao dịch ngay',
+        title: AppLocalizations.tr('svc_chat_empty_title'),
+        subtitle: AppLocalizations.tr('svc_chat_empty_sub'),
+        primaryMetric: AppLocalizations.tr('ai_chat_empty_card_metric'),
+        actionLabel: AppLocalizations.tr('ai_chat_empty_card_action'),
       );
     }
 
@@ -857,24 +1017,30 @@ class FinancialChatContextService {
         lowerQ.startsWith('hi') ||
         lowerQ == 'bạn là ai' ||
         lowerQ == 'bạn là ai?' ||
+        lowerQ == 'who are you' ||
+        lowerQ == 'who are you?' ||
         lowerQ.contains('bạn có thể làm gì') ||
         lowerQ.contains('bạn làm được gì') ||
-        lowerQ.contains('giới thiệu');
+        lowerQ.contains('giới thiệu') ||
+        lowerQ.contains('what can you do') ||
+        lowerQ.contains('introduce');
     if (isGreeting) {
       return null;
     }
 
-    // 1. Kiểm tra nếu câu hỏi về một danh mục cụ thể (VD: "ăn uống", "mua sắm", "di chuyển"...)
+    // 1. Kiểm tra nếu câu hỏi về một danh mục cụ thể (hỗ trợ cả tiếng Việt & tiếng Anh)
     Category? matchedCategory;
     for (final cat in categories) {
-      final catNameLower = cat.name.toLowerCase();
-      if (lowerQ.contains(catNameLower)) {
+      final variants = CategoryLocalizationHelper.allSearchVariants(cat.name);
+      if (variants.any((v) => lowerQ.contains(v.toLowerCase()))) {
         matchedCategory = cat;
         break;
       }
     }
 
     if (matchedCategory != null) {
+      final displayCatName =
+          CategoryLocalizationHelper.localizeName(matchedCategory.name);
       // Tìm xem có ngân sách cho danh mục này không
       final catBudget = context.budgets.cast<Budget?>().firstWhere(
             (b) => b?.categoryId == matchedCategory!.categoryId,
@@ -888,27 +1054,33 @@ class FinancialChatContextService {
         return ChatInsightCardData(
           type: ChatInsightCardType.budgetOverrun,
           title: isOver
-              ? 'Cảnh báo: ${matchedCategory.name}'
-              : 'Ngân sách: ${matchedCategory.name}',
+              ? AppLocalizations.tr('ai_chat_budget_alert_title',
+                  params: {'category': displayCatName})
+              : AppLocalizations.tr('svc_chat_card_budget_title',
+                  params: {'cat': displayCatName}),
           subtitle: isOver
-              ? 'Đã vượt hạn mức ngân sách tháng này'
-              : 'Đã chi ${AppFormatters.compactCurrency(spentAmount)} / Hạn mức ${AppFormatters.compactCurrency(catBudget.limit)}',
-          primaryMetric:
-              'Hạn mức: ${AppFormatters.compactCurrency(catBudget.limit)}',
-          secondaryMetric: isOver ? 'Cần kiểm soát' : 'Đang an toàn',
+              ? AppLocalizations.tr('ai_chat_budget_over_sub')
+              : AppLocalizations.tr('svc_chat_card_budget_sub', params: {
+                  'spent': AppFormatters.compactCurrency(spentAmount),
+                  'limit': AppFormatters.compactCurrency(catBudget.limit),
+                }),
+          primaryMetric: AppLocalizations.tr('ai_chat_budget_limit_metric',
+              params: {'amount': AppFormatters.compactCurrency(catBudget.limit)}),
+          secondaryMetric: isOver ? AppLocalizations.tr('svc_chat_card_ctrl') : AppLocalizations.tr('svc_chat_card_safe'),
           progressPercent:
               catBudget.limit > 0 ? (spentAmount / catBudget.limit) : 0,
-          actionLabel: 'Xem ngân sách',
+          actionLabel: AppLocalizations.tr('ai_chat_view_budget_btn'),
           targetId: catBudget.budgetId,
         );
       } else if (spentAmount > 0) {
         return ChatInsightCardData(
           type: ChatInsightCardType.cashFlowSnapshot,
-          title: 'Chi tiêu: ${matchedCategory.name}',
-          subtitle:
-              'Tổng chi tháng này: ${AppFormatters.compactCurrency(spentAmount)}',
+          title: AppLocalizations.tr('svc_chat_card_cat_spend',
+              params: {'cat': displayCatName}),
+          subtitle: AppLocalizations.tr('svc_chat_card_cat_spend_sub',
+              params: {'amt': AppFormatters.compactCurrency(spentAmount)}),
           primaryMetric: '-${AppFormatters.compactCurrency(spentAmount)}',
-          actionLabel: 'Xem giao dịch',
+          actionLabel: AppLocalizations.tr('svc_chat_view_tx'),
           targetId: matchedCategory.categoryId,
         );
       }
@@ -921,7 +1093,13 @@ class FinancialChatContextService {
         lowerQ.contains('tư vấn tiết kiệm') ||
         lowerQ.contains('mẹo tiết kiệm') ||
         lowerQ.contains('cắt giảm chi tiêu') ||
-        lowerQ.contains('làm thế nào để tiết kiệm');
+        lowerQ.contains('làm thế nào để tiết kiệm') ||
+        lowerQ.contains('how to save') ||
+        lowerQ.contains('saving tips') ||
+        lowerQ.contains('save more') ||
+        lowerQ.contains('cut spending') ||
+        lowerQ.contains('cut back') ||
+        lowerQ.contains('reduce spending');
 
     if (!isGeneralAdvice && context.savingGoals.isNotEmpty) {
       // 2a. Tìm mục tiêu trùng tên được nhắc đến trong câu hỏi hoặc câu trả lời
@@ -938,19 +1116,26 @@ class FinancialChatContextService {
       final isAskingGoalStatus = lowerQ.contains('tiến độ mục tiêu') ||
           lowerQ.contains('các mục tiêu') ||
           lowerQ.contains('mục tiêu tiết kiệm của tôi') ||
-          lowerQ.contains('mục tiêu của tôi');
+          lowerQ.contains('mục tiêu của tôi') ||
+          lowerQ.contains('goal progress') ||
+          lowerQ.contains('my goals') ||
+          lowerQ.contains('saving goal') ||
+          lowerQ.contains('savings goal') ||
+          lowerQ.contains('achieve my goal') ||
+          lowerQ.contains('on track');
 
       if (matchedGoal != null || isAskingGoalStatus) {
         final g = matchedGoal ?? context.savingGoals.first;
         return ChatInsightCardData(
           type: ChatInsightCardType.savingGoalProgress,
-          title: 'Mục tiêu: ${g.name}',
-          subtitle:
-              'Cần tiết kiệm ${AppFormatters.compactCurrency(g.monthlyRequired)}/tháng',
+          title: AppLocalizations.tr('svc_chat_goal_title',
+              params: {'goal': g.name}),
+          subtitle: AppLocalizations.tr('svc_chat_goal_sub',
+              params: {'amt': AppFormatters.compactCurrency(g.monthlyRequired)}),
           primaryMetric:
               '${AppFormatters.compactCurrency(g.savedAmount)} / ${AppFormatters.compactCurrency(g.targetAmount)}',
           progressPercent: g.percentComplete,
-          actionLabel: 'Xem mục tiêu',
+          actionLabel: AppLocalizations.tr('svc_chat_view_goal'),
           targetId: g.goalId,
         );
       }
@@ -959,7 +1144,11 @@ class FinancialChatContextService {
     // 3. Nếu câu hỏi hoặc câu trả lời liên quan đến vượt ngân sách / hạn mức
     if (lowerQ.contains('ngân sách') ||
         lowerQ.contains('hạn mức') ||
-        lowerA.contains('vượt ngân sách')) {
+        lowerA.contains('vượt ngân sách') ||
+        lowerQ.contains('budget') ||
+        lowerQ.contains('limit') ||
+        lowerA.contains('over budget') ||
+        lowerA.contains('exceeded')) {
       if (context.overBudgets.isNotEmpty) {
         final b = context.overBudgets.first;
         final cat = categories.firstWhere(
@@ -967,27 +1156,30 @@ class FinancialChatContextService {
           orElse: () => Category(
               categoryId: b.categoryId,
               userId: '',
-              name: 'Danh mục',
+              name: AppLocalizations.tr('ai_rep_default_cat'),
               type: 'expense',
               icon: '',
               color: 0),
         );
         return ChatInsightCardData(
           type: ChatInsightCardType.budgetOverrun,
-          title: 'Cảnh báo: ${cat.name}',
-          subtitle: 'Đã vượt hạn mức ngân sách tháng này',
-          primaryMetric: 'Hạn mức: ${AppFormatters.compactCurrency(b.limit)}',
-          secondaryMetric: 'Cần kiểm soát',
-          actionLabel: 'Xem ngân sách',
+          title: AppLocalizations.tr('ai_chat_budget_alert_title',
+              params: {'category': CategoryLocalizationHelper.localizeName(cat.name)}),
+          subtitle: AppLocalizations.tr('ai_chat_budget_over_sub'),
+          primaryMetric: AppLocalizations.tr('ai_chat_budget_limit_metric',
+              params: {'amount': AppFormatters.compactCurrency(b.limit)}),
+          secondaryMetric: AppLocalizations.tr('svc_chat_card_ctrl'),
+          actionLabel: AppLocalizations.tr('ai_chat_view_budget_btn'),
           targetId: b.budgetId,
         );
       } else if (context.budgets.isNotEmpty) {
         return ChatInsightCardData(
           type: ChatInsightCardType.budgetOverrun,
-          title: 'Ngân sách tháng này',
-          subtitle: 'Tất cả ngân sách đang trong tầm kiểm soát',
-          primaryMetric: '${context.budgets.length} ngân sách đang hoạt động',
-          actionLabel: 'Xem ngân sách',
+          title: AppLocalizations.tr('svc_chat_budgets_all_title'),
+          subtitle: AppLocalizations.tr('svc_chat_budgets_all_sub'),
+          primaryMetric: AppLocalizations.tr('svc_chat_budgets_active_count',
+              params: {'count': '${context.budgets.length}'}),
+          actionLabel: AppLocalizations.tr('ai_chat_view_budget_btn'),
         );
       }
     }
@@ -997,18 +1189,27 @@ class FinancialChatContextService {
         lowerQ.contains('dòng tiền') ||
         lowerQ.contains('tổng quan') ||
         lowerQ.contains('thu nhập') ||
-        (lowerQ.contains('chi tiêu') && !isGeneralAdvice);
+        (lowerQ.contains('chi tiêu') && !isGeneralAdvice) ||
+        lowerQ.contains('this month') ||
+        lowerQ.contains('cash flow') ||
+        lowerQ.contains('overview') ||
+        lowerQ.contains('income') ||
+        ((lowerQ.contains('spending') || lowerQ.contains('expense')) &&
+            !isGeneralAdvice);
 
     if (isCashFlowQuery) {
       return ChatInsightCardData(
         type: ChatInsightCardType.cashFlowSnapshot,
-        title: 'Dòng tiền tháng này',
-        subtitle:
-            'Thu: +${AppFormatters.compactCurrency(context.incomeThisMonth)} • Chi: -${AppFormatters.compactCurrency(context.expenseThisMonth)}',
+        title: AppLocalizations.tr('svc_chat_cf_title'),
+        subtitle: AppLocalizations.tr('svc_chat_cf_sub', params: {
+          'inc': AppFormatters.compactCurrency(context.incomeThisMonth),
+          'exp': AppFormatters.compactCurrency(context.expenseThisMonth),
+        }),
         primaryMetric:
             '${context.netCashFlow >= 0 ? '+' : ''}${AppFormatters.compactCurrency(context.netCashFlow)}',
-        secondaryMetric: 'Tiết kiệm: ${context.savingsRate}%',
-        actionLabel: 'Xem giao dịch',
+        secondaryMetric: AppLocalizations.tr('svc_chat_cf_save',
+            params: {'pct': '${context.savingsRate}'}),
+        actionLabel: AppLocalizations.tr('svc_chat_view_tx'),
       );
     }
 

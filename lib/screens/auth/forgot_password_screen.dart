@@ -1,21 +1,22 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
-
+import '../../l10n/app_localizations.dart';
 import '../../services/auth_service.dart';
-import '../../services/otp_auth_service.dart';
 import '../../utils/constants.dart';
 import '../../widgets/app_button.dart';
 import '../../widgets/app_text_field.dart';
-import 'otp_verification_screen.dart';
 
-/// Màn hình Quên mật khẩu — Hỗ trợ cả 2 phương thức:
-/// 1. Xác thực bằng mã OTP 6 số ngay trên ứng dụng (Phương thức chính).
-/// 2. Gửi liên kết đặt lại mật khẩu qua Firebase Auth (Phương thức dự phòng).
+/// Màn hình Quên mật khẩu - Khôi phục bằng liên kết an toàn qua Email (Firebase Auth)
 class ForgotPasswordScreen extends StatefulWidget {
   final String? initialEmail;
-  const ForgotPasswordScreen({super.key, this.initialEmail});
+  final Future<void> Function(String email)? onSendResetEmail;
+
+  const ForgotPasswordScreen({
+    super.key,
+    this.initialEmail,
+    this.onSendResetEmail,
+  });
 
   @override
   State<ForgotPasswordScreen> createState() => _ForgotPasswordScreenState();
@@ -23,124 +24,75 @@ class ForgotPasswordScreen extends StatefulWidget {
 
 class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
   final _formKey = GlobalKey<FormState>();
-  late final TextEditingController _emailController;
-  final _authService = AuthService();
-  final _otpAuthService = OtpAuthService();
+  final _emailController = TextEditingController();
 
-  bool _isSendingOtp = false;
-  bool _isSendingLink = false;
-  bool _emailLinkSent = false;
-  String? _errorMessage;
-
-  Timer? _cooldownTimer;
+  bool _isSending = false;
+  bool _emailSent = false;
   int _cooldownSeconds = 0;
+  Timer? _cooldownTimer;
 
   @override
   void initState() {
     super.initState();
-    _emailController = TextEditingController(text: widget.initialEmail ?? '');
+    final initial = widget.initialEmail?.trim();
+    if (initial != null && initial.isNotEmpty) {
+      _emailController.text = initial;
+    }
   }
 
   @override
   void dispose() {
-    _emailController.dispose();
     _cooldownTimer?.cancel();
+    _emailController.dispose();
     super.dispose();
   }
 
   void _startCooldown([int seconds = 60]) {
-    setState(() => _cooldownSeconds = seconds);
     _cooldownTimer?.cancel();
+    setState(() => _cooldownSeconds = seconds);
     _cooldownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) {
         timer.cancel();
         return;
       }
       if (_cooldownSeconds <= 1) {
-        timer.cancel();
         setState(() => _cooldownSeconds = 0);
+        timer.cancel();
       } else {
         setState(() => _cooldownSeconds--);
       }
     });
   }
 
-  String _maskEmail(String email) {
-    if (!email.contains('@')) return email;
-    final parts = email.split('@');
-    final name = parts[0];
-    final domain = parts[1];
-    if (name.length <= 2) return '$name***@$domain';
-    final first = name[0];
-    final last = name[name.length - 1];
-    return '$first***$last@$domain';
-  }
-
-  /// 1. Gửi mã OTP 6 số và mở màn hình nhập mã OTP
-  Future<void> _handleSendOtp() async {
-    if (_cooldownSeconds > 0) return;
+  Future<void> _handleSendResetLink() async {
     if (!_formKey.currentState!.validate()) return;
-
-    setState(() {
-      _isSendingOtp = true;
-      _errorMessage = null;
-    });
+    FocusScope.of(context).unfocus();
 
     final email = _emailController.text.trim();
-    final result = await _otpAuthService.sendPasswordResetOtp(email);
-
-    if (!mounted) return;
-    setState(() => _isSendingOtp = false);
-
-    if (result.isSuccess) {
-      _startCooldown(result.cooldownSeconds);
-      Navigator.of(context).push(
-        MaterialPageRoute(
-          builder: (_) => OtpVerificationScreen(email: email),
-        ),
-      );
-    } else {
-      setState(() => _errorMessage = result.message);
-    }
-  }
-
-  /// 2. Gửi liên kết dự phòng qua Firebase Action Link
-  Future<void> _handleSendFirebaseLink() async {
-    if (_cooldownSeconds > 0) return;
-    if (!_formKey.currentState!.validate()) return;
-
-    setState(() {
-      _isSendingLink = true;
-      _errorMessage = null;
-    });
-
-    final email = _emailController.text.trim();
+    setState(() => _isSending = true);
 
     try {
-      await _authService.sendPasswordResetEmail(email);
-      if (mounted) {
-        setState(() => _emailLinkSent = true);
-        _startCooldown(60);
+      if (widget.onSendResetEmail != null) {
+        await widget.onSendResetEmail!(email);
+      } else {
+        await AuthService().sendPasswordResetEmail(email);
       }
-    } on FirebaseAuthException catch (e) {
-      if (mounted) {
-        if (e.code == 'too-many-requests') {
-          setState(() => _errorMessage =
-              'Bạn đã gửi quá nhiều yêu cầu liên tiếp. Vui lòng chờ vài phút.');
-        } else if (e.code == 'user-not-found') {
-          setState(() => _errorMessage =
-              'Không tìm thấy tài khoản mật khẩu với email này trên Firebase.');
-        } else {
-          setState(() => _errorMessage =
-              'Không thể gửi email (${e.code}): ${e.message ?? 'Thử lại sau.'}');
-        }
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() => _errorMessage = 'Không thể gửi email do lỗi mạng.');
-      }
-    } finally {
-      if (mounted) setState(() => _isSendingLink = false);
+      if (!mounted) return;
+      setState(() {
+        _isSending = false;
+        _emailSent = true;
+      });
+      _startCooldown();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _isSending = false);
+      final cleanError = e.toString().replaceFirst('Exception: ', '');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(cleanError),
+          backgroundColor: AppColors.expense,
+        ),
+      );
     }
   }
 
@@ -149,7 +101,7 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
     return Scaffold(
       backgroundColor: context.appBackground,
       appBar: AppBar(
-        backgroundColor: context.appBackground,
+        backgroundColor: Colors.transparent,
         elevation: 0,
         leading: IconButton(
           icon: Icon(
@@ -159,230 +111,180 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
           ),
           onPressed: () => Navigator.of(context).pop(),
         ),
-      ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-        child: _emailLinkSent
-            ? _buildFirebaseLinkSuccessView()
-            : _buildRequestForm(),
-      ),
-    );
-  }
-
-  /// Giao diện khi người dùng chọn nhận link Firebase
-  Widget _buildFirebaseLinkSuccessView() {
-    final email = _emailController.text.trim();
-    final masked = _maskEmail(email);
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.center,
-      children: [
-        const SizedBox(height: 16),
-        Container(
-          width: 76,
-          height: 76,
-          decoration: const BoxDecoration(
-            color: AppColors.incomeBackground,
-            shape: BoxShape.circle,
-          ),
-          child: const Icon(
-            Icons.mark_email_read_rounded,
-            size: 38,
-            color: AppColors.income,
-          ),
-        ),
-        const SizedBox(height: 20),
-        Text(
-          'Đã gửi liên kết khôi phục!',
-          textAlign: TextAlign.center,
+        title: Text(
+          context.tr('forgot_pw_title'),
           style: GoogleFonts.inter(
-            fontSize: 20,
-            fontWeight: FontWeight.w700,
+            fontSize: 17,
+            fontWeight: FontWeight.w600,
             color: context.appTextPrimary,
           ),
         ),
-        const SizedBox(height: 10),
-        Text(
-          'Hệ thống đã gửi thư xác nhận đặt lại mật khẩu đến địa chỉ $masked.',
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: context.appTextSecondary,
-            fontSize: 13,
-            height: 1.45,
-          ),
-        ),
-        const SizedBox(height: 20),
-
-        // Cảnh báo Thư rác
-        Container(
-          padding: const EdgeInsets.all(14),
-          decoration: BoxDecoration(
-            color: AppColors.warningBackground,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppColors.warning.withAlpha(60)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              const Row(
-                children: [
-                  Icon(Icons.warning_amber_rounded,
-                      color: AppColors.warning, size: 20),
-                  SizedBox(width: 8),
-                  Text(
-                    'LƯU Ý QUAN TRỌNG TỪ HỆ THỐNG',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w700,
-                      color: AppColors.warning,
-                      letterSpacing: 0.5,
+        centerTitle: true,
+      ),
+      body: SafeArea(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+          child: Form(
+            key: _formKey,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const SizedBox(height: 12),
+                Center(
+                  child: Container(
+                    width: 80,
+                    height: 80,
+                    decoration: BoxDecoration(
+                      color: AppColors.primary.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                    child: const Icon(
+                      Icons.mark_email_read_outlined,
+                      size: 40,
+                      color: AppColors.primary,
                     ),
                   ),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Text(
-                '1. Email từ Firebase chứa LIÊN KẾT (link web) để tạo mật khẩu mới.\n'
-                '2. Nếu không thấy trong Hộp thư đến, BẮT BUỘC kiểm tra mục THƯ RÁC (SPAM) hoặc THƯ QUẢNG CÁO (Promotions) vì bộ lọc Gmail thường nhận nhầm thư này.',
-                style: TextStyle(
-                  fontSize: 12,
-                  height: 1.5,
-                  fontWeight: FontWeight.w500,
-                  color: context.appTextPrimary,
                 ),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 24),
-
-        AppButton(
-          text: 'Quay lại đăng nhập',
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-      ],
-    );
-  }
-
-  /// Form yêu cầu nhập email
-  Widget _buildRequestForm() {
-    return Form(
-      key: _formKey,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const SizedBox(height: 10),
-          Text(
-            'Quên mật khẩu?',
-            style: GoogleFonts.inter(
-              fontSize: 24,
-              fontWeight: FontWeight.w700,
-              color: context.appTextPrimary,
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Nhập địa chỉ email đăng ký tài khoản của bạn để nhận mã xác minh OTP gồm 6 chữ số.',
-            style: TextStyle(
-              color: context.appTextSecondary,
-              fontSize: 13,
-              height: 1.5,
-            ),
-          ),
-          const SizedBox(height: 24),
-
-          // Email Input
-          AppTextField(
-            controller: _emailController,
-            labelText: 'Địa chỉ Email',
-            hintText: 'nguyenvana@gmail.com',
-            prefixIcon: Icons.email_outlined,
-            keyboardType: TextInputType.emailAddress,
-            validator: (v) {
-              final val = v?.trim() ?? '';
-              if (val.isEmpty) return 'Vui lòng nhập địa chỉ email';
-              final emailRegex = RegExp(r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$');
-              if (!emailRegex.hasMatch(val)) {
-                return 'Email không đúng định dạng';
-              }
-              return null;
-            },
-          ),
-          if (_errorMessage != null) ...[
-            const SizedBox(height: 14),
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: AppColors.expenseBackground,
-                borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppColors.expense.withAlpha(50)),
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Icon(Icons.error_outline_rounded,
-                      color: AppColors.expense, size: 18),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _errorMessage!,
-                      style: const TextStyle(
-                        color: AppColors.expense,
-                        fontSize: 12,
-                        height: 1.4,
+                const SizedBox(height: 24),
+                Text(
+                  context.tr('forgot_pw_heading'),
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w700,
+                    color: context.appTextPrimary,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  context.tr('forgot_pw_subtitle'),
+                  textAlign: TextAlign.center,
+                  style: GoogleFonts.inter(
+                    fontSize: 14,
+                    color: context.appTextSecondary,
+                    height: 1.5,
+                  ),
+                ),
+                const SizedBox(height: 28),
+                if (_emailSent) ...[
+                  Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppColors.income.withValues(alpha: 0.08),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: AppColors.income.withValues(alpha: 0.35),
+                      ),
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Icon(
+                          Icons.check_circle_outline_rounded,
+                          color: AppColors.income,
+                          size: 20,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            context.tr(
+                              'forgot_pw_sent_banner',
+                              params: {'email': _emailController.text.trim()},
+                            ),
+                            style: GoogleFonts.inter(
+                              fontSize: 13,
+                              color: context.appTextPrimary,
+                              height: 1.45,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                ],
+                AppTextField(
+                  controller: _emailController,
+                  labelText: context.tr('forgot_pw_email_label'),
+                  hintText: 'example@gmail.com',
+                  prefixIcon: Icons.email_outlined,
+                  keyboardType: TextInputType.emailAddress,
+                  validator: (v) {
+                    if (v == null || v.trim().isEmpty) {
+                      return context.tr('forgot_pw_email_required');
+                    }
+                    final emailRegex = RegExp(
+                      r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$',
+                    );
+                    if (!emailRegex.hasMatch(v.trim())) {
+                      return context.tr('forgot_pw_email_invalid');
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 22),
+                AppButton(
+                  text: _cooldownSeconds > 0
+                      ? context.tr(
+                          'forgot_pw_resend_cooldown',
+                          params: {'seconds': _cooldownSeconds.toString()},
+                        )
+                      : (_emailSent
+                          ? context.tr('forgot_pw_resend_btn')
+                          : context.tr('forgot_pw_send_btn')),
+                  icon: Icons.send_rounded,
+                  isLoading: _isSending,
+                  onPressed: _cooldownSeconds > 0 ? null : _handleSendResetLink,
+                ),
+                const SizedBox(height: 18),
+                Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: AppColors.slate100.withValues(alpha: 0.7),
+                    borderRadius: BorderRadius.circular(14),
+                    border: Border.all(color: context.appBorder),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(
+                        Icons.info_outline_rounded,
+                        size: 18,
+                        color: AppColors.primary,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          context.tr('forgot_pw_spam_tip'),
+                          style: GoogleFonts.inter(
+                            fontSize: 12.5,
+                            color: context.appTextSecondary,
+                            height: 1.45,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Center(
+                  child: TextButton.icon(
+                    onPressed: () => Navigator.of(context).pop(),
+                    icon: const Icon(Icons.arrow_back_rounded, size: 18),
+                    label: Text(
+                      context.tr('forgot_pw_back_login'),
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.primary,
                       ),
                     ),
                   ),
-                ],
-              ),
-            ),
-          ],
-          const SizedBox(height: 24),
-
-          // Nút 1: Gửi mã OTP xác minh (Chính)
-          AppButton(
-            text: _cooldownSeconds > 0
-                ? 'Vui lòng chờ ($_cooldownSeconds s)'
-                : 'Nhận mã OTP qua Email',
-            isLoading: _isSendingOtp,
-            onPressed: _cooldownSeconds > 0 ? null : _handleSendOtp,
-          ),
-          const SizedBox(height: 16),
-
-          // Tùy chọn gửi link dự phòng
-          Center(
-            child: TextButton(
-              onPressed: _isSendingLink ? null : _handleSendFirebaseLink,
-              child: Text(
-                _isSendingLink
-                    ? 'Đang gửi liên kết...'
-                    : 'Hoặc gửi liên kết đặt lại mật khẩu trực tiếp',
-                style: const TextStyle(
-                  color: AppColors.primaryLight,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                  decoration: TextDecoration.underline,
                 ),
-              ),
+              ],
             ),
           ),
-          const SizedBox(height: 16),
-
-          // Quay lại đăng nhập
-          Center(
-            child: TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: Text(
-                'Quay lại Đăng nhập',
-                style: TextStyle(
-                  color: context.appTextSecondary,
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ),
-          ),
-        ],
+        ),
       ),
     );
   }

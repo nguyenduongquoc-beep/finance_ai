@@ -1,20 +1,16 @@
 const functions = require("firebase-functions");
-const { defineSecret } = require("firebase-functions/params");
 const admin = require("firebase-admin");
 const nodemailer = require("nodemailer");
 const crypto = require("crypto");
 const {
-  ALLOWED_CONFIG_TYPES,
-  computeCanonicalConfigHash,
-  validateConfigPayloadServerSide,
   verifyAdminCallerWithDeps,
   applyAdminCorsPolicy,
   createAdminEndpointHandlers,
+  handleAuthUserDeleteTrigger,
 } = require("./admin_helpers");
 
 admin.initializeApp();
 const db = admin.firestore();
-const geminiApiKeySecret = defineSecret("GEMINI_API_KEY");
 
 // ----------------------------------------------------------------------
 // CẤU HÌNH GỬI EMAIL (GMAIL SMTP HOẶC DỊCH VỤ EMAIL TÙY CHỌN)
@@ -381,17 +377,6 @@ const adminHandlers = createAdminEndpointHandlers({
   auth: admin.auth(),
   verifyAppCheckFn: verifyOptionalAppCheck,
   logger: functions.logger,
-  geminiApiKeyGetter: async () => {
-    try {
-      const secretVal = geminiApiKeySecret.value();
-      if (secretVal && String(secretVal).trim()) {
-        return String(secretVal).trim();
-      }
-    } catch (_) {
-      // Môi trường local/test không gắn Secret Manager có thể fallback về biến môi trường
-    }
-    return process.env.GEMINI_API_KEY || "";
-  },
 });
 
 /**
@@ -571,565 +556,8 @@ exports.adminGetDashboardStats = functions.https.onRequest(async (req, res) => {
   }
 });
 
-// ======================================================================
-// GIAI ĐOẠN 1 & 2: QUẢN TRỊ CẤU HÌNH AI, SANDBOX HASH, PUBLISH/ROLLBACK & AI FEEDBACK
-// ======================================================================
-
-const _secretMemoryCache = {};
-
 /**
- * Quản lý khóa bí mật HMAC phía Server an toàn:
- * 1. Ưu tiên đọc từ biến môi trường / Google Cloud Secret Manager (`process.env[envVarName]`).
- * 2. Hoặc đọc từ `functions.config().security?.[configProp]`.
- * 3. Nếu chưa cấu hình trên môi trường dev, tự động sinh khóa ngẫu nhiên 256-bit
- *    (`crypto.randomBytes(32).toString("hex")`) và lưu tại collection nội bộ
- *    `_server_secrets/{secretId}` (đã khóa `allow read, write: if false` trong Firestore Rules).
- * Tuyệt đối không dùng chuỗi khóa cố định hardcode trong mã nguồn.
- */
-async function getOrCreateServerSecret(secretId, envVarName, configProp) {
-  const fromEnv = process.env[envVarName];
-  if (fromEnv && String(fromEnv).trim().length >= 16) {
-    return String(fromEnv).trim();
-  }
-
-  const fromConfig = functions.config().security?.[configProp];
-  if (fromConfig && String(fromConfig).trim().length >= 16) {
-    return String(fromConfig).trim();
-  }
-
-  if (_secretMemoryCache[secretId]) {
-    return _secretMemoryCache[secretId];
-  }
-
-  const secretRef = db.collection("_server_secrets").doc(secretId);
-  const generatedSecret = await db.runTransaction(async (tx) => {
-    const snap = await tx.get(secretRef);
-    if (snap.exists && snap.data().secretValue && String(snap.data().secretValue).length >= 32) {
-      return String(snap.data().secretValue);
-    }
-    const fresh = crypto.randomBytes(32).toString("hex");
-    tx.set(secretRef, {
-      secretId: secretId,
-      secretValue: fresh,
-      createdAt: new Date().toISOString(),
-    });
-    return fresh;
-  });
-
-  _secretMemoryCache[secretId] = generatedSecret;
-  return generatedSecret;
-}
-
-async function computeSandboxSignature(configType, canonicalHash) {
-  const secret = await getOrCreateServerSecret(
-    "sandbox_hmac_v1",
-    "SANDBOX_HMAC_SECRET",
-    "sandbox_secret"
-  );
-  return crypto
-    .createHmac("sha256", secret)
-    .update(`${configType}:${canonicalHash}`, "utf8")
-    .digest("hex");
-}
-
-async function computePseudonymousReporterHash(uid) {
-  const secret = await getOrCreateServerSecret(
-    "feedback_pseudonym_v1",
-    "FEEDBACK_HMAC_SECRET",
-    "feedback_secret"
-  );
-  return crypto
-    .createHmac("sha256", secret)
-    .update(`reporter:${uid}`, "utf8")
-    .digest("hex");
-}
-
-async function verifyActiveUserCaller(req) {
-  await verifyOptionalAppCheck(req);
-  const authHeader = req.headers.authorization || "";
-  if (!authHeader.startsWith("Bearer ")) {
-    const err = new Error("Thiếu Firebase ID Token xác thực.");
-    err.statusCode = 401;
-    throw err;
-  }
-  const idToken = authHeader.substring("Bearer ".length).trim();
-  let decoded;
-  try {
-    decoded = await admin.auth().verifyIdToken(idToken, true);
-  } catch (e) {
-    const err = new Error("Phiên đăng nhập không hợp lệ hoặc đã hết hạn.");
-    err.statusCode = 401;
-    throw err;
-  }
-  const userDoc = await db.collection("users").doc(decoded.uid).get();
-  if (userDoc.exists && userDoc.data().status === "locked") {
-    const err = new Error("Tài khoản đã bị khóa.");
-    err.statusCode = 403;
-    throw err;
-  }
-  return {
-    uid: decoded.uid,
-    email: decoded.email || "",
-  };
-}
-
-/**
- * 8. Endpoint Xác minh Bản nháp trên AI Sandbox (Đóng dấu chữ ký HMAC tại Backend)
- * POST /adminVerifyDraftInSandbox
- * Body: { configType: string, simulationSummary?: object }
- */
-exports.adminVerifyDraftInSandbox = functions.https.onRequest(async (req, res) => {
-  if (applyAdminCors(req, res)) return;
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method Not Allowed" });
-    return;
-  }
-
-  try {
-    const caller = await verifyAdminCaller(req);
-    const { configType, simulationSummary } = req.body || {};
-
-    if (!ALLOWED_CONFIG_TYPES.includes(configType)) {
-      res.status(400).json({ error: "Loại cấu hình configType không hợp lệ." });
-      return;
-    }
-
-    const draftRef = db.collection("draft_configs").doc(configType);
-    const draftSnap = await draftRef.get();
-    if (!draftSnap.exists || !draftSnap.data().draftPayload) {
-      res.status(404).json({ error: "Không tìm thấy bản nháp cần kiểm thử." });
-      return;
-    }
-
-    const draftPayload = draftSnap.data().draftPayload;
-    const validationErrors = validateConfigPayloadServerSide(configType, draftPayload);
-    if (validationErrors.length > 0) {
-      res.status(400).json({
-        error: validationErrors.join(" "),
-        validationErrors: validationErrors,
-      });
-      return;
-    }
-
-    const canonicalHash = computeCanonicalConfigHash(draftPayload);
-    const signature = await computeSandboxSignature(configType, canonicalHash);
-    const nowIso = new Date().toISOString();
-
-    await db.collection("_sandbox_verifications").doc(configType).set({
-      configType: configType,
-      verifiedDraftHash: canonicalHash,
-      verificationSignature: signature,
-      simulationSummary: simulationSummary || {},
-      verifiedBy: caller.uid,
-      verifiedByEmail: caller.email,
-      verifiedAt: nowIso,
-    });
-
-    await db.collection("admin_logs").add({
-      adminId: caller.uid,
-      adminEmail: caller.email,
-      action: "VERIFY_SANDBOX_DRAFT",
-      targetType: "config",
-      targetId: configType,
-      targetLabel: configType,
-      result: "success",
-      details: `Đã kiểm thử hợp lệ bản nháp ${configType} trên AI Sandbox (Hash: ${canonicalHash.substring(0, 12)}...).`,
-      source: "cloud_function",
-      createdAt: nowIso,
-    });
-
-    res.status(200).json({
-      success: true,
-      configType: configType,
-      verifiedDraftHash: canonicalHash,
-      verificationSignature: signature,
-      verifiedAt: nowIso,
-    });
-  } catch (error) {
-    functions.logger.error("Lỗi adminVerifyDraftInSandbox:", error);
-    const code = error.statusCode || 500;
-    res.status(code).json({
-      error: error.message || "Không thể xác minh bản nháp Sandbox.",
-    });
-  }
-});
-
-/**
- * 9. Endpoint Xuất bản Cấu hình Nguyên tử (Atomic Publish + Snapshot + Audit Log)
- * POST /adminPublishConfig
- * Body: { configType: string, changeNote: string }
- */
-exports.adminPublishConfig = functions.https.onRequest(async (req, res) => {
-  if (applyAdminCors(req, res)) return;
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method Not Allowed" });
-    return;
-  }
-
-  try {
-    const caller = await verifyAdminCaller(req);
-    const { configType, changeNote } = req.body || {};
-
-    if (!ALLOWED_CONFIG_TYPES.includes(configType)) {
-      res.status(400).json({ error: "Loại cấu hình configType không hợp lệ." });
-      return;
-    }
-
-    const cleanNote = String(changeNote || "Xuất bản cấu hình mới").trim().substring(0, 300);
-    const nowIso = new Date().toISOString();
-    await getOrCreateServerSecret("sandbox_hmac_v1", "SANDBOX_HMAC_SECRET", "sandbox_secret");
-
-    const result = await db.runTransaction(async (tx) => {
-      const draftRef = db.collection("draft_configs").doc(configType);
-      const sandboxRef = db.collection("_sandbox_verifications").doc(configType);
-      const pubRef = db.collection("published_configs").doc(configType);
-
-      const [draftSnap, sandboxSnap, pubSnap] = await Promise.all([
-        tx.get(draftRef),
-        tx.get(sandboxRef),
-        tx.get(pubRef),
-      ]);
-
-      if (!draftSnap.exists || !draftSnap.data().draftPayload) {
-        const err = new Error("Không tìm thấy dữ liệu bản nháp để xuất bản.");
-        err.statusCode = 404;
-        throw err;
-      }
-
-      const draftPayload = draftSnap.data().draftPayload;
-      const validationErrors = validateConfigPayloadServerSide(configType, draftPayload);
-      if (validationErrors.length > 0) {
-        const err = new Error(validationErrors.join(" "));
-        err.statusCode = 400;
-        err.validationErrors = validationErrors;
-        throw err;
-      }
-
-      const currentCanonicalHash = computeCanonicalConfigHash(draftPayload);
-      const expectedSignature = await computeSandboxSignature(configType, currentCanonicalHash);
-
-      if (
-        !sandboxSnap.exists ||
-        sandboxSnap.data().verifiedDraftHash !== currentCanonicalHash ||
-        sandboxSnap.data().verificationSignature !== expectedSignature
-      ) {
-        const err = new Error(
-          "Bản nháp đã thay đổi hoặc chưa được kiểm thử trên AI Sandbox. Vui lòng chạy kiểm thử Sandbox trước khi xuất bản."
-        );
-        err.statusCode = 400;
-        throw err;
-      }
-
-      const currentVersion = pubSnap.exists ? Number(pubSnap.data().version || 0) : 0;
-      const nextVersion = currentVersion + 1;
-      const versionDocId = `${configType}_v${nextVersion}`;
-      const versionRef = db.collection("config_versions").doc(versionDocId);
-      const logRef = db.collection("admin_logs").doc();
-
-      tx.set(pubRef, {
-        configType: configType,
-        version: nextVersion,
-        payload: draftPayload,
-        payloadHash: currentCanonicalHash,
-        changeNote: cleanNote,
-        updatedAt: nowIso,
-        updatedBy: caller.uid,
-        updatedByEmail: caller.email,
-      });
-
-      tx.set(versionRef, {
-        versionId: versionDocId,
-        configType: configType,
-        versionNumber: nextVersion,
-        payloadSnapshot: draftPayload,
-        payloadHash: currentCanonicalHash,
-        changeNote: cleanNote,
-        publishedBy: caller.uid,
-        publishedByEmail: caller.email,
-        publishedAt: nowIso,
-      });
-
-      tx.set(logRef, {
-        adminId: caller.uid,
-        adminEmail: caller.email,
-        action: "PUBLISH_CONFIG",
-        targetType: "config",
-        targetId: configType,
-        targetLabel: `${configType} v${nextVersion}`,
-        result: "success",
-        details: `Xuất bản ${configType} phiên bản v${nextVersion}. Ghi chú: ${cleanNote}`,
-        source: "cloud_function",
-        createdAt: nowIso,
-      });
-
-      return {
-        version: nextVersion,
-        versionId: versionDocId,
-        payloadHash: currentCanonicalHash,
-      };
-    });
-
-    res.status(200).json({
-      success: true,
-      configType: configType,
-      version: result.version,
-      versionId: result.versionId,
-      payloadHash: result.payloadHash,
-    });
-  } catch (error) {
-    functions.logger.error("Lỗi adminPublishConfig:", error);
-    const code = error.statusCode || 500;
-    const body = {
-      error: error.message || "Không thể xuất bản cấu hình.",
-    };
-    if (Array.isArray(error.validationErrors) && error.validationErrors.length > 0) {
-      body.validationErrors = error.validationErrors;
-    }
-    res.status(code).json(body);
-  }
-});
-
-/**
- * 10. Endpoint Khôi phục Phiên bản Cấu hình (Tạo version mới từ snapshot cũ, không ghi đè lịch sử)
- * POST /adminRollbackConfig
- * Body: { configType: string, targetVersionNumber: number, reason?: string }
- */
-exports.adminRollbackConfig = functions.https.onRequest(async (req, res) => {
-  if (applyAdminCors(req, res)) return;
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method Not Allowed" });
-    return;
-  }
-
-  try {
-    const caller = await verifyAdminCaller(req);
-    const { configType, targetVersionNumber, reason } = req.body || {};
-    const targetVer = Number(targetVersionNumber);
-
-    if (!ALLOWED_CONFIG_TYPES.includes(configType) || !Number.isInteger(targetVer) || targetVer < 1) {
-      res.status(400).json({ error: "Tham số configType hoặc targetVersionNumber không hợp lệ." });
-      return;
-    }
-
-    const nowIso = new Date().toISOString();
-    const targetVersionId = `${configType}_v${targetVer}`;
-    await getOrCreateServerSecret("sandbox_hmac_v1", "SANDBOX_HMAC_SECRET", "sandbox_secret");
-
-    const result = await db.runTransaction(async (tx) => {
-      const targetVerRef = db.collection("config_versions").doc(targetVersionId);
-      const pubRef = db.collection("published_configs").doc(configType);
-      const draftRef = db.collection("draft_configs").doc(configType);
-      const sandboxRef = db.collection("_sandbox_verifications").doc(configType);
-
-      const [targetVerSnap, pubSnap] = await Promise.all([
-        tx.get(targetVerRef),
-        tx.get(pubRef),
-      ]);
-
-      if (!targetVerSnap.exists || !targetVerSnap.data().payloadSnapshot) {
-        const err = new Error(`Không tìm thấy bản lưu phiên bản v${targetVer} của ${configType}.`);
-        err.statusCode = 404;
-        throw err;
-      }
-
-      const restoredPayload = targetVerSnap.data().payloadSnapshot;
-      const restoredHash = computeCanonicalConfigHash(restoredPayload);
-      const signature = await computeSandboxSignature(configType, restoredHash);
-
-      const currentVersion = pubSnap.exists ? Number(pubSnap.data().version || 0) : 0;
-      const nextVersion = currentVersion + 1;
-      const newVersionId = `${configType}_v${nextVersion}`;
-      const newVerRef = db.collection("config_versions").doc(newVersionId);
-      const logRef = db.collection("admin_logs").doc();
-
-      const noteText = reason
-        ? `Khôi phục từ v${targetVer}: ${String(reason).trim()}`
-        : `Khôi phục (Rollback) về cấu hình của phiên bản v${targetVer}`;
-
-      tx.set(pubRef, {
-        configType: configType,
-        version: nextVersion,
-        payload: restoredPayload,
-        payloadHash: restoredHash,
-        rollbackFromVersion: targetVer,
-        changeNote: noteText,
-        updatedAt: nowIso,
-        updatedBy: caller.uid,
-        updatedByEmail: caller.email,
-      });
-
-      tx.set(draftRef, {
-        configType: configType,
-        draftPayload: restoredPayload,
-        draftHash: restoredHash,
-        changeNote: noteText,
-        updatedAt: nowIso,
-        updatedBy: caller.uid,
-      });
-
-      tx.set(sandboxRef, {
-        configType: configType,
-        verifiedDraftHash: restoredHash,
-        verificationSignature: signature,
-        verifiedBy: caller.uid,
-        verifiedByEmail: caller.email,
-        verifiedAt: nowIso,
-      });
-
-      tx.set(newVerRef, {
-        versionId: newVersionId,
-        configType: configType,
-        versionNumber: nextVersion,
-        payloadSnapshot: restoredPayload,
-        payloadHash: restoredHash,
-        rollbackFromVersion: targetVer,
-        changeNote: noteText,
-        publishedBy: caller.uid,
-        publishedByEmail: caller.email,
-        publishedAt: nowIso,
-      });
-
-      tx.set(logRef, {
-        adminId: caller.uid,
-        adminEmail: caller.email,
-        action: "ROLLBACK_CONFIG",
-        targetType: "config",
-        targetId: configType,
-        targetLabel: `${configType} v${nextVersion} (từ v${targetVer})`,
-        result: "success",
-        details: noteText,
-        source: "cloud_function",
-        createdAt: nowIso,
-      });
-
-      return {
-        version: nextVersion,
-        versionId: newVersionId,
-        rollbackFromVersion: targetVer,
-      };
-    });
-
-    res.status(200).json({
-      success: true,
-      configType: configType,
-      version: result.version,
-      versionId: result.versionId,
-      rollbackFromVersion: result.rollbackFromVersion,
-    });
-  } catch (error) {
-    functions.logger.error("Lỗi adminRollbackConfig:", error);
-    const code = error.statusCode || 500;
-    res.status(code).json({
-      error: error.message || "Không thể khôi phục phiên bản cấu hình.",
-    });
-  }
-});
-
-/**
- * 11. Endpoint Tiếp nhận Phản hồi Chất lượng AI từ Người dùng (Ẩn danh / Giả danh bảo mật)
- * POST /submitAiFeedback
- */
-exports.submitAiFeedback = functions.https.onRequest(async (req, res) => {
-  if (applyAdminCors(req, res)) return;
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method Not Allowed" });
-    return;
-  }
-
-  try {
-    const caller = await verifyActiveUserCaller(req);
-    const body = req.body || {};
-
-    const allowedFeatures = ["ai_chat", "monthly_plan", "ocr_suggestion", "anomaly_alert"];
-    const targetFeature = allowedFeatures.includes(body.targetFeature)
-      ? body.targetFeature
-      : "ai_chat";
-    const rating = body.rating === "negative" ? "negative" : "positive";
-    const feedbackMode = body.feedbackMode === "pseudonymous" ? "pseudonymous" : "anonymous";
-    const reasonCode = String(body.reasonCode || "general").trim().substring(0, 60);
-
-    let cleanNote = null;
-    if (typeof body.userNote === "string" && body.userNote.trim().length > 0) {
-      cleanNote = body.userNote
-        .trim()
-        .replace(/\d[\d.,\s]{5,}\d/g, "[SỐ_ẨN_DANH]")
-        .substring(0, 250);
-    }
-
-    let cleanKeyword = null;
-    if (
-      typeof body.suggestedKeywordOrMerchant === "string" &&
-      body.suggestedKeywordOrMerchant.trim().length > 0
-    ) {
-      cleanKeyword = body.suggestedKeywordOrMerchant.trim().substring(0, 80);
-    }
-
-    const reportRef = db.collection("ai_feedback_reports").doc();
-    const reportId = reportRef.id;
-    const nowIso = new Date().toISOString();
-
-    const reportDoc = {
-      reportId: reportId,
-      targetFeature: targetFeature,
-      rating: rating,
-      reasonCode: reasonCode,
-      aiConfigVersion: Number(body.aiConfigVersion || 1),
-      heuristicsVersion: Number(body.heuristicsVersion || 1),
-      modelUsed: String(body.modelUsed || "gemini-3.5-flash").substring(0, 60),
-      dataTier: String(body.dataTier || "unknown").substring(0, 40),
-      feedbackMode: feedbackMode,
-      status: "open",
-      createdAt: nowIso,
-    };
-
-    if (cleanNote) reportDoc.userNote = cleanNote;
-    if (cleanKeyword) reportDoc.suggestedKeywordOrMerchant = cleanKeyword;
-
-    const batch = db.batch();
-    if (feedbackMode === "pseudonymous") {
-      reportDoc.reporterHash = await computePseudonymousReporterHash(caller.uid);
-      const linkRef = db.collection("_feedback_notification_links").doc(reportId);
-      batch.set(linkRef, {
-        reportId: reportId,
-        uid: caller.uid,
-        targetFeature: targetFeature,
-        createdAt: nowIso,
-      });
-    }
-
-    batch.set(reportRef, reportDoc);
-    await batch.commit();
-
-    res.status(200).json({
-      success: true,
-      reportId: reportId,
-      feedbackMode: feedbackMode,
-    });
-  } catch (error) {
-    functions.logger.error("Lỗi submitAiFeedback:", error);
-    const code = error.statusCode || 500;
-    res.status(code).json({
-      error: error.message || "Không thể gửi phản hồi chất lượng AI.",
-    });
-  }
-});
-
-/**
- * 12. Endpoint Admin Xử lý Phiếu Phản hồi AI & Gửi thông báo ẩn danh (nếu User đăng ký)
- * POST /adminResolveAiFeedback
- * Body: { reportId: string, status: 'resolved' | 'ignored', adminResolutionNote?: string, appliedAction?: string }
- */
-exports.adminResolveAiFeedback = functions.https.onRequest(async (req, res) => {
-  if (applyAdminCors(req, res)) return;
-  return adminHandlers.adminResolveAiFeedback(req, res);
-});
-
-// ======================================================================
-// GIAI ĐOẠN 3 (BẢN VÁ NỀN): SESSION VERIFY, KNOWLEDGE PUBLISH, LIVE GEMINI SANDBOX & ADMIN CRUD
-// ======================================================================
-
-/**
- * 13. Endpoint Xác minh phiên Quản trị viên chuẩn phía Server & đồng bộ Custom Claims
+ * 8. Endpoint Xác minh phiên Quản trị viên chuẩn phía Server & đồng bộ Custom Claims
  * GET/POST /adminVerifySession
  */
 exports.adminVerifySession = functions.https.onRequest(async (req, res) => {
@@ -1138,31 +566,7 @@ exports.adminVerifySession = functions.https.onRequest(async (req, res) => {
 });
 
 /**
- * 14. Endpoint Xuất bản / Tạm ngưng bài viết Tri thức Tài chính nguyên tử
- * POST /adminPublishKnowledgeBase
- * Body: { articleId: string, action?: 'publish' | 'toggle_active', isActive?: boolean, changeNote?: string }
- */
-exports.adminPublishKnowledgeBase = functions.https.onRequest(async (req, res) => {
-  if (applyAdminCors(req, res)) return;
-  return adminHandlers.adminPublishKnowledgeBase(req, res);
-});
-
-/**
- * 15. Endpoint Chạy thử nghiệm Gemini AI Sandbox (Đọc GEMINI_API_KEY từ Secret Manager, không lộ key cho Web)
- * POST /adminRunSandbox
- */
-exports.adminRunSandbox = functions
-  .runWith({
-    secrets: [geminiApiKeySecret],
-    timeoutSeconds: 30,
-  })
-  .https.onRequest(async (req, res) => {
-    if (applyAdminCors(req, res)) return;
-    return adminHandlers.adminRunSandbox(req, res);
-  });
-
-/**
- * 16. Endpoint Quản trị Danh mục Hệ thống (`system_categories`) + Audit Log Server
+ * 9. Endpoint Quản trị Danh mục Hệ thống (`system_categories`) + Audit Log Server
  * POST /adminManageSystemCategory
  */
 exports.adminManageSystemCategory = functions.https.onRequest(async (req, res) => {
@@ -1171,12 +575,54 @@ exports.adminManageSystemCategory = functions.https.onRequest(async (req, res) =
 });
 
 /**
- * 17. Endpoint Quản trị Thông báo Hệ thống (`system_announcements`) + Audit Log Server
+ * 10. Endpoint Quản trị Thông báo Hệ thống (`system_announcements`) + Audit Log Server
  * POST /adminManageAnnouncement
  */
 exports.adminManageAnnouncement = functions.https.onRequest(async (req, res) => {
   if (applyAdminCors(req, res)) return;
   return adminHandlers.adminManageAnnouncement(req, res);
 });
+
+/**
+ * 11. Trigger tự động dọn dẹp dữ liệu Firestore khi tài khoản bị xóa trên Firebase Authentication
+ * (Khi xóa trên Firebase Console hoặc Client tự xóa tài khoản; tự động bỏ qua nếu `adminDeleteUser` đã xử lý).
+ * Tự động xóa theo batch (<= 400 writes/batch):
+ * - Document `users/{uid}` và toàn bộ subcollections (`quickTemplates`, `chat_sessions`, `monthly_plans`...)
+ * - Mọi document trong các root collections thuộc `userId == uid` (`wallets`, `transactions`, `budgets`, `categories`,
+ *   `savingGoals`, `monthly_plans`, `notifications`, `recurringTransactions`, `recurringTransactionOccurrences`, `chat_sessions`)
+ * - Toàn bộ `support_tickets` thuộc user kèm subcollection `messages`
+ * - Bản ghi xác thực OTP email tạm thời (`_otp_verifications/{email}`)
+ * - Ghi Audit Log hệ thống vào `admin_logs` (không lưu/lộ dữ liệu tài chính cá nhân)
+ */
+exports.cleanupUserDataOnAuthDelete = functions.auth.user().onDelete(async (user) => {
+  functions.logger.info(
+    `[cleanupUserDataOnAuthDelete] Nhận sự kiện xóa Auth cho UID: ${user.uid}`
+  );
+  try {
+    const result = await handleAuthUserDeleteTrigger({
+      db,
+      user,
+      logger: functions.logger,
+    });
+    functions.logger.info(
+      `[cleanupUserDataOnAuthDelete] Hoàn tất xử lý cho UID ${user.uid} (skipped=${Boolean(result.skipped)})`
+    );
+    return result;
+  } catch (error) {
+    functions.logger.error(`[cleanupUserDataOnAuthDelete] Lỗi khi dọn dẹp cho user ${user.uid}:`, error);
+    throw error;
+  }
+});
+
+/**
+ * 12. Endpoint Quản trị viên xóa vĩnh viễn tài khoản người dùng (Firebase Auth + Firestore)
+ * POST /adminDeleteUser
+ * Body: { targetUid: string, reason?: string }
+ */
+exports.adminDeleteUser = functions.https.onRequest(async (req, res) => {
+  if (applyAdminCors(req, res)) return;
+  return adminHandlers.adminDeleteUser(req, res);
+});
+
 
 

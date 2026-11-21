@@ -1,23 +1,25 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  validateConfigPayloadServerSide,
-  validateKnowledgeArticleServerSide,
   parseAllowedAdminOrigins,
   isAllowedAdminOrigin,
   applyAdminCorsPolicy,
   verifyAdminCallerWithDeps,
   createAdminEndpointHandlers,
+  cleanupUserData,
+  handleAuthUserDeleteTrigger,
+  USER_OWNED_COLLECTIONS,
 } = require("../admin_helpers");
 
 /**
- * In-memory Firestore mock hỗ trợ collection/doc/get/set/update/add/delete/runTransaction
+ * In-memory Firestore mock hỗ trợ collection/doc/subcollection/limit/get/set/update/add/delete/batch/runTransaction
  * phục vụ kiểm thử đơn vị độc lập các Cloud Functions trong `admin_helpers.js`.
  */
 class FakeFirestore {
   constructor(initialData = {}) {
     this.collections = new Map();
     this._autoId = 1;
+    this.batchCommitSizes = [];
     for (const [colName, docs] of Object.entries(initialData)) {
       const colMap = new Map();
       for (const [docId, docData] of Object.entries(docs)) {
@@ -39,9 +41,13 @@ class FakeFirestore {
     return {
       doc(id) {
         const docId = id || `auto_${store._autoId++}`;
+        const docPath = `${name}/${docId}`;
         return {
           id: docId,
           _colName: name,
+          collection(subName) {
+            return store.collection(`${docPath}/${subName}`);
+          },
           async get() {
             const col = store._getCol(name);
             const data = col.get(docId);
@@ -71,10 +77,91 @@ class FakeFirestore {
           },
         };
       },
+      limit(limitNum) {
+        return {
+          async get() {
+            const col = store._getCol(name);
+            const docs = [];
+            for (const [docId, data] of col.entries()) {
+              docs.push({
+                id: docId,
+                ref: store.collection(name).doc(docId),
+                data: () => structuredClone(data),
+              });
+              if (docs.length >= limitNum) break;
+            }
+            return {
+              empty: docs.length === 0,
+              size: docs.length,
+              docs,
+            };
+          },
+        };
+      },
+      where(field, op, val) {
+        return {
+          limit(limitNum) {
+            return {
+              async get() {
+                const col = store._getCol(name);
+                const matchingDocs = [];
+                for (const [docId, data] of col.entries()) {
+                  if (op === "==" && data[field] === val) {
+                    matchingDocs.push({
+                      id: docId,
+                      ref: store.collection(name).doc(docId),
+                      data: () => structuredClone(data),
+                    });
+                    if (matchingDocs.length >= limitNum) break;
+                  }
+                }
+                return {
+                  empty: matchingDocs.length === 0,
+                  size: matchingDocs.length,
+                  docs: matchingDocs,
+                };
+              },
+            };
+          },
+        };
+      },
       async add(payload) {
         const docId = `auto_${store._autoId++}`;
         store._getCol(name).set(docId, structuredClone(payload));
         return { id: docId };
+      },
+    };
+  }
+
+  async recursiveDelete(docRef) {
+    if (!docRef) return;
+    const prefix = `${docRef._colName}/${docRef.id}/`;
+    for (const [colName, colMap] of this.collections.entries()) {
+      if (colName.startsWith(prefix)) {
+        colMap.clear();
+      }
+    }
+    if (typeof docRef.delete === "function") {
+      await docRef.delete();
+    }
+  }
+
+  batch() {
+    const store = this;
+    const ops = [];
+    return {
+      delete(ref) {
+        ops.push(async () => {
+          if (ref && typeof ref.delete === "function") {
+            await ref.delete();
+          }
+        });
+      },
+      async commit() {
+        store.batchCommitSizes.push(ops.length);
+        for (const op of ops) {
+          await op();
+        }
       },
     };
   }
@@ -109,6 +196,14 @@ function createFakeAuth({ verifiedTokens = {}, users = {} } = {}) {
       const prev = userRecords.get(uid) || { uid };
       userRecords.set(uid, { ...prev, customClaims: structuredClone(claims) });
     },
+    async deleteUser(uid) {
+      if (!userRecords.has(uid)) {
+        const err = new Error(`User not found: ${uid}`);
+        err.code = "auth/user-not-found";
+        throw err;
+      }
+      userRecords.delete(uid);
+    },
     _getStoredUser(uid) {
       return userRecords.get(uid);
     },
@@ -141,30 +236,6 @@ function createMockRes() {
     },
   };
   return res;
-}
-
-function validHeuristicsPayload(overrides = {}) {
-  return {
-    categorySpikeRatio: 0.3,
-    categoryIncomeShareThreshold: 0.25,
-    minRecommendedSavingRate: 0.2,
-    incomeDropWarningRatio: 0.2,
-    incomeDropCriticalRatio: 0.4,
-    defaultSavingRateNoGoal: 0.15,
-    flexibleSpendFloorRatio: 0.7,
-    planBudgetAdherenceWeight: 0.6,
-    budgetNearLimitRatio: 0.8,
-    categoryForecastWarningRatio: 1.3,
-    categoryForecastCriticalRatio: 1.6,
-    categoryForecastMinDiffVnd: 100000,
-    healthNegativeBalancePenalty: 25,
-    healthBudgetExceededPenalty: 15,
-    healthBudgetAtRiskPenalty: 10,
-    txAnomalyMinDiffVnd: 100000,
-    txAnomalyWarningMultiplier: 2.0,
-    txAnomalyCriticalMultiplier: 4.0,
-    ...overrides,
-  };
 }
 
 test("adminVerifySession: từ chối 401/403 và tự đồng bộ admin claim nhưng vẫn bảo toàn claims cũ", async () => {
@@ -240,300 +311,6 @@ test("adminVerifySession: từ chối 401/403 và tự đồng bộ admin claim 
     plan: "free",
     admin: true,
   });
-});
-
-test("validateConfigPayloadServerSide: kiểm chặt transaction_rules & toàn bộ 18 tham số financial_heuristics", () => {
-  // 1. Chặn vô hiệu hóa built-in keywords
-  const disabledErrs = validateConfigPayloadServerSide("transaction_rules", {
-    disabledBuiltInKeywords: ["grab"],
-  });
-  assert.ok(disabledErrs.some((e) => e.includes("Built-in Keywords")));
-
-  // 2. Chặn trùng từ khóa không dấu & xung đột chéo nhóm bảo vệ
-  const conflictErrs = validateConfigPayloadServerSide("transaction_rules", {
-    addedExpenseKeywords: {
-      "an uong": ["Cà Phê", "Grab"],
-    },
-  });
-  assert.ok(conflictErrs.some((e) => e.includes("ca phe")));
-  assert.ok(conflictErrs.some((e) => e.includes("grab")));
-
-  // 3. Chặn ghi đè provider hệ thống & sai walletType
-  const providerErrs = validateConfigPayloadServerSide("transaction_rules", {
-    customPaymentProviders: [
-      {
-        key: "momo",
-        displayLabel: "Fake MoMo",
-        walletType: "crypto",
-        receiptKeywords: ["momo new"],
-      },
-    ],
-  });
-  assert.ok(providerErrs.some((e) => e.includes("momo")));
-  assert.ok(providerErrs.some((e) => e.includes("walletType")));
-
-  // 4. Hợp lệ: từ khóa mới sạch + custom provider isActive: false + disabledAdminKeywords
-  const okRulesErrs = validateConfigPayloadServerSide("transaction_rules", {
-    addedExpenseKeywords: {
-      "an uong": ["Phê La", "Katinat"],
-    },
-    disabledAdminKeywords: ["katinat"],
-    customPaymentProviders: [
-      {
-        key: "kredivo",
-        displayLabel: "Kredivo",
-        walletType: "eWallet",
-        isActive: false,
-        receiptKeywords: ["kredivo"],
-        walletNameAliases: ["kredivo"],
-      },
-    ],
-  });
-  assert.deepEqual(okRulesErrs, []);
-
-  // 5. Kiểm tra financial_heuristics toàn diện (kể cả số nguyên & cross-field incomeDrop)
-  const heurBad = validateConfigPayloadServerSide(
-    "financial_heuristics",
-    validHeuristicsPayload({
-      incomeDropWarningRatio: 0.35,
-      incomeDropCriticalRatio: 0.4, // Chênh < 0.10 -> lỗi
-      healthNegativeBalancePenalty: 25.5, // Không phải số nguyên -> lỗi
-      txAnomalyMinDiffVnd: 9999999, // Vượt max 500000 -> lỗi
-    })
-  );
-  assert.ok(heurBad.length >= 3);
-  assert.deepEqual(
-    validateConfigPayloadServerSide("financial_heuristics", validHeuristicsPayload()),
-    []
-  );
-});
-
-test("adminPublishKnowledgeBase: kiểm schema, xuất bản nguyên tử và tắt isActive không mất lịch sử", async () => {
-  const db = new FakeFirestore({
-    users: {
-      admin1: { email: "admin@app.vn", name: "Admin", role: "admin", status: "active" },
-    },
-    financial_knowledge_drafts: {
-      kb_bad: {
-        articleId: "kb_bad",
-        title: "Bài sai schema",
-        topic: "crypto_trading",
-        triggerCondition: "unknown_trigger",
-        priority: 99,
-        summaryForUser: "a".repeat(260),
-        aiGroundingSnippet: "b".repeat(310),
-        suggestedPrompts: ["1", "2", "3", "4"],
-        isActive: true,
-      },
-      kb_good: {
-        articleId: "kb_good",
-        title: "Quy tắc quỹ dự phòng 3-6 tháng",
-        topic: "saving_strategy",
-        triggerCondition: "low_saving_rate",
-        priority: 9,
-        summaryForUser: "Nên duy trì quỹ dự phòng tương đương 3-6 tháng chi thiết yếu.",
-        aiGroundingSnippet: "Khuyến nghị người dùng trích quỹ dự phòng trước khi tăng chi linh hoạt.",
-        suggestedPrompts: ["Tôi cần quỹ dự phòng bao nhiêu tiền?"],
-        isActive: true,
-      },
-    },
-  });
-  const auth = createFakeAuth({
-    verifiedTokens: { tok_a: { uid: "admin1", email: "admin@app.vn", admin: true } },
-  });
-  const handlers = createAdminEndpointHandlers({ db, auth, logger: { error() {}, warn() {} } });
-
-  // Draft sai schema -> 400 + validationErrors, không tạo bản published
-  const resBad = createMockRes();
-  await handlers.adminPublishKnowledgeBase(
-    {
-      method: "POST",
-      headers: { authorization: "Bearer tok_a" },
-      body: { articleId: "kb_bad" },
-    },
-    resBad
-  );
-  assert.equal(resBad.statusCode, 400);
-  assert.ok(resBad.body.validationErrors.length >= 5);
-  assert.equal((await db.collection("financial_knowledge_published").doc("kb_bad").get()).exists, false);
-
-  // Draft chuẩn -> 200 publishedVersion 1 + ghi admin_logs
-  const resGood = createMockRes();
-  await handlers.adminPublishKnowledgeBase(
-    {
-      method: "POST",
-      headers: { authorization: "Bearer tok_a" },
-      body: { articleId: "kb_good", changeNote: "Xuất bản lần 1" },
-    },
-    resGood
-  );
-  assert.equal(resGood.statusCode, 200);
-  assert.equal(resGood.body.publishedVersion, 1);
-  assert.equal(resGood.body.isActive, true);
-
-  const pubDoc1 = await db.collection("financial_knowledge_published").doc("kb_good").get();
-  const createdAtFirst = pubDoc1.data().createdAt;
-
-  // Toggle isActive = false -> tăng version lên 2, giữ nguyên lịch sử & createdAt
-  const resDisable = createMockRes();
-  await handlers.adminPublishKnowledgeBase(
-    {
-      method: "POST",
-      headers: { authorization: "Bearer tok_a" },
-      body: { articleId: "kb_good", action: "toggle_active", isActive: false },
-    },
-    resDisable
-  );
-  assert.equal(resDisable.statusCode, 200);
-  assert.equal(resDisable.body.publishedVersion, 2);
-  assert.equal(resDisable.body.isActive, false);
-
-  const pubDoc2 = await db.collection("financial_knowledge_published").doc("kb_good").get();
-  assert.equal(pubDoc2.data().createdAt, createdAtFirst);
-
-  const logs = Array.from(db._getCol("admin_logs").values());
-  assert.equal(logs.length, 2);
-  assert.ok(logs.every((l) => l.action === "PUBLISH_KNOWLEDGE" && l.targetType === "knowledge"));
-});
-
-test("adminRunSandbox: dùng Secret Manager server-side, fallback model, check JSON, rate-limit và không lộ API key", async () => {
-  const SECRET_KEY = "AIzaSyFAKE_SUPER_SECRET_NEVER_LEAK";
-  const db = new FakeFirestore({
-    users: {
-      admin1: { email: "admin@app.vn", role: "admin", status: "active" },
-    },
-  });
-  const auth = createFakeAuth({
-    verifiedTokens: { tok_a: { uid: "admin1", email: "admin@app.vn", admin: true } },
-  });
-
-  const calledUrls = [];
-  let failPrimary = true;
-  const fakeFetch = async (url, opts) => {
-    calledUrls.push({ url, apiKeyHeader: opts.headers["x-goog-api-key"] });
-    if (failPrimary && url.includes("gemini-3.5-flash:")) {
-      failPrimary = false;
-      return {
-        ok: false,
-        status: 503,
-        async json() {
-          return { error: { message: "Model temporarily overloaded" } };
-        },
-      };
-    }
-    return {
-      ok: true,
-      status: 200,
-      async json() {
-        return {
-          candidates: [
-            {
-              content: {
-                parts: [
-                  {
-                    text: JSON.stringify({
-                      executiveSummary: "Chi tiêu ổn định theo mức thận trọng.",
-                      behavioralInsights: ["Ăn uống chiếm 30% ngân sách linh hoạt."],
-                      categoryActionTips: { "Ăn uống": "Giữ hạn mức 3.000.000đ/tháng" },
-                      savingStrategyNote: "Trích 4.000.000đ đầu tháng.",
-                    }),
-                  },
-                ],
-              },
-            },
-          ],
-        };
-      },
-    };
-  };
-
-  const handlers = createAdminEndpointHandlers({
-    db,
-    auth,
-    fetchImpl: fakeFetch,
-    geminiApiKeyGetter: async () => SECRET_KEY,
-    sandboxRateLimitMaxCalls: 2,
-    logger: { error() {}, warn() {} },
-  });
-
-  // 1. Chặn client gửi kèm secret key hoặc userId thật
-  const resLeakAttempt = createMockRes();
-  await handlers.adminRunSandbox(
-    {
-      method: "POST",
-      headers: { authorization: "Bearer tok_a" },
-      body: { apiKey: "client_key", prompt: "hello" },
-    },
-    resLeakAttempt
-  );
-  assert.equal(resLeakAttempt.statusCode, 400);
-
-  // 2. Chặn model/temperature ngoài khoảng [0.1, 0.8]
-  const resInvalidModel = createMockRes();
-  await handlers.adminRunSandbox(
-    {
-      method: "POST",
-      headers: { authorization: "Bearer tok_a" },
-      body: {
-        primaryModel: "gemini-1.0-pro-legacy",
-        temperature: 0.05,
-        prompt: "hello",
-      },
-    },
-    resInvalidModel
-  );
-  assert.equal(resInvalidModel.statusCode, 400);
-
-  // 3. Chạy thành công với fallback model & kiểm định JSON contract
-  const resOk = createMockRes();
-  await handlers.adminRunSandbox(
-    {
-      method: "POST",
-      headers: { authorization: "Bearer tok_a" },
-      body: {
-        mode: "structured_plan_json",
-        primaryModel: "gemini-3.5-flash",
-        fallbackModels: ["gemini-3.5-flash-lite"],
-        temperature: 0.35,
-        prompt: "Hãy trả JSON kế hoạch tháng cho Synthetic Persona",
-        expectStructuredPlanJson: true,
-        persona: { id: "sb_1", label: "Sinh viên" },
-      },
-    },
-    resOk
-  );
-  assert.equal(resOk.statusCode, 200);
-  assert.equal(resOk.body.modelUsed, "gemini-3.5-flash-lite");
-  assert.deepEqual(resOk.body.triedModels, ["gemini-3.5-flash", "gemini-3.5-flash-lite"]);
-  assert.equal(resOk.body.jsonValid, true);
-  assert.equal(calledUrls[0].apiKeyHeader, SECRET_KEY);
-  assert.equal(JSON.stringify(resOk.body).includes(SECRET_KEY), false);
-
-  const logsJson = JSON.stringify(Array.from(db._getCol("admin_logs").values()));
-  assert.equal(logsJson.includes(SECRET_KEY), false);
-
-  // 4. Rate limit: 2 lần ok -> lần 3 bị 429
-  const resOk2 = createMockRes();
-  await handlers.adminRunSandbox(
-    {
-      method: "POST",
-      headers: { authorization: "Bearer tok_a" },
-      body: { primaryModel: "gemini-3.5-flash", temperature: 0.3, prompt: "ping" },
-    },
-    resOk2
-  );
-  assert.equal(resOk2.statusCode, 200);
-
-  const resRateLimit = createMockRes();
-  await handlers.adminRunSandbox(
-    {
-      method: "POST",
-      headers: { authorization: "Bearer tok_a" },
-      body: { primaryModel: "gemini-3.5-flash", temperature: 0.3, prompt: "ping 3" },
-    },
-    resRateLimit
-  );
-  assert.equal(resRateLimit.statusCode, 429);
 });
 
 test("adminManageSystemCategory & adminManageAnnouncement: ghi CRUD + admin_logs từ Server", async () => {
@@ -748,122 +525,256 @@ test("Giai đoạn 4A verifyAdminCallerWithDeps: từ chối 403 nếu tài kho�
   assert.equal(resOk.statusCode, 200);
 });
 
-test("Giai đoạn 4A adminResolveAiFeedback: ghi notification đúng schema content+status, giữ ẩn danh tuyệt đối cho anonymous & không lộ UID", async () => {
-  const SECRET_REPORTER_UID = "user_secret_reporter_999";
-  const SECRET_HASH = "hmac_hash_never_in_notif";
+test("cleanupUserData: dọn sạch mọi collection (gồm >500 docs chia batch, chat_sessions, support_tickets + messages, subcollections, OTP) và bảo toàn user khác", async () => {
+  const txInit = {
+    tx_other: { userId: "user_other", amount: 30000 },
+  };
+  // Tạo 650 giao dịch cho user_target để kiểm chứng chia batch (<= 400 writes/batch < giới hạn 500)
+  for (let i = 1; i <= 650; i += 1) {
+    txInit[`tx_target_${i}`] = { userId: "user_target", amount: 10000 };
+  }
+
   const db = new FakeFirestore({
     users: {
-      admin1: { email: "admin@app.vn", role: "admin", status: "active" },
+      user_target: { email: "target@example.com", name: "Target User", status: "active", role: "user" },
+      user_other: { email: "other@example.com", name: "Other User", status: "active", role: "user" },
     },
-    ai_feedback_reports: {
-      fb_pseudo: {
-        reportId: "fb_pseudo",
-        targetFeature: "ocr_suggestion",
-        rating: "negative",
-        feedbackMode: "pseudonymous",
-        reporterHash: SECRET_HASH,
-        status: "open",
-      },
-      fb_anon: {
-        reportId: "fb_anon",
-        targetFeature: "ai_chat",
-        rating: "negative",
-        feedbackMode: "anonymous",
-        status: "open",
-      },
-      fb_pseudo_ignored: {
-        reportId: "fb_pseudo_ignored",
-        targetFeature: "monthly_plan",
-        rating: "negative",
-        feedbackMode: "pseudonymous",
-        reporterHash: SECRET_HASH,
-        status: "open",
-      },
+    "users/user_target/chat_sessions": {
+      cs_sub_1: { title: "Hỏi AI riêng tư" },
     },
-    _feedback_notification_links: {
-      fb_pseudo: { reportId: "fb_pseudo", uid: SECRET_REPORTER_UID },
-      fb_pseudo_ignored: { reportId: "fb_pseudo_ignored", uid: SECRET_REPORTER_UID },
+    "users/user_target/quickTemplates": {
+      qt_1: { title: "Cà phê sáng" },
+    },
+    "users/user_other/chat_sessions": {
+      cs_other_sub: { title: "Chat user khác" },
+    },
+    wallets: {
+      w_target: { userId: "user_target", name: "Ví Tiền Mặt", balance: 500000 },
+      w_other: { userId: "user_other", name: "Ví Khác", balance: 100000 },
+    },
+    categories: {
+      cat_target: { userId: "user_target", name: "Ăn uống" },
+    },
+    transactions: txInit,
+    budgets: {
+      b_target: { userId: "user_target", limit: 2000000 },
+    },
+    savingGoals: {
+      sg_target: { userId: "user_target", targetAmount: 10000000 },
+    },
+    recurringTransactions: {
+      rec_target: { userId: "user_target", amount: 5000000 },
+    },
+    monthly_plans: {
+      mp_target: { userId: "user_target", targetMonth: "11/2026" },
+    },
+    chat_sessions: {
+      cs_top_target: { userId: "user_target", title: "Top-level legacy chat" },
+      cs_top_other: { userId: "user_other", title: "Top-level other chat" },
+    },
+    support_tickets: {
+      tk_target: { userId: "user_target", title: "Cần hỗ trợ" },
+      tk_other: { userId: "user_other", title: "Vé người khác" },
+    },
+    "support_tickets/tk_target/messages": {
+      m1: { body: "Tin nhắn 1" },
+      m2: { body: "Tin nhắn 2" },
+    },
+    "support_tickets/tk_other/messages": {
+      m_other: { body: "Tin nhắn người khác" },
+    },
+    _otp_verifications: {
+      "target@example.com": { otpHash: "abc", resendAvailableAt: 12345 },
+      "other@example.com": { otpHash: "xyz", resendAvailableAt: 67890 },
     },
   });
-  const auth = createFakeAuth({
-    verifiedTokens: { tok_a: { uid: "admin1", email: "admin@app.vn", admin: true } },
+
+  const result = await cleanupUserData({
+    db,
+    uid: "user_target",
+    email: "target@example.com",
+    deletedBy: "system",
   });
-  const handlers = createAdminEndpointHandlers({ db, auth, logger: { error() {}, warn() {} } });
 
-  // 1. Resolve pseudonymous feedback -> tạo đúng 1 notification với content + status: 'unread', xóa link, không lộ UID
-  const resPseudo = createMockRes();
-  await handlers.adminResolveAiFeedback(
-    {
-      method: "POST",
-      headers: { authorization: "Bearer tok_a" },
-      body: {
-        reportId: "fb_pseudo",
-        status: "resolved",
-        adminResolutionNote: "Đã cập nhật từ khóa hóa đơn.",
-        appliedAction: "ocr_dictionary_updated",
-      },
-    },
-    resPseudo
-  );
-  assert.equal(resPseudo.statusCode, 200);
-  assert.equal(resPseudo.body.notificationSent, true);
-  assert.equal(JSON.stringify(resPseudo.body).includes(SECRET_REPORTER_UID), false);
-  assert.equal(JSON.stringify(resPseudo.body).includes(SECRET_HASH), false);
+  assert.equal(result.userDocDeleted, true);
+  assert.equal(result.otpCleaned, true);
+  assert.equal(result.collectionsCleaned.wallets, 1);
+  assert.equal(result.collectionsCleaned.transactions, 650);
+  assert.equal(result.collectionsCleaned.budgets, 1);
+  assert.equal(result.collectionsCleaned.savingGoals, 1);
+  assert.equal(result.collectionsCleaned.chat_sessions, 1);
+  assert.equal(result.collectionsCleaned.support_tickets, 1);
+  assert.equal(result.supportMessagesCleaned, 2);
 
-  const notifs = Array.from(db._getCol("notifications").values());
-  assert.equal(notifs.length, 1);
-  assert.equal(notifs[0].userId, SECRET_REPORTER_UID);
-  assert.equal(typeof notifs[0].content, "string");
-  assert.ok(notifs[0].content.trim().length > 0);
-  assert.equal(notifs[0].status, "unread");
-  assert.equal(notifs[0].type, "ai_insight");
-  assert.equal(Object.prototype.hasOwnProperty.call(notifs[0], "body"), false);
-  assert.equal(Object.prototype.hasOwnProperty.call(notifs[0], "isRead"), false);
-  assert.equal(notifs[0].content.includes(SECRET_REPORTER_UID), false);
-  assert.equal(notifs[0].content.includes(SECRET_HASH), false);
-  assert.equal(
-    (await db.collection("_feedback_notification_links").doc("fb_pseudo").get()).exists,
-    false
-  );
+  // Mọi batch đều <= 400 writes (an toàn dưới trần 500 của Firestore)
+  assert.ok(db.batchCommitSizes.length >= 2);
+  assert.ok(db.batchCommitSizes.every((size) => size > 0 && size <= 400));
 
-  // 2. Resolve anonymous feedback -> không có link, không tạo thêm notification nào
-  const resAnon = createMockRes();
-  await handlers.adminResolveAiFeedback(
-    {
-      method: "POST",
-      headers: { authorization: "Bearer tok_a" },
-      body: {
-        reportId: "fb_anon",
-        status: "resolved",
-        adminResolutionNote: "Đã điều chỉnh prompt hệ thống.",
-      },
-    },
-    resAnon
-  );
-  assert.equal(resAnon.statusCode, 200);
-  assert.equal(resAnon.body.notificationSent, false);
-  assert.equal(db._getCol("notifications").size, 1);
+  // Kiểm tra target user + subcollections + support_tickets/messages đã bị xóa sạch
+  assert.equal((await db.collection("users").doc("user_target").get()).exists, false);
+  assert.equal(db._getCol("users/user_target/chat_sessions").size, 0);
+  assert.equal(db._getCol("users/user_target/quickTemplates").size, 0);
+  assert.equal((await db.collection("wallets").doc("w_target").get()).exists, false);
+  assert.equal(db._getCol("transactions").size, 1); // Chỉ còn tx_other
+  assert.equal((await db.collection("chat_sessions").doc("cs_top_target").get()).exists, false);
+  assert.equal((await db.collection("support_tickets").doc("tk_target").get()).exists, false);
+  assert.equal(db._getCol("support_tickets/tk_target/messages").size, 0);
+  assert.equal((await db.collection("_otp_verifications").doc("target@example.com").get()).exists, false);
 
-  // 3. Ignored pseudonymous feedback -> không gửi notification
-  const resIgnored = createMockRes();
-  await handlers.adminResolveAiFeedback(
-    {
-      method: "POST",
-      headers: { authorization: "Bearer tok_a" },
-      body: {
-        reportId: "fb_pseudo_ignored",
-        status: "ignored",
-        adminResolutionNote: "Không đủ ngữ cảnh.",
-      },
-    },
-    resIgnored
-  );
-  assert.equal(resIgnored.statusCode, 200);
-  assert.equal(resIgnored.body.notificationSent, false);
-  assert.equal(db._getCol("notifications").size, 1);
+  // Kiểm tra dữ liệu của user_other hoàn toàn được bảo toàn
+  assert.equal((await db.collection("users").doc("user_other").get()).exists, true);
+  assert.equal(db._getCol("users/user_other/chat_sessions").size, 1);
+  assert.equal((await db.collection("wallets").doc("w_other").get()).exists, true);
+  assert.equal((await db.collection("transactions").doc("tx_other").get()).exists, true);
+  assert.equal((await db.collection("chat_sessions").doc("cs_top_other").get()).exists, true);
+  assert.equal((await db.collection("support_tickets").doc("tk_other").get()).exists, true);
+  assert.equal(db._getCol("support_tickets/tk_other/messages").size, 1);
+  assert.equal((await db.collection("_otp_verifications").doc("other@example.com").get()).exists, true);
 
-  // 4. Nhật ký admin_logs không chứa UID hay reporterHash của người gửi feedback
-  const logsJson = JSON.stringify(Array.from(db._getCol("admin_logs").values()));
-  assert.equal(logsJson.includes(SECRET_REPORTER_UID), false);
-  assert.equal(logsJson.includes(SECRET_HASH), false);
+  // Kiểm tra nhật ký kiểm toán không rò rỉ thống kê tài chính cá nhân
+  const adminLogs = Array.from(db._getCol("admin_logs").values());
+  const cleanupLog = adminLogs.find((l) => l.action === "CLEANUP_DELETED_AUTH_USER");
+  assert.ok(cleanupLog, "Phải ghi nhật ký CLEANUP_DELETED_AUTH_USER");
+  assert.equal(cleanupLog.targetId, "user_target");
+  assert.equal(cleanupLog.result, "success");
+  assert.equal(cleanupLog.details.includes("wallets"), false);
+  assert.equal(cleanupLog.details.includes("transactions"), false);
 });
+
+test("adminDeleteUser + handleAuthUserDeleteTrigger: chống tự xóa, không chạy lặp/trùng log và giữ nguyên Zero-Knowledge Privacy", async () => {
+  const db = new FakeFirestore({
+    users: {
+      admin_uid: { email: "admin@finance.app", role: "admin", status: "active" },
+      user_uid: { email: "victim@finance.app", role: "user", status: "active" },
+    },
+    wallets: {
+      w_victim: { userId: "user_uid", balance: 250000 },
+    },
+    support_tickets: {
+      tk_victim: { userId: "user_uid", title: "Hỗ trợ" },
+    },
+    "support_tickets/tk_victim/messages": {
+      msg_1: { body: "Xin chào" },
+    },
+  });
+
+  const auth = createFakeAuth({
+    verifiedTokens: {
+      tok_admin: { uid: "admin_uid", email: "admin@finance.app", admin: true },
+      tok_user: { uid: "user_uid", email: "victim@finance.app" },
+    },
+    users: {
+      admin_uid: { uid: "admin_uid", email: "admin@finance.app", customClaims: { admin: true } },
+      user_uid: { uid: "user_uid", email: "victim@finance.app" },
+    },
+  });
+
+  const fixedNow = Date.UTC(2026, 10, 21, 10, 0, 0);
+  const handlers = createAdminEndpointHandlers({
+    db,
+    auth,
+    nowProvider: () => fixedNow,
+    logger: { error() {}, warn() {}, info() {} },
+  });
+
+  // 1. Từ chối method khác POST
+  const resGet = createMockRes();
+  await handlers.adminDeleteUser({ method: "GET" }, resGet);
+  assert.equal(resGet.statusCode, 405);
+
+  // 2. Từ chối caller không có token admin
+  const resNoAuth = createMockRes();
+  await handlers.adminDeleteUser(
+    { method: "POST", headers: { authorization: "Bearer tok_user" }, body: { targetUid: "user_uid" } },
+    resNoAuth
+  );
+  assert.equal(resNoAuth.statusCode, 403);
+
+  // 3. Từ chối Admin tự xóa chính mình
+  const resSelf = createMockRes();
+  await handlers.adminDeleteUser(
+    { method: "POST", headers: { authorization: "Bearer tok_admin" }, body: { targetUid: "admin_uid" } },
+    resSelf
+  );
+  assert.equal(resSelf.statusCode, 400);
+  assert.match(resSelf.body.error, /không thể tự xóa/i);
+
+  // 4. Xóa thành công tài khoản người dùng
+  const resOk = createMockRes();
+  await handlers.adminDeleteUser(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_admin" },
+      body: { targetUid: "user_uid", reason: "Vi phạm điều khoản dịch vụ" },
+    },
+    resOk
+  );
+  assert.equal(resOk.statusCode, 200);
+  assert.equal(resOk.body.success, true);
+  assert.equal(resOk.body.authDeleted, true);
+  assert.equal(resOk.body.dataCleaned, true);
+
+  // Zero-Knowledge Privacy: response KHÔNG được trả cleanupResult hay bất kỳ số liệu tài chính nào
+  assert.equal(Object.prototype.hasOwnProperty.call(resOk.body, "cleanupResult"), false);
+  assert.equal(JSON.stringify(resOk.body).includes("wallets"), false);
+  assert.equal(JSON.stringify(resOk.body).includes("250000"), false);
+
+  // Kiểm tra tài khoản đã bị xóa khỏi Firebase Auth + Firestore + support_tickets/messages
+  assert.equal(auth._getStoredUser("user_uid"), undefined);
+  assert.equal((await db.collection("users").doc("user_uid").get()).exists, false);
+  assert.equal((await db.collection("wallets").doc("w_victim").get()).exists, false);
+  assert.equal((await db.collection("support_tickets").doc("tk_victim").get()).exists, false);
+  assert.equal(db._getCol("support_tickets/tk_victim/messages").size, 0);
+
+  // 5. Khi Auth onDelete trigger bắn ngay sau đó -> nhận diện marker và bỏ qua (KHÔNG ghi log trùng)
+  const triggerRes = await handleAuthUserDeleteTrigger({
+    db,
+    user: { uid: "user_uid", email: "victim@finance.app" },
+    nowProvider: () => fixedNow + 5000,
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  assert.equal(triggerRes.skipped, true);
+  assert.equal(triggerRes.reason, "handled_by_adminDeleteUser");
+  assert.equal((await db.collection("_user_deletion_markers").doc("user_uid").get()).exists, false);
+
+  // Chỉ có duy nhất 1 bản ghi ADMIN_DELETE_USER trong admin_logs (không bị trùng CLEANUP_DELETED_AUTH_USER)
+  const adminLogs = Array.from(db._getCol("admin_logs").values());
+  assert.equal(adminLogs.length, 1);
+  assert.equal(adminLogs[0].action, "ADMIN_DELETE_USER");
+  assert.equal(adminLogs[0].adminId, "admin_uid");
+  assert.equal(adminLogs[0].targetId, "user_uid");
+  assert.match(adminLogs[0].details, /Vi phạm điều khoản dịch vụ/);
+});
+
+test("handleAuthUserDeleteTrigger: khi user bị xóa độc lập (Console / tự xóa), vẫn dọn sạch dữ liệu & ghi 1 log hệ thống", async () => {
+  const db = new FakeFirestore({
+    users: {
+      self_del_uid: { email: "self@finance.app", role: "user", status: "active" },
+    },
+    wallets: {
+      w1: { userId: "self_del_uid", balance: 100000 },
+    },
+    support_tickets: {
+      tk1: { userId: "self_del_uid", title: "Câu hỏi" },
+    },
+    "support_tickets/tk1/messages": {
+      m1: { body: "Nội dung" },
+    },
+  });
+
+  const res = await handleAuthUserDeleteTrigger({
+    db,
+    user: { uid: "self_del_uid", email: "self@finance.app" },
+    logger: { info() {}, warn() {}, error() {} },
+  });
+  assert.equal(Boolean(res.skipped), false);
+  assert.equal(res.userDocDeleted, true);
+  assert.equal((await db.collection("wallets").doc("w1").get()).exists, false);
+  assert.equal((await db.collection("support_tickets").doc("tk1").get()).exists, false);
+  assert.equal(db._getCol("support_tickets/tk1/messages").size, 0);
+
+  const logs = Array.from(db._getCol("admin_logs").values());
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].action, "CLEANUP_DELETED_AUTH_USER");
+});
+

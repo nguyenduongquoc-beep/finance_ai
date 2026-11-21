@@ -3,6 +3,9 @@
 // Firestore collection: monthly_plans/{planId}
 // ============================================================
 
+import 'package:flutter/widgets.dart';
+import '../l10n/app_localizations.dart';
+
 /// 5 cấp độ đủ dữ liệu (Data Sufficiency Tiers)
 enum DataSufficiencyTier {
   /// Tier 0: Chưa có bất kỳ dữ liệu tài chính hữu ích nào (transactions, budgets, wallets, savingGoals, monthly_plans)
@@ -69,20 +72,25 @@ class DataSufficiencyAssessment {
   bool get canAnalyzeMultiMonthTrend =>
       tier == DataSufficiencyTier.multiMonthTrend;
 
-  String get tierLabel {
+  String get tierLocalizationKey {
     switch (tier) {
       case DataSufficiencyTier.empty:
-        return 'Chưa có dữ liệu';
+        return 'ai_ins_tier_empty';
       case DataSufficiencyTier.preliminary:
-        return 'Dữ liệu sơ bộ đầu kỳ';
+        return 'ai_ins_tier_preliminary';
       case DataSufficiencyTier.currentMonthAnalysis:
-        return 'Phân tích trong tháng';
+        return 'ai_ins_tier_current_month';
       case DataSufficiencyTier.monthOverMonthComparison:
-        return 'So sánh liên tháng (MoM)';
+        return 'ai_ins_tier_mom';
       case DataSufficiencyTier.multiMonthTrend:
-        return 'Phân tích xu hướng đa tháng';
+        return 'ai_ins_tier_multi_month';
     }
   }
+
+  String get tierLabel => AppLocalizations.tr(tierLocalizationKey);
+
+  String tierLabelWithContext(BuildContext context) =>
+      context.tr(tierLocalizationKey);
 }
 
 /// Chế độ xác định thu nhập tham chiếu
@@ -136,6 +144,28 @@ enum PlanLifecycleStatus {
   active,
   completed,
   superseded,
+}
+
+extension PlanLifecycleStatusLocalization on PlanLifecycleStatus {
+  String get localizationKey {
+    switch (this) {
+      case PlanLifecycleStatus.draft:
+        return 'ai_ins_plan_status_draft';
+      case PlanLifecycleStatus.approved:
+        return 'ai_ins_plan_status_approved';
+      case PlanLifecycleStatus.active:
+        return 'ai_ins_plan_status_active';
+      case PlanLifecycleStatus.completed:
+        return 'ai_ins_plan_status_completed';
+      case PlanLifecycleStatus.superseded:
+        return 'ai_ins_plan_status_superseded';
+    }
+  }
+
+  String get localizedLabel => AppLocalizations.tr(localizationKey);
+
+  String localizedLabelWithContext(BuildContext context) =>
+      context.tr(localizationKey);
 }
 
 /// Hạng mục phân bổ ngân sách cho từng danh mục trong kế hoạch tháng
@@ -281,6 +311,25 @@ class PlanSnapshotData {
       'capturedAt': capturedAt.toIso8601String(),
     };
   }
+
+  PlanSnapshotData copyWith({
+    double? referenceIncome,
+    double? essentialExpenseTotal,
+    double? flexibleExpenseTotal,
+    double? targetSavingAmount,
+    List<PlannedCategoryAllocation>? allocations,
+    DateTime? capturedAt,
+  }) {
+    return PlanSnapshotData(
+      referenceIncome: referenceIncome ?? this.referenceIncome,
+      essentialExpenseTotal:
+          essentialExpenseTotal ?? this.essentialExpenseTotal,
+      flexibleExpenseTotal: flexibleExpenseTotal ?? this.flexibleExpenseTotal,
+      targetSavingAmount: targetSavingAmount ?? this.targetSavingAmount,
+      allocations: allocations ?? this.allocations,
+      capturedAt: capturedAt ?? this.capturedAt,
+    );
+  }
 }
 
 /// Lịch sử mỗi lần điều chỉnh kế hoạch giữa tháng (Rebalance Audit Log)
@@ -343,6 +392,7 @@ class MonthlyFinancialPlan {
   final int? recommendedGoalMonths;
   final bool isEssentialDeficit; // true khi bản thân chi phí thiết yếu đã >= thu nhập tham chiếu
   final List<PlannedCategoryAllocation> currentAllocations;
+  final List<String> selectedCategoryIds;
   final PlanSnapshotData originalSnapshot;
   final List<PlanAdjustmentLog> adjustmentHistory;
   final String aiExecutiveSummary;
@@ -369,6 +419,7 @@ class MonthlyFinancialPlan {
     this.recommendedGoalMonths,
     this.isEssentialDeficit = false,
     required this.currentAllocations,
+    this.selectedCategoryIds = const [],
     required this.originalSnapshot,
     this.adjustmentHistory = const [],
     required this.aiExecutiveSummary,
@@ -435,6 +486,10 @@ class MonthlyFinancialPlan {
           : null,
       isEssentialDeficit: map['isEssentialDeficit'] == true,
       currentAllocations: parsedAllocations,
+      selectedCategoryIds:
+          ((map['selectedCategoryIds'] as List<dynamic>?) ?? const [])
+              .map((e) => e.toString())
+              .toList(),
       originalSnapshot: origSnapshot,
       adjustmentHistory: parsedAdjustments,
       aiExecutiveSummary: (map['aiExecutiveSummary'] ?? '').toString(),
@@ -466,6 +521,7 @@ class MonthlyFinancialPlan {
       'recommendedGoalMonths': recommendedGoalMonths,
       'isEssentialDeficit': isEssentialDeficit,
       'currentAllocations': currentAllocations.map((e) => e.toMap()).toList(),
+      'selectedCategoryIds': selectedCategoryIds,
       'originalSnapshot': originalSnapshot.toMap(),
       'adjustmentHistory': adjustmentHistory.map((e) => e.toMap()).toList(),
       'aiExecutiveSummary': aiExecutiveSummary,
@@ -494,6 +550,7 @@ class MonthlyFinancialPlan {
     int? recommendedGoalMonths,
     bool? isEssentialDeficit,
     List<PlannedCategoryAllocation>? currentAllocations,
+    List<String>? selectedCategoryIds,
     PlanSnapshotData? originalSnapshot,
     List<PlanAdjustmentLog>? adjustmentHistory,
     String? aiExecutiveSummary,
@@ -522,6 +579,7 @@ class MonthlyFinancialPlan {
           recommendedGoalMonths ?? this.recommendedGoalMonths,
       isEssentialDeficit: isEssentialDeficit ?? this.isEssentialDeficit,
       currentAllocations: currentAllocations ?? this.currentAllocations,
+      selectedCategoryIds: selectedCategoryIds ?? this.selectedCategoryIds,
       originalSnapshot: originalSnapshot ?? this.originalSnapshot,
       adjustmentHistory: adjustmentHistory ?? this.adjustmentHistory,
       aiExecutiveSummary: aiExecutiveSummary ?? this.aiExecutiveSummary,
@@ -542,7 +600,7 @@ class CategoryAdherenceStatus {
   final double actualSpent;
   final double remainingAmount;
   final double usageRatio; // actualSpent / plannedLimit
-  final String status; // 'on_track' | 'pacing_fast' | 'exceeded'
+  final String status; // 'on_track' | 'pacing_fast' | 'exceeded' | 'upcoming'
 
   const CategoryAdherenceStatus({
     required this.categoryId,
@@ -558,12 +616,16 @@ class CategoryAdherenceStatus {
   bool get isExceeded => status == 'exceeded';
   bool get isPacingFast => status == 'pacing_fast';
   bool get isOnTrack => status == 'on_track';
+  bool get isUpcoming => status == 'upcoming';
 }
 
 /// Kết quả theo dõi thực thi kép (Ngân sách + Tiết kiệm không tính trùng)
 class PlanExecutionTrackerResult {
   final String targetMonth;
   final double elapsedMonthRatio;
+
+  /// `true` khi tháng áp dụng kế hoạch nằm trong tương lai (chưa bắt đầu thực thi)
+  final bool isUpcoming;
 
   // 1. Chiều Ngân sách
   final double plannedTotalExpense;
@@ -589,9 +651,12 @@ class PlanExecutionTrackerResult {
   final bool needsRebalance;
   final double totalOverrunAmount;
 
+  String get activationDateLabel => '01/$targetMonth';
+
   const PlanExecutionTrackerResult({
     required this.targetMonth,
     required this.elapsedMonthRatio,
+    this.isUpcoming = false,
     required this.plannedTotalExpense,
     required this.actualTotalExpense,
     required this.budgetUsageRatio,

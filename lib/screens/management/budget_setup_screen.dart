@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../../l10n/app_localizations.dart';
 import '../../models/budget_model.dart';
 import '../../models/category_model.dart';
 import '../../services/firestore_service.dart';
+import '../../utils/category_localization_helper.dart';
 import '../../utils/constants.dart';
 import '../../utils/formatters.dart';
 import '../../utils/category_icons.dart';
@@ -14,6 +16,7 @@ class _BudgetItemDraft {
   final String? budgetId; // null nếu là item mới chưa tạo trên Firestore
   final String categoryId;
   final String categoryName;
+  final double initialLimit;
   final TextEditingController controller;
 
   _BudgetItemDraft({
@@ -21,7 +24,8 @@ class _BudgetItemDraft {
     required this.categoryId,
     required this.categoryName,
     required double limit,
-  }) : controller = TextEditingController(
+  })  : initialLimit = limit,
+        controller = TextEditingController(
           text: limit > 0 ? AppFormatters.number(limit) : '',
         );
 }
@@ -90,7 +94,7 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
         _drafts.add(_BudgetItemDraft(
           budgetId: b.budgetId,
           categoryId: b.categoryId,
-          categoryName: cat?.name ?? 'Danh mục (Đã bị xóa)',
+          categoryName: cat?.name ?? AppLocalizations.tr('bud_set_deleted_cat'),
           limit: b.limit,
         ));
       }
@@ -114,26 +118,29 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
       builder: (ctx) => StatefulBuilder(
         builder: (context, setDlgState) {
           return AlertDialog(
-            title: const Text('Chọn tháng/năm'),
-            content: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+            title: Text(context.tr('bud_mgmt_pick_month_title')),
+            content: Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 16,
+              runSpacing: 8,
               children: [
                 DropdownButton<int>(
                   value: selectedM,
                   items: List.generate(12, (i) => i + 1)
-                      .map((m) =>
-                          DropdownMenuItem(value: m, child: Text('Tháng $m')))
+                      .map((m) => DropdownMenuItem(
+                          value: m, child: Text(context.tr('common_month_$m'))))
                       .toList(),
                   onChanged: (v) {
                     if (v != null) setDlgState(() => selectedM = v);
                   },
                 ),
-                const SizedBox(width: 20),
                 DropdownButton<int>(
                   value: selectedY,
                   items: years
-                      .map((y) =>
-                          DropdownMenuItem(value: y, child: Text('Năm $y')))
+                      .map((y) => DropdownMenuItem(
+                          value: y,
+                          child: Text(context.tr('bud_mgmt_year_item',
+                              params: {'year': '$y'}))))
                       .toList(),
                   onChanged: (v) {
                     if (v != null) setDlgState(() => selectedY = v);
@@ -144,7 +151,7 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(ctx),
-                child: const Text('Hủy'),
+                child: Text(context.tr('common_cancel')),
               ),
               TextButton(
                 onPressed: () {
@@ -154,8 +161,8 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
                   });
                   _loadData();
                 },
-                child: const Text('Chọn',
-                    style: TextStyle(fontWeight: FontWeight.w600)),
+                child: Text(context.tr('bud_mgmt_select_btn'),
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
               ),
             ],
           );
@@ -172,7 +179,7 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
 
     if (availableCategories.isEmpty) {
       AppSnackbar.show(
-          context, 'Tất cả danh mục chi tiêu đã được thêm ngân sách.',
+          context, context.tr('bud_set_all_added'),
           isError: true);
       return;
     }
@@ -206,7 +213,7 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
               child: Align(
                 alignment: Alignment.centerLeft,
                 child: Text(
-                  'Chọn danh mục chi tiêu',
+                  ctx.tr('bud_set_choose_cat'),
                   style: TextStyle(
                     fontSize: 18,
                     fontWeight: FontWeight.w700,
@@ -237,7 +244,8 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
                           color: color, size: 21),
                     ),
                     title: Text(
-                      c.name,
+                      CategoryLocalizationHelper.localizeNameWithContext(
+                          ctx, c.name),
                       style: TextStyle(
                         fontWeight: FontWeight.w600,
                         color: context.appTextPrimary,
@@ -277,7 +285,9 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
       if (prevBudgets.isEmpty) {
         if (mounted) {
           AppSnackbar.show(
-              context, 'Tháng trước ($prevMonthKey) chưa có ngân sách nào.',
+              context,
+              context.tr('bud_set_prev_empty',
+                  params: {'month': prevMonthKey}),
               isError: true);
         }
         return;
@@ -293,7 +303,8 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
               .firstOrNull;
           _drafts.add(_BudgetItemDraft(
             categoryId: pb.categoryId,
-            categoryName: cat?.name ?? 'Danh mục',
+            categoryName:
+                cat?.name ?? AppLocalizations.tr('budget_card_default_category'),
             limit: pb.limit,
           ));
           addedCount++;
@@ -303,11 +314,14 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
       if (mounted) {
         if (addedCount > 0) {
           setState(() {});
-          AppSnackbar.show(context,
-              'Đã sao chép $addedCount danh mục từ tháng $prevMonthKey.');
+          AppSnackbar.show(
+              context,
+              context.tr('bud_set_copied_count', params: {
+                'count': '$addedCount',
+                'month': prevMonthKey,
+              }));
         } else {
-          AppSnackbar.show(context,
-              'Tất cả danh mục từ tháng trước đã có trong danh sách hiện tại.');
+          AppSnackbar.show(context, context.tr('bud_set_copied_none'));
         }
       }
     } catch (e) {
@@ -323,7 +337,7 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
     if (_drafts.isEmpty && _deletedBudgetIds.isEmpty) {
       AppSnackbar.show(
         context,
-        'Chưa có hạn mức nào để lưu. Hãy thêm danh mục và nhập hạn mức trước.',
+        context.tr('bud_set_empty_save_err'),
         isError: true,
       );
       return;
@@ -334,7 +348,8 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
       if (limit <= 0) {
         AppSnackbar.show(
           context,
-          'Vui lòng nhập hạn mức lớn hơn 0 cho "${draft.categoryName}".',
+          context.tr('bud_set_invalid_limit',
+              params: {'name': draft.categoryName}),
           isError: true,
         );
         return;
@@ -354,8 +369,15 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
       for (final draft in _drafts) {
         final limit = AppFormatters.parseCurrencyInput(draft.controller.text);
         if (draft.budgetId != null) {
-          futures.add(_firestoreService
-              .updateBudget(draft.budgetId!, {'limit': limit}));
+          final bool limitChanged = (limit - draft.initialLimit).abs() >= 1.0;
+          if (limitChanged) {
+            futures.add(_firestoreService.updateBudget(draft.budgetId!, {
+              'limit': limit,
+              'isManual': true,
+              'sourcePlanId': null,
+              'prePlanLimit': null,
+            }));
+          }
         } else {
           futures.add(_firestoreService.createBudget(Budget(
             budgetId: '',
@@ -363,6 +385,7 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
             categoryId: draft.categoryId,
             limit: limit,
             month: monthKey,
+            isManual: true,
           )));
         }
       }
@@ -370,13 +393,13 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
       await Future.wait(futures);
 
       if (mounted) {
-        AppSnackbar.show(context, 'Lưu thiết lập ngân sách thành công!');
+        AppSnackbar.show(context, context.tr('bud_set_save_success'));
         Navigator.pop(context, true);
       }
     } catch (e) {
       debugPrint('❌ Lỗi khi lưu ngân sách: $e');
       if (mounted) {
-        AppSnackbar.show(context, 'Không thể lưu ngân sách. Vui lòng thử lại.',
+        AppSnackbar.show(context, context.tr('bud_set_save_error'),
             isError: true);
       }
     } finally {
@@ -405,7 +428,7 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
             ),
             const SizedBox(height: 18),
             Text(
-              'Chưa có hạn mức nào',
+              context.tr('bud_set_empty_title'),
               textAlign: TextAlign.center,
               style: TextStyle(
                 fontSize: 18,
@@ -415,7 +438,7 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
             ),
             const SizedBox(height: 8),
             Text(
-              'Thêm danh mục chi tiêu rồi đặt hạn mức cho tháng này, hoặc sao chép nhanh từ tháng trước.',
+              context.tr('bud_set_empty_desc'),
               textAlign: TextAlign.center,
               style: TextStyle(
                   fontSize: 13, height: 1.45, color: context.appTextSecondary),
@@ -424,7 +447,7 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
             OutlinedButton.icon(
               onPressed: _isSaving ? null : _copyPreviousMonthBudgets,
               icon: const Icon(Icons.copy_rounded, size: 18),
-              label: const Text('Sao chép từ tháng trước'),
+              label: Text(context.tr('bud_set_copy_prev_btn')),
               style: OutlinedButton.styleFrom(
                 foregroundColor: AppColors.primary,
                 side: BorderSide(color: context.appBorder),
@@ -474,7 +497,10 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
               const SizedBox(width: 12),
               Expanded(
                 child: Text(
-                  draft.categoryName,
+                  cat != null
+                      ? CategoryLocalizationHelper.localizeNameWithContext(
+                          context, cat.name)
+                      : context.tr('bud_set_deleted_cat'),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
@@ -487,7 +513,7 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
                 ),
               ),
               IconButton(
-                tooltip: 'Xóa hạn mức',
+                tooltip: context.tr('bud_set_delete_tooltip'),
                 icon: const Icon(Icons.delete_outline_rounded,
                     color: AppColors.expense),
                 onPressed: () {
@@ -510,6 +536,7 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
             child: TextField(
               controller: draft.controller,
               keyboardType: TextInputType.number,
+              inputFormatters: const [CurrencyInputFormatter()],
               onChanged: (_) => setState(() {}),
               style: TextStyle(
                 fontSize: 17,
@@ -517,9 +544,9 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
                 color: context.appTextPrimary,
               ),
               decoration: InputDecoration(
-                hintText: 'Nhập hạn mức',
-                labelText: 'Hạn mức tháng',
-                suffixText: 'VNĐ',
+                hintText: context.tr('bud_set_limit_hint'),
+                labelText: context.tr('bud_set_limit_label'),
+                suffixText: context.tr('common_vnd_label'),
                 isDense: true,
                 contentPadding:
                     const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -547,12 +574,12 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surface,
       appBar: AppBar(
-        title: const Text('Thiết lập ngân sách'),
+        title: Text(context.tr('bud_mgmt_setup_btn')),
         elevation: 0,
         actions: [
           IconButton(
             icon: const Icon(Icons.copy_rounded),
-            tooltip: 'Sao chép tháng trước',
+            tooltip: context.tr('bud_set_copy_prev_tooltip'),
             onPressed: _isSaving ? null : _copyPreviousMonthBudgets,
           ),
         ],
@@ -575,23 +602,37 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
                     child: Row(
                       mainAxisAlignment: MainAxisAlignment.spaceBetween,
                       children: [
-                        Text(
-                          '${_drafts.length} danh mục',
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                            color: context.appTextPrimary,
-                          ),
-                        ),
-                        Flexible(
+                        Expanded(
                           child: Text(
-                            'Tổng hạn mức: ${AppFormatters.compactCurrency(totalLimit, unit: '₫')}',
+                            context.tr('bud_set_cat_count',
+                                params: {'count': '${_drafts.length}'}),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 13,
+                            style: TextStyle(
+                              fontSize: 14,
                               fontWeight: FontWeight.w600,
-                              color: AppColors.primary,
+                              color: context.appTextPrimary,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        ConstrainedBox(
+                          constraints: const BoxConstraints(maxWidth: 165),
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            alignment: Alignment.centerRight,
+                            child: Text(
+                              context.tr('bud_set_total_limit', params: {
+                                'amount': AppFormatters.compactCurrency(
+                                    totalLimit,
+                                    unit: '₫')
+                              }),
+                              maxLines: 1,
+                              style: const TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: AppColors.primary,
+                              ),
                             ),
                           ),
                         ),
@@ -639,12 +680,12 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
                             onPressed: _addCategoryDialog,
                             icon: const Icon(Icons.add,
                                 size: 20, color: AppColors.primary),
-                            label: const FittedBox(
+                            label: FittedBox(
                               fit: BoxFit.scaleDown,
                               child: Text(
-                                'Thêm danh mục',
+                                context.tr('bud_set_add_cat_btn'),
                                 maxLines: 1,
-                                style: TextStyle(
+                                style: const TextStyle(
                                     color: AppColors.primary,
                                     fontWeight: FontWeight.w600),
                               ),
@@ -654,7 +695,7 @@ class _BudgetSetupScreenState extends State<BudgetSetupScreen> {
                         const SizedBox(width: 12),
                         Expanded(
                           child: AppButton(
-                            text: 'Lưu',
+                            text: context.tr('common_save'),
                             isLoading: _isSaving,
                             onPressed: _saveBudgets,
                           ),

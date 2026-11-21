@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import '../utils/constants.dart';
-import 'app_button.dart';
 
 class AppEmptyState extends StatelessWidget {
   final String title;
@@ -8,6 +7,7 @@ class AppEmptyState extends StatelessWidget {
   final IconData icon;
   final String? actionText;
   final VoidCallback? onAction;
+  final IconData? actionIcon;
 
   const AppEmptyState({
     super.key,
@@ -16,6 +16,7 @@ class AppEmptyState extends StatelessWidget {
     this.icon = Icons.inbox_outlined,
     this.actionText,
     this.onAction,
+    this.actionIcon,
   });
 
   @override
@@ -63,12 +64,30 @@ class AppEmptyState extends StatelessWidget {
             ),
             if (actionText != null && onAction != null) ...[
               const SizedBox(height: 20),
-              SizedBox(
-                width: 180,
-                child: AppButton(
-                  text: actionText!,
-                  onPressed: onAction,
-                  height: 42,
+              ElevatedButton.icon(
+                onPressed: onAction,
+                icon: Icon(actionIcon ?? Icons.add_rounded, size: 20),
+                label: Text(
+                  actionText!,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.2,
+                  ),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.primary,
+                  foregroundColor: Colors.white,
+                  elevation: 2,
+                  shadowColor: AppColors.primary.withValues(alpha: 0.3),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 12,
+                  ),
+                  minimumSize: const Size(160, 46),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
                 ),
               ),
             ],

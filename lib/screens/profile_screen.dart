@@ -1,13 +1,17 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 import '../models/user_model.dart';
+import '../models/support_ticket_model.dart';
 import '../models/transaction_model.dart';
 import '../services/auth_service.dart';
 import '../services/firestore_service.dart';
-import '../services/theme_controller.dart';
+import '../services/language_controller.dart';
+import '../services/support_service.dart';
+import '../l10n/app_localizations.dart';
 import '../utils/constants.dart';
 import '../utils/formatters.dart';
 import 'auth/login_screen.dart';
@@ -23,6 +27,7 @@ import 'notification_screen.dart';
 import 'personal_info_screen.dart';
 import 'account_security_screen.dart';
 import 'about_app_screen.dart';
+import 'support/support_center_screen.dart';
 import '../widgets/stream_error_widget.dart';
 import '../widgets/app_snackbar.dart';
 
@@ -38,6 +43,15 @@ class ProfileScreen extends StatefulWidget {
 class _ProfileScreenState extends State<ProfileScreen> {
   final _firestoreService = FirestoreService();
   final _authService = AuthService();
+  final _supportService = SupportService();
+  late final Stream<List<SupportTicket>> _unreadSupportTicketsStream;
+
+  @override
+  void initState() {
+    super.initState();
+    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    _unreadSupportTicketsStream = _supportService.streamUnreadUserTickets(uid);
+  }
 
   ImageProvider? _avatarImage(String? path) {
     if (path != null && path.isNotEmpty) {
@@ -51,113 +65,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
     return null;
   }
 
-  /// Quy trình đăng xuất an toàn: Redesign hộp thoại xác nhận, xử lý loading,
+  /// Quy trình đăng xuất an toàn: Hộp thoại xác nhận hiện đại, đóng khi chạm ra ngoài (tương đương Hủy),
   /// ngăn double submit, làm sạch ngăn xếp điều hướng và bảo toàn dữ liệu Firebase.
   Future<void> _handleLogout() async {
-    final shouldLogout = await showDialog<bool>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) {
-        bool isLoggingOut = false;
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              backgroundColor: context.appCard,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-                side: BorderSide(color: context.appBorder),
-              ),
-              titlePadding: const EdgeInsets.fromLTRB(20, 20, 20, 0),
-              contentPadding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
-              actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-              title: Row(
-                children: [
-                  Container(
-                    width: 36,
-                    height: 36,
-                    decoration: BoxDecoration(
-                      color: AppColors.expense.withAlpha(25),
-                      shape: BoxShape.circle,
-                    ),
-                    child: const Icon(
-                      Icons.logout_rounded,
-                      color: AppColors.expense,
-                      size: 20,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Text(
-                    'Đăng xuất?',
-                    style: TextStyle(
-                      fontSize: 17,
-                      fontWeight: FontWeight.w700,
-                      color: context.appTextPrimary,
-                    ),
-                  ),
-                ],
-              ),
-              content: Text(
-                'Bạn sẽ cần đăng nhập lại để tiếp tục sử dụng ứng dụng. '
-                'Toàn bộ dữ liệu tài chính của bạn vẫn được lưu trữ an toàn trên đám mây.',
-                style: TextStyle(
-                  fontSize: 13,
-                  height: 1.45,
-                  color: context.appTextSecondary,
-                ),
-              ),
-              actions: [
-                TextButton(
-                  onPressed:
-                      isLoggingOut ? null : () => Navigator.pop(ctx, false),
-                  child: Text(
-                    'Hủy',
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: context.appTextSecondary,
-                    ),
-                  ),
-                ),
-                ElevatedButton(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.expense,
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 10),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                  ),
-                  onPressed: isLoggingOut
-                      ? null
-                      : () async {
-                          setDialogState(() => isLoggingOut = true);
-                          Navigator.pop(ctx, true);
-                        },
-                  child: isLoggingOut
-                      ? const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor:
-                                AlwaysStoppedAnimation<Color>(Colors.white),
-                          ),
-                        )
-                      : const Text(
-                          'Đăng xuất',
-                          style: TextStyle(
-                            fontSize: 14,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
-                ),
-              ],
-            );
-          },
-        );
-      },
+    final email = _authService.currentUser?.email;
+    final shouldLogout = await showLogoutConfirmationDialog(
+      context,
+      userEmail: email,
     );
 
     if (shouldLogout == true && mounted) {
@@ -177,12 +91,207 @@ class _ProfileScreenState extends State<ProfileScreen> {
         if (mounted) {
           AppSnackbar.show(
             context,
-            'Đăng xuất không thành công, vui lòng thử lại',
+            context.tr('profile_logout_failed'),
             isError: true,
           );
         }
       }
     }
+  }
+
+  /// Hộp thoại chọn ngôn ngữ hiển thị (Tiếng Việt & English)
+  void _showLanguagePicker(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: context.appCard,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(22)),
+      ),
+      builder: (sheetContext) {
+        final currentCode = LanguageController.currentLanguageCode;
+
+        Widget buildOption({
+          required String code,
+          required String flag,
+          required String title,
+          required String subtitle,
+        }) {
+          final isSelected = currentCode == code;
+          return Material(
+            color: Colors.transparent,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(14),
+              onTap: () async {
+                await LanguageController.setLanguage(code);
+                try {
+                  final uid = _authService.currentUser?.uid ?? '';
+                  if (uid.isNotEmpty) {
+                    unawaited(
+                      _firestoreService.resyncLocalNotifications(
+                        uid,
+                        force: true,
+                      ),
+                    );
+                  }
+                } catch (_) {}
+                if (sheetContext.mounted) {
+                  Navigator.of(sheetContext).pop();
+                }
+                if (context.mounted) {
+                  AppSnackbar.show(
+                    context,
+                    code == 'en'
+                        ? context.tr('profile_lang_changed_en')
+                        : context.tr('profile_lang_changed_vi'),
+                  );
+                }
+              },
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                margin: const EdgeInsets.symmetric(vertical: 4),
+                decoration: BoxDecoration(
+                  color: isSelected
+                      ? AppColors.primary.withValues(alpha: 0.1)
+                      : Colors.transparent,
+                  borderRadius: BorderRadius.circular(14),
+                  border: Border.all(
+                    color: isSelected
+                        ? AppColors.primary.withValues(alpha: 0.35)
+                        : context.appBorder.withValues(alpha: 0.5),
+                  ),
+                ),
+                child: Row(
+                  children: [
+                    Text(
+                      flag,
+                      style: const TextStyle(fontSize: 26),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            title,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: isSelected
+                                  ? FontWeight.w700
+                                  : FontWeight.w600,
+                              color: isSelected
+                                  ? AppColors.primary
+                                  : context.appTextPrimary,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            subtitle,
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: context.appTextSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (isSelected)
+                      Container(
+                        padding: const EdgeInsets.all(4),
+                        decoration: const BoxDecoration(
+                          color: AppColors.primary,
+                          shape: BoxShape.circle,
+                        ),
+                        child: const Icon(
+                          Icons.check_rounded,
+                          color: Colors.white,
+                          size: 16,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
+
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 38,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: context.appBorder,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color:
+                            const Color(0xFF26A69A).withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: const Icon(
+                        Icons.language_rounded,
+                        color: Color(0xFF26A69A),
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            context.tr('lang_picker_title'),
+                            style: TextStyle(
+                              fontSize: 17,
+                              fontWeight: FontWeight.w700,
+                              color: context.appTextPrimary,
+                            ),
+                          ),
+                          Text(
+                            context.tr('lang_picker_subtitle'),
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: context.appTextSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 18),
+                buildOption(
+                  code: 'vi',
+                  flag: '🇻🇳',
+                  title: context.tr('lang_vi'),
+                  subtitle: context.tr('lang_vi_desc'),
+                ),
+                buildOption(
+                  code: 'en',
+                  flag: '🇺🇸',
+                  title: context.tr('lang_en'),
+                  subtitle: context.tr('lang_en_desc'),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
   }
 
   @override
@@ -196,13 +305,13 @@ class _ProfileScreenState extends State<ProfileScreen> {
       backgroundColor: context.appBackground,
       appBar: AppBar(
         title: Text(
-          'Cá nhân',
+          context.tr('profile_title'),
           style: GoogleFonts.inter(fontSize: 18, fontWeight: FontWeight.w600),
         ),
         actions: [
           IconButton(
             icon: const Icon(Icons.manage_accounts_outlined),
-            tooltip: 'Chỉnh sửa thông tin',
+            tooltip: context.tr('profile_edit_tooltip'),
             onPressed: () {
               Navigator.of(context).push(
                 MaterialPageRoute(builder: (_) => const PersonalInfoScreen()),
@@ -222,7 +331,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
           return ListView(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             children: [
-              // 1. Profile Header (Gọn gàng & Hiện đại, nhấn vào để sửa hồ sơ)
+              // 1. Profile Header (Gọn gàng & Hiện đại, nhấn vào để xem chi tiết tài khoản)
               _buildProfileHeader(user),
               const SizedBox(height: 14),
 
@@ -232,19 +341,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 now,
                 startOfMonth,
                 endOfMonth,
-                user?.monthlyIncome ?? 0,
               ),
               const SizedBox(height: 18),
 
               // 3. QUẢN LÝ TÀI CHÍNH (Hierarchy rõ ràng, có mô tả chức năng)
-              _buildSectionTitle('QUẢN LÝ TÀI CHÍNH'),
+              _buildSectionTitle(context.tr('profile_sec_financial_mgmt')),
               _buildGroupContainer([
                 _buildMenuItem(
                   icon: Icons.account_balance_wallet_outlined,
                   iconColor: AppColors.primaryLight,
                   iconBgColor: AppColors.primaryLight.withAlpha(25),
-                  title: 'Ví & tài khoản',
-                  subtitle: 'Quản lý các nguồn tiền, tài khoản và số dư',
+                  title: context.tr('profile_menu_wallets'),
+                  subtitle: context.tr('profile_menu_wallets_sub'),
                   onTap: () {
                     Navigator.of(context).push(
                       MaterialPageRoute(
@@ -256,8 +364,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   icon: Icons.pie_chart_outline_rounded,
                   iconColor: const Color(0xFFE57373),
                   iconBgColor: const Color(0xFFE57373).withAlpha(25),
-                  title: 'Ngân sách & hạn mức',
-                  subtitle: 'Thiết lập và theo dõi hạn mức chi tiêu',
+                  title: context.tr('profile_menu_budgets'),
+                  subtitle: context.tr('profile_menu_budgets_sub'),
                   onTap: () {
                     Navigator.of(context).push(
                       MaterialPageRoute(
@@ -269,8 +377,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   icon: Icons.flag_outlined,
                   iconColor: const Color(0xFF4DB6AC),
                   iconBgColor: const Color(0xFF4DB6AC).withAlpha(25),
-                  title: 'Mục tiêu tiết kiệm',
-                  subtitle: 'Theo dõi tiến độ các mục tiêu tài chính',
+                  title: context.tr('profile_menu_savings'),
+                  subtitle: context.tr('profile_menu_savings_sub'),
                   onTap: () {
                     Navigator.of(context).push(
                       MaterialPageRoute(
@@ -282,8 +390,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   icon: Icons.category_outlined,
                   iconColor: const Color(0xFFFFB74D),
                   iconBgColor: const Color(0xFFFFB74D).withAlpha(25),
-                  title: 'Danh mục phân loại',
-                  subtitle: 'Tùy chỉnh danh mục thu nhập và chi tiêu',
+                  title: context.tr('profile_menu_categories'),
+                  subtitle: context.tr('profile_menu_categories_sub'),
                   onTap: () {
                     Navigator.of(context).push(
                       MaterialPageRoute(
@@ -295,8 +403,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   icon: Icons.repeat_rounded,
                   iconColor: const Color(0xFF64B5F6),
                   iconBgColor: const Color(0xFF64B5F6).withAlpha(25),
-                  title: 'Giao dịch định kỳ & hóa đơn',
-                  subtitle: 'Quản lý các khoản chi lặp lại và hóa đơn đến hạn',
+                  title: context.tr('profile_menu_recurring'),
+                  subtitle: context.tr('profile_menu_recurring_sub'),
                   showDivider: false,
                   onTap: () {
                     Navigator.of(context).push(
@@ -309,14 +417,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
               const SizedBox(height: 18),
 
               // 4. PHÂN TÍCH & HỖ TRỢ AI
-              _buildSectionTitle('PHÂN TÍCH & HỖ TRỢ AI'),
+              _buildSectionTitle(context.tr('profile_sec_ai_insights')),
               _buildGroupContainer([
                 _buildMenuItem(
                   icon: Icons.insights_rounded,
                   iconColor: const Color(0xFF9575CD),
                   iconBgColor: const Color(0xFF9575CD).withAlpha(25),
-                  title: 'AI Financial Insight',
-                  subtitle: 'Phân tích dòng tiền, chi tiêu & khuyến nghị',
+                  title: context.tr('profile_menu_ai_insight'),
+                  subtitle: context.tr('profile_menu_ai_insight_sub'),
                   onTap: () {
                     Navigator.of(context).push(
                       MaterialPageRoute(
@@ -328,8 +436,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   icon: Icons.chat_bubble_outline_rounded,
                   iconColor: AppColors.primary,
                   iconBgColor: AppColors.primary.withAlpha(25),
-                  title: 'Trợ lý AI Chat',
-                  subtitle: 'Trao đổi với trợ lý AI về tình hình tài chính',
+                  title: context.tr('profile_menu_ai_chat'),
+                  subtitle: context.tr('profile_menu_ai_chat_sub'),
                   onTap: () {
                     Navigator.of(context).push(
                       MaterialPageRoute(builder: (_) => const AiChatScreen()),
@@ -340,8 +448,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   icon: Icons.assessment_outlined,
                   iconColor: const Color(0xFF4FC3F7),
                   iconBgColor: const Color(0xFF4FC3F7).withAlpha(25),
-                  title: 'Báo cáo định kỳ AI',
-                  subtitle: 'Xem và xuất báo cáo tổng hợp chi tiết',
+                  title: context.tr('profile_menu_ai_report'),
+                  subtitle: context.tr('profile_menu_ai_report_sub'),
                   onTap: () {
                     Navigator.of(context).push(
                       MaterialPageRoute(builder: (_) => const AiReportScreen()),
@@ -352,8 +460,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   icon: Icons.notifications_none_rounded,
                   iconColor: const Color(0xFFFF8A65),
                   iconBgColor: const Color(0xFFFF8A65).withAlpha(25),
-                  title: 'Thông báo & cảnh báo',
-                  subtitle: 'Cảnh báo ngân sách, giao dịch và lịch hẹn',
+                  title: context.tr('profile_menu_notifications'),
+                  subtitle: context.tr('profile_menu_notifications_sub'),
                   showDivider: false,
                   onTap: () {
                     Navigator.of(context).push(
@@ -366,14 +474,14 @@ class _ProfileScreenState extends State<ProfileScreen> {
               const SizedBox(height: 18),
 
               // 5. TÀI KHOẢN & BẢO MẬT (Phân tách rõ ràng giữa hồ sơ và bảo mật)
-              _buildSectionTitle('TÀI KHOẢN & BẢO MẬT'),
+              _buildSectionTitle(context.tr('profile_sec_account_security')),
               _buildGroupContainer([
                 _buildMenuItem(
                   icon: Icons.person_outline_rounded,
                   iconColor: AppColors.primaryLight,
                   iconBgColor: AppColors.primaryLight.withAlpha(25),
-                  title: 'Thông tin cá nhân',
-                  subtitle: 'Họ tên, ảnh đại diện, thu nhập hàng tháng',
+                  title: context.tr('profile_menu_personal_info'),
+                  subtitle: context.tr('profile_menu_personal_info_sub'),
                   onTap: () {
                     Navigator.of(context).push(
                       MaterialPageRoute(
@@ -385,37 +493,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   icon: Icons.lock_outline_rounded,
                   iconColor: const Color(0xFF78909C),
                   iconBgColor: const Color(0xFF78909C).withAlpha(25),
-                  title: 'Bảo mật & Đổi mật khẩu',
-                  subtitle: 'Quản lý mật khẩu và an toàn đăng nhập',
-                  onTap: () {
-                    Navigator.of(context).push(
-                      MaterialPageRoute(
-                          builder: (_) => const AccountSecurityScreen()),
-                    );
-                  },
-                ),
-                _buildMenuItem(
-                  icon: Icons.verified_user_outlined,
-                  iconColor: AppColors.income,
-                  iconBgColor: AppColors.income.withAlpha(25),
-                  title: 'Phương thức xác thực',
-                  subtitle: _authService.authProviderLabel,
-                  trailing: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: AppColors.incomeBackground,
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: const Text(
-                      'Đã kích hoạt',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
-                        color: AppColors.income,
-                      ),
-                    ),
-                  ),
+                  title: context.tr('profile_menu_security'),
+                  subtitle: context.tr('profile_menu_security_sub'),
                   showDivider: false,
                   onTap: () {
                     Navigator.of(context).push(
@@ -428,100 +507,67 @@ class _ProfileScreenState extends State<ProfileScreen> {
               const SizedBox(height: 18),
 
               // 6. CÀI ĐẶT & HỆ THỐNG
-              _buildSectionTitle('TÙY CHỈNH HỆ THỐNG'),
+              _buildSectionTitle(context.tr('profile_sec_system_settings')),
               _buildGroupContainer([
-                // Giao diện sáng / tối
-                Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 14, vertical: 4),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 38,
-                        height: 38,
-                        decoration: BoxDecoration(
-                          color: AppColors.primaryLight.withAlpha(25),
-                          borderRadius: BorderRadius.circular(10),
-                        ),
-                        child: Icon(
-                          context.isDarkMode
-                              ? Icons.dark_mode_rounded
-                              : Icons.wb_sunny_rounded,
-                          color: AppColors.primaryLight,
-                          size: 20,
-                        ),
-                      ),
-                      const SizedBox(width: 12),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Giao diện tối',
-                              style: TextStyle(
-                                fontSize: 14,
-                                fontWeight: FontWeight.w600,
-                                color: context.appTextPrimary,
-                              ),
-                            ),
-                            const SizedBox(height: 1),
-                            Text(
-                              context.isDarkMode
-                                  ? 'Đang bật chế độ tối'
-                                  : 'Đang bật chế độ sáng',
-                              style: TextStyle(
-                                fontSize: 12,
-                                color: context.appTextSecondary,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                      Switch.adaptive(
-                        value: context.isDarkMode,
-                        activeTrackColor: AppColors.primary,
-                        onChanged: ThemeController.toggle,
-                      ),
-                    ],
-                  ),
-                ),
-                const Divider(height: 1, indent: 64, endIndent: 16),
                 _buildMenuItem(
                   icon: Icons.language_rounded,
                   iconColor: const Color(0xFF26A69A),
                   iconBgColor: const Color(0xFF26A69A).withAlpha(25),
-                  title: 'Ngôn ngữ hiển thị',
-                  subtitle: 'Tiếng Việt',
-                  trailingText: 'VN',
-                  onTap: () {
-                    AppSnackbar.show(
-                        context, 'Hệ thống đang hoạt động với Tiếng Việt');
-                  },
+                  title: context.tr('profile_menu_language'),
+                  subtitle: LanguageController.currentLanguageName,
+                  trailingText: LanguageController.isVietnamese ? 'VN' : 'EN',
+                  onTap: () => _showLanguagePicker(context),
                 ),
                 _buildMenuItem(
                   icon: Icons.payments_outlined,
                   iconColor: const Color(0xFFFFA726),
                   iconBgColor: const Color(0xFFFFA726).withAlpha(25),
-                  title: 'Đơn vị tiền tệ',
-                  subtitle: 'Việt Nam Đồng',
-                  trailingText: 'VNĐ (₫)',
+                  title: context.tr('profile_menu_currency'),
+                  subtitle: context.tr('profile_menu_currency_name'),
+                  trailingText: context.tr('profile_menu_currency_sub'),
                   showDivider: false,
                   onTap: () {
-                    AppSnackbar.show(context, 'Mặc định đơn vị tiền tệ là VNĐ');
+                    AppSnackbar.show(
+                      context,
+                      context.tr('profile_menu_currency_default'),
+                    );
                   },
                 ),
               ]),
               const SizedBox(height: 18),
 
-              // 7. THÔNG TIN ỨNG DỤNG
-              _buildSectionTitle('THÔNG TIN'),
+              // 7. HỖ TRỢ & THÔNG TIN ỨNG DỤNG
+              _buildSectionTitle(context.tr('profile_sec_about')),
               _buildGroupContainer([
+                StreamBuilder<List<SupportTicket>>(
+                  stream: _unreadSupportTicketsStream,
+                  builder: (context, supportSnap) {
+                    final unreadSupportCount = supportSnap.data?.length ?? 0;
+                    return _buildMenuItem(
+                      icon: Icons.support_agent_rounded,
+                      iconColor: AppColors.primary,
+                      iconBgColor: AppColors.primary.withAlpha(25),
+                      title: context.tr('profile_menu_support'),
+                      subtitle: context.tr('profile_menu_support_sub'),
+                      trailingText: unreadSupportCount > 0
+                          ? '$unreadSupportCount · ${context.tr('support_unread_badge')}'
+                          : null,
+                      onTap: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const SupportCenterScreen(),
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
                 _buildMenuItem(
                   icon: Icons.info_outline_rounded,
                   iconColor: const Color(0xFF7E57C2),
                   iconBgColor: const Color(0xFF7E57C2).withAlpha(25),
-                  title: 'Về ứng dụng Finance AI',
-                  subtitle: 'Thông tin nhóm phát triển và điều khoản',
+                  title: context.tr('profile_menu_about'),
+                  subtitle: context.tr('profile_menu_about_sub'),
                   trailingText: 'v1.0.0',
                   showDivider: false,
                   onTap: () {
@@ -533,33 +579,80 @@ class _ProfileScreenState extends State<ProfileScreen> {
               ]),
               const SizedBox(height: 22),
 
-              // 8. ĐĂNG XUẤT (Tách biệt, màu cảnh báo nhẹ)
+              // 8. ĐĂNG XUẤT (Thiết kế hiện đại, đồng bộ với các thẻ tính năng)
               Container(
                 decoration: BoxDecoration(
-                  color: AppColors.expenseBackground,
+                  color: context.appCard,
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: AppColors.expense.withAlpha(50)),
+                  border: Border.all(color: AppColors.expense.withAlpha(55)),
+                  boxShadow: [
+                    BoxShadow(
+                      color: AppColors.expense.withAlpha(10),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
                 ),
                 child: Material(
                   color: Colors.transparent,
                   child: InkWell(
+                    key: const ValueKey('profile_logout_button'),
                     borderRadius: BorderRadius.circular(16),
                     onTap: _handleLogout,
-                    child: const Padding(
-                      padding:
-                          EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 14, vertical: 12),
                       child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
                         children: [
-                          Icon(Icons.logout_rounded,
-                              color: AppColors.expense, size: 20),
-                          SizedBox(width: 8),
-                          Text(
-                            'Đăng xuất tài khoản',
-                            style: TextStyle(
+                          Container(
+                            width: 40,
+                            height: 40,
+                            decoration: BoxDecoration(
+                              color: AppColors.expense.withAlpha(22),
+                              borderRadius: BorderRadius.circular(11),
+                            ),
+                            child: const Icon(
+                              Icons.logout_rounded,
                               color: AppColors.expense,
-                              fontWeight: FontWeight.w600,
-                              fontSize: 14,
+                              size: 20,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  context.tr('profile_logout_btn'),
+                                  style: const TextStyle(
+                                    color: AppColors.expense,
+                                    fontWeight: FontWeight.w700,
+                                    fontSize: 14,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  context.tr('profile_logout_sub'),
+                                  style: TextStyle(
+                                    color: context.appTextSecondary,
+                                    fontSize: 11.5,
+                                    height: 1.25,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Container(
+                            width: 28,
+                            height: 28,
+                            decoration: BoxDecoration(
+                              color: AppColors.expense.withAlpha(16),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Icon(
+                              Icons.chevron_right_rounded,
+                              color: AppColors.expense,
+                              size: 18,
                             ),
                           ),
                         ],
@@ -572,7 +665,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
               const SizedBox(height: 16),
               Center(
                 child: Text(
-                  'Finance AI • Quản lý tài chính thông minh',
+                  'Finance AI • ${context.tr('app_name')}',
                   style:
                       TextStyle(color: context.appTextSecondary, fontSize: 11),
                 ),
@@ -631,7 +724,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    user?.name.isNotEmpty == true ? user!.name : 'Người dùng',
+                    user?.name.isNotEmpty == true
+                        ? user!.name
+                        : context.tr('common_user'),
                     style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w700,
@@ -671,38 +766,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
               ),
             ),
 
-            // Nút Chỉnh sửa hồ sơ
-            OutlinedButton(
-              style: OutlinedButton.styleFrom(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                minimumSize: Size.zero,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                side: BorderSide(color: context.appBorder),
-                shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10)),
-              ),
-              onPressed: () {
-                Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const PersonalInfoScreen()),
-                );
-              },
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.edit_outlined,
-                      size: 14, color: context.appTextPrimary),
-                  const SizedBox(width: 4),
-                  Text(
-                    'Sửa',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: context.appTextPrimary,
-                    ),
-                  ),
-                ],
-              ),
+            // Biểu tượng điều hướng xem thông tin tài khoản
+            Icon(
+              Icons.chevron_right_rounded,
+              size: 22,
+              color: context.appTextSecondary,
             ),
           ],
         ),
@@ -716,7 +784,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
     DateTime now,
     DateTime startOfMonth,
     DateTime endOfMonth,
-    double monthlyIncome,
   ) {
     return StreamBuilder<List<AppTransaction>>(
       stream: _firestoreService.streamTransactions(
@@ -758,50 +825,73 @@ class _ProfileScreenState extends State<ProfileScreen> {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.all(6),
-                        decoration: BoxDecoration(
-                          color: AppColors.primary.withAlpha(20),
-                          borderRadius: BorderRadius.circular(8),
+                  Expanded(
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(6),
+                          decoration: BoxDecoration(
+                            color: AppColors.primary.withAlpha(20),
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                          child: const Icon(
+                            Icons.insights_rounded,
+                            size: 16,
+                            color: AppColors.primaryLight,
+                          ),
                         ),
-                        child: const Icon(
-                          Icons.insights_rounded,
-                          size: 16,
-                          color: AppColors.primaryLight,
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            context.tr(
+                              'profile_month_status',
+                              params: {
+                                'month': '${now.month}',
+                                'year': '${now.year}',
+                              },
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              letterSpacing: 0.6,
+                              color: context.appTextSecondary,
+                            ),
+                          ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        'TÌNH HÌNH THÁNG ${now.month}/${now.year}',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.6,
-                          color: context.appTextSecondary,
-                        ),
-                      ),
-                    ],
-                  ),
-                  // Savings rate badge
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                    decoration: BoxDecoration(
-                      color: remaining >= 0
-                          ? AppColors.incomeBackground
-                          : AppColors.expenseBackground,
-                      borderRadius: BorderRadius.circular(8),
+                      ],
                     ),
-                    child: Text(
-                      'Tiết kiệm: $savingsRate%',
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.w600,
+                  ),
+                  const SizedBox(width: 8),
+                  // Savings rate badge
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 145),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 3),
+                      decoration: BoxDecoration(
                         color: remaining >= 0
-                            ? AppColors.income
-                            : AppColors.expense,
+                            ? AppColors.incomeBackground
+                            : AppColors.expenseBackground,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          context.tr(
+                            'profile_savings_rate',
+                            params: {'pct': '$savingsRate'},
+                          ),
+                          maxLines: 1,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w600,
+                            color: remaining >= 0
+                                ? AppColors.income
+                                : AppColors.expense,
+                          ),
+                        ),
                       ),
                     ),
                   ),
@@ -814,7 +904,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   // Thu nhập thực tế
                   Expanded(
                     child: _buildSnapshotColumn(
-                      label: 'Thu nhập',
+                      label: context.tr('common_income'),
                       amountStr: '+${AppFormatters.compactCurrency(income)}',
                       color: AppColors.income,
                     ),
@@ -823,7 +913,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   // Chi tiêu thực tế
                   Expanded(
                     child: _buildSnapshotColumn(
-                      label: 'Chi tiêu',
+                      label: context.tr('common_expense'),
                       amountStr: '-${AppFormatters.compactCurrency(expense)}',
                       color: AppColors.expense,
                     ),
@@ -832,7 +922,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   // Dòng tiền ròng
                   Expanded(
                     child: _buildSnapshotColumn(
-                      label: 'Dòng tiền',
+                      label: context.tr('profile_cash_flow'),
                       amountStr:
                           '${remaining >= 0 ? '+' : ''}${AppFormatters.compactCurrency(remaining)}',
                       color:
@@ -854,49 +944,6 @@ class _ProfileScreenState extends State<ProfileScreen> {
                 ),
               ),
               const SizedBox(height: 10),
-              // Expected monthly income vs actual income (if provided)
-              if (monthlyIncome > 0) ...[
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: context.appBackground,
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: context.appBorder),
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Row(
-                        children: [
-                          Icon(Icons.flag_outlined,
-                              size: 14, color: context.appTextSecondary),
-                          const SizedBox(width: 6),
-                          Text(
-                            'Thu nhập khai báo: ${AppFormatters.compactCurrency(monthlyIncome)}',
-                            style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w500,
-                              color: context.appTextSecondary,
-                            ),
-                          ),
-                        ],
-                      ),
-                      Text(
-                        income >= monthlyIncome ? 'Đạt mục tiêu' : 'Chưa đủ',
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: income >= monthlyIncome
-                              ? AppColors.income
-                              : AppColors.warning,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(height: 8),
-              ],
               // Quick link to AI Insight
               InkWell(
                 onTap: () {
@@ -905,20 +952,25 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   );
                 },
                 borderRadius: BorderRadius.circular(8),
-                child: const Padding(
-                  padding: EdgeInsets.symmetric(vertical: 2),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(
-                        'Xem phân tích chi tiết \u0026 giải pháp với AI',
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: AppColors.primaryLight,
+                      Expanded(
+                        child: Text(
+                          context.tr('profile_view_ai_analysis'),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.primaryLight,
+                          ),
                         ),
                       ),
-                      Icon(
+                      const SizedBox(width: 8),
+                      const Icon(
                         Icons.arrow_forward_rounded,
                         size: 14,
                         color: AppColors.primaryLight,
@@ -943,6 +995,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
       children: [
         Text(
           label,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
           style: TextStyle(
             fontSize: 11,
             color: context.appTextSecondary,
@@ -1059,12 +1113,17 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   if (trailing != null)
                     trailing
                   else if (trailingText != null) ...[
-                    Text(
-                      trailingText,
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                        color: context.appTextSecondary,
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        trailingText,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w500,
+                          color: context.appTextSecondary,
+                        ),
                       ),
                     ),
                     const SizedBox(width: 4),
@@ -1088,4 +1147,333 @@ class _ProfileScreenState extends State<ProfileScreen> {
       ],
     );
   }
+}
+
+/// Hiển thị hộp thoại xác nhận đăng xuất phong cách Fintech hiện đại.
+/// - Cho phép chạm ra ngoài vùng hộp thoại (`barrierDismissible: true`) hoặc bấm nút `X` / `Hủy` để đóng (tương đương hủy bỏ).
+/// - Hai nút hành động cân đối nằm ngang, có thẻ cam kết an toàn dữ liệu đám mây để giao diện thân thiện, bớt khô khan.
+Future<bool?> showLogoutConfirmationDialog(
+  BuildContext context, {
+  String? userEmail,
+}) {
+  return showDialog<bool>(
+    context: context,
+    barrierDismissible: true,
+    barrierColor: Colors.black.withAlpha(135),
+    builder: (ctx) {
+      bool isLoggingOut = false;
+      return StatefulBuilder(
+        builder: (dialogContext, setDialogState) {
+          final isDark = dialogContext.isDarkMode;
+          return Dialog(
+            backgroundColor: Colors.transparent,
+            elevation: 0,
+            insetPadding:
+                const EdgeInsets.symmetric(horizontal: 24, vertical: 24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 380),
+              child: Container(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+                decoration: BoxDecoration(
+                  color: dialogContext.appCard,
+                  borderRadius: BorderRadius.circular(24),
+                  border: Border.all(
+                    color: dialogContext.appBorder,
+                    width: 1,
+                  ),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withAlpha(isDark ? 90 : 35),
+                      blurRadius: 28,
+                      offset: const Offset(0, 12),
+                    ),
+                  ],
+                ),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // Hàng nút đóng nhanh góc phải trên cùng
+                    Align(
+                      alignment: Alignment.topRight,
+                      child: Material(
+                        color: dialogContext.appInputFill,
+                        shape: const CircleBorder(),
+                        child: InkWell(
+                          key: const ValueKey('logout_dialog_close'),
+                          customBorder: const CircleBorder(),
+                          onTap: isLoggingOut
+                              ? null
+                              : () => Navigator.of(ctx).pop(false),
+                          child: Padding(
+                            padding: const EdgeInsets.all(6),
+                            child: Icon(
+                              Icons.close_rounded,
+                              size: 18,
+                              color: dialogContext.appTextSecondary,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+
+                    // Biểu tượng trung tâm nhiều lớp hiện đại kèm huy hiệu đám mây
+                    Stack(
+                      clipBehavior: Clip.none,
+                      alignment: Alignment.center,
+                      children: [
+                        Container(
+                          width: 68,
+                          height: 68,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: [
+                                AppColors.expense.withAlpha(32),
+                                AppColors.expense.withAlpha(12),
+                              ],
+                            ),
+                            border: Border.all(
+                              color: AppColors.expense.withAlpha(55),
+                              width: 1.2,
+                            ),
+                          ),
+                          child: Center(
+                            child: Container(
+                              width: 48,
+                              height: 48,
+                              decoration: BoxDecoration(
+                                color: AppColors.expense.withAlpha(28),
+                                shape: BoxShape.circle,
+                              ),
+                              child: const Icon(
+                                Icons.logout_rounded,
+                                color: AppColors.expense,
+                                size: 24,
+                              ),
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          right: -2,
+                          bottom: -2,
+                          child: Container(
+                            padding: const EdgeInsets.all(4),
+                            decoration: BoxDecoration(
+                              color: dialogContext.appCard,
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                color: dialogContext.appBorder,
+                                width: 1,
+                              ),
+                            ),
+                            child: const Icon(
+                              Icons.cloud_done_rounded,
+                              size: 14,
+                              color: AppColors.income,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+
+                    // Tiêu đề thân thiện
+                    Text(
+                      dialogContext.tr('profile_logout_dialog_title'),
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: dialogContext.appTextPrimary,
+                        letterSpacing: -0.2,
+                      ),
+                    ),
+                    if (userEmail != null && userEmail.trim().isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 10, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: dialogContext.appInputFill,
+                          borderRadius: BorderRadius.circular(20),
+                          border: Border.all(color: dialogContext.appBorder),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              Icons.person_outline_rounded,
+                              size: 13,
+                              color: dialogContext.appTextSecondary,
+                            ),
+                            const SizedBox(width: 5),
+                            Flexible(
+                              child: Text(
+                                userEmail.trim(),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w600,
+                                  color: dialogContext.appTextSecondary,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                    const SizedBox(height: 10),
+
+                    // Nội dung mô tả nhẹ nhàng, tự nhiên
+                    Text(
+                      dialogContext.tr('profile_logout_dialog_sub'),
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        fontSize: 13,
+                        height: 1.45,
+                        color: dialogContext.appTextSecondary,
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+
+                    // Hộp cam kết đồng bộ đám mây tạo điểm nhấn thị giác
+                    Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 12, vertical: 10),
+                      decoration: BoxDecoration(
+                        color: AppColors.income.withAlpha(isDark ? 22 : 15),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: AppColors.income.withAlpha(60),
+                        ),
+                      ),
+                      child: Row(
+                        children: [
+                          Container(
+                            width: 28,
+                            height: 28,
+                            decoration: BoxDecoration(
+                              color: AppColors.income.withAlpha(30),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
+                            child: const Icon(
+                              Icons.verified_user_outlined,
+                              size: 16,
+                              color: AppColors.income,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              dialogContext.tr('profile_logout_dialog_content'),
+                              style: TextStyle(
+                                fontSize: 11.5,
+                                height: 1.35,
+                                fontWeight: FontWeight.w600,
+                                color: dialogContext.appTextPrimary,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 20),
+
+                    // Hàng 2 nút hành động cân xứng 50/50
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            key: const ValueKey('logout_dialog_cancel'),
+                            style: OutlinedButton.styleFrom(
+                              minimumSize: const Size(0, 46),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 12),
+                              backgroundColor: dialogContext.appInputFill,
+                              foregroundColor: dialogContext.appTextPrimary,
+                              side: BorderSide(color: dialogContext.appBorder),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(13),
+                              ),
+                            ),
+                            onPressed: isLoggingOut
+                                ? null
+                                : () => Navigator.of(ctx).pop(false),
+                            child: Text(
+                              dialogContext.tr('profile_logout_dialog_cancel'),
+                              style: TextStyle(
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                                color: dialogContext.appTextPrimary,
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: ElevatedButton(
+                            key: const ValueKey('logout_dialog_confirm'),
+                            style: ElevatedButton.styleFrom(
+                              minimumSize: const Size(0, 46),
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 12, vertical: 12),
+                              backgroundColor: AppColors.expense,
+                              foregroundColor: Colors.white,
+                              elevation: 0,
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(13),
+                              ),
+                            ),
+                            onPressed: isLoggingOut
+                                ? null
+                                : () {
+                                    setDialogState(() => isLoggingOut = true);
+                                    Navigator.of(ctx).pop(true);
+                                  },
+                            child: isLoggingOut
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      valueColor: AlwaysStoppedAnimation<Color>(
+                                          Colors.white),
+                                    ),
+                                  )
+                                : Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      const Icon(Icons.logout_rounded, size: 16),
+                                      const SizedBox(width: 6),
+                                      Flexible(
+                                        child: Text(
+                                          dialogContext.tr('profile_logout_dialog_action'),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(
+                                            fontSize: 14,
+                                            fontWeight: FontWeight.w700,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          );
+        },
+      );
+    },
+  );
 }

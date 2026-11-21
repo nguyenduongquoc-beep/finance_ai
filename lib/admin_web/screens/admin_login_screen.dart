@@ -173,7 +173,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
                             borderRadius: BorderRadius.circular(12),
                           ),
                           child: const Icon(
-                            Icons.admin_panel_settings_rounded,
+                            Icons.account_balance_wallet_rounded,
                             color: Colors.white,
                             size: 26,
                           ),

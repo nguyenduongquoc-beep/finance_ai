@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart' hide Category;
 import 'package:intl/intl.dart';
@@ -13,14 +14,16 @@ import '../models/recurring_transaction_model.dart';
 import '../models/recurring_transaction_occurrence_model.dart';
 import '../models/monthly_financial_plan.dart';
 import '../models/admin_audit_log_model.dart';
-import '../models/ai_runtime_config_model.dart';
 import '../utils/formatters.dart';
-import 'ai_config_sync_service.dart';
 import 'financial_context_revision_tracker.dart';
 import 'local_notification_service.dart';
 import 'recurring_transaction_service.dart';
 import 'storage_service.dart';
+import '../utils/category_localization_helper.dart';
 import '../utils/transaction_business_logic.dart';
+import '../utils/wallet_localization_helper.dart';
+import '../l10n/app_localizations.dart';
+import 'language_controller.dart';
 
 /// Exception chuyên biệt khi ví không đủ số dư để xác nhận giao dịch chi
 class InsufficientBalanceException implements Exception {
@@ -82,6 +85,7 @@ class PlanBudgetConflictException implements Exception {
 class FirestoreService {
   final FirebaseFirestore? _customDb;
   FirebaseFirestore get _db => _customDb ?? FirebaseFirestore.instance;
+  FirebaseFirestore get firestoreInstance => _db;
 
   FirestoreService({FirebaseFirestore? firestore}) : _customDb = firestore;
 
@@ -104,8 +108,9 @@ class FirestoreService {
         .map((doc) => doc.exists ? AppUser.fromMap(doc.data()!, doc.id) : null);
   }
 
-  Future<void> updateUserProfile(String uid, Map<String, dynamic> data) {
-    return _db.collection('users').doc(uid).update(data);
+  Future<void> updateUserProfile(String uid, Map<String, dynamic> data) async {
+    await _db.collection('users').doc(uid).update(data);
+    FinancialContextRevisionTracker.notifyDataMutated();
   }
 
   // ---------------- WALLETS ----------------
@@ -158,12 +163,12 @@ class FirestoreService {
       String userId, String oldWalletId, String newWalletId) async {
     final oldWalletDoc = await _db.collection('wallets').doc(oldWalletId).get();
     if (!oldWalletDoc.exists) {
-      throw Exception('Ví nguồn không tồn tại');
+      throw Exception(AppLocalizations.tr('svc_fs_src_not_found'));
     }
     final oldBalance = (oldWalletDoc.data()!['balance'] as num).toDouble();
     final newWalletDoc = await _db.collection('wallets').doc(newWalletId).get();
     final newWalletName =
-        newWalletDoc.data()?['walletName']?.toString() ?? 'Ví thanh toán';
+        newWalletDoc.data()?['walletName']?.toString() ?? AppLocalizations.tr('svc_tbl_pay_wallet');
 
     // Giao dịch mà ví này là ví thực hiện (walletId)
     final txQuery = await _db
@@ -340,10 +345,10 @@ class FirestoreService {
 
     if (tx.type == 'transfer') {
       if (tx.toWalletId == null || tx.toWalletId!.isEmpty) {
-        throw Exception('Giao dịch chuyển tiền cần chỉ định ví đích.');
+        throw Exception(AppLocalizations.tr('svc_tbl_trf_need_dst'));
       }
       if (tx.toWalletId == tx.walletId) {
-        throw Exception('Ví nguồn và ví đích không được trùng nhau.');
+        throw Exception(AppLocalizations.tr('svc_tbl_same_wallet'));
       }
       toWalletRef = _db.collection('wallets').doc(tx.toWalletId);
     }
@@ -351,7 +356,7 @@ class FirestoreService {
     DocumentReference? goalRef;
     if (tx.type == 'goal_deposit' || tx.type == 'goal_withdraw') {
       if (tx.goalId == null || tx.goalId!.isEmpty) {
-        throw Exception('Giao dịch mục tiêu tiết kiệm cần chỉ định mục tiêu.');
+        throw Exception(AppLocalizations.tr('svc_fs_goal_need_id'));
       }
       goalRef = _db.collection('savingGoals').doc(tx.goalId);
       try {
@@ -385,14 +390,14 @@ class FirestoreService {
 
     await _db.runTransaction((transaction) async {
       final walletSnap = await transaction.get(walletRef);
-      if (!walletSnap.exists) throw Exception('Ví không tồn tại.');
+      if (!walletSnap.exists) throw Exception(AppLocalizations.tr('svc_fs_wallet_not_found'));
       final wallet = Wallet.fromMap(
           walletSnap.data() as Map<String, dynamic>, walletSnap.id);
 
       Wallet? toWallet;
       if (toWalletRef != null) {
         final toWalletSnap = await transaction.get(toWalletRef);
-        if (!toWalletSnap.exists) throw Exception('Ví đích không tồn tại.');
+        if (!toWalletSnap.exists) throw Exception(AppLocalizations.tr('svc_tbl_dst_missing'));
         toWallet = Wallet.fromMap(
             toWalletSnap.data() as Map<String, dynamic>, toWalletSnap.id);
       }
@@ -401,7 +406,7 @@ class FirestoreService {
       if (goalRef != null) {
         final goalSnap = await transaction.get(goalRef);
         if (!goalSnap.exists) {
-          throw Exception('Mục tiêu tiết kiệm không tồn tại.');
+          throw Exception(AppLocalizations.tr('svc_tbl_goal_missing'));
         }
         goal = SavingGoal.fromMap(
             goalSnap.data() as Map<String, dynamic>, goalSnap.id);
@@ -456,12 +461,15 @@ class FirestoreService {
             await createNotification(AppNotification(
               notificationId: '',
               userId: tx.userId,
-              title: 'Cảnh báo ngân sách',
+              title: AppLocalizations.tr('svc_fs_bud_warn_title'),
               content:
-                  'Bạn đã tiêu vượt 80% ngân sách tháng $monthStr cho danh mục này.',
+                  AppLocalizations.tr('svc_fs_bud_warn_add', params: {'month': monthStr}),
               status: 'unread',
               type: 'budget',
               createdAt: DateTime.now(),
+              titleKey: 'svc_fs_bud_warn_title',
+              contentKey: 'svc_fs_bud_warn_add',
+              contentParams: {'month': monthStr},
             ));
           }
         }
@@ -549,19 +557,21 @@ class FirestoreService {
   /// Cập nhật giao dịch an toàn, xử lý atomic cả số dư ví và ngân sách
   Future<void> updateTransactionSafely(
     AppTransaction oldTx,
-    AppTransaction newTx,
-  ) async {
+    AppTransaction newTx, {
+    DateTime? currentReferenceDate,
+  }) async {
     if (oldTx.type == 'goal_deposit' ||
         oldTx.type == 'goal_withdraw' ||
         newTx.type == 'goal_deposit' ||
         newTx.type == 'goal_withdraw') {
       throw Exception(
-          'Giao dịch nạp/rút mục tiêu không thể sửa. Vui lòng xóa và tạo lại giao dịch.');
+          AppLocalizations.tr('svc_tbl_edit_goal_blocked'));
     }
 
     TransactionBusinessLogic.validateAmount(newTx.amount);
 
     final monthStrNew = DateFormat('MM/yyyy').format(newTx.date);
+    final monthStrOld = DateFormat('MM/yyyy').format(oldTx.date);
 
     DocumentReference? newBudgetRef;
     if (newTx.type == 'expense') {
@@ -589,14 +599,14 @@ class FirestoreService {
 
     await _db.runTransaction((txn) async {
       final oldWalletSnap = await txn.get(oldWalletRef);
-      if (!oldWalletSnap.exists) throw Exception('Ví nguồn không tồn tại.');
+      if (!oldWalletSnap.exists) throw Exception(AppLocalizations.tr('svc_fs_src_not_found_dot'));
       final oldWallet = Wallet.fromMap(
           oldWalletSnap.data() as Map<String, dynamic>, oldWalletSnap.id);
 
       final newWalletSnap = (newTx.walletId == oldTx.walletId)
           ? oldWalletSnap
           : await txn.get(newWalletRef);
-      if (!newWalletSnap.exists) throw Exception('Ví nguồn mới không tồn tại.');
+      if (!newWalletSnap.exists) throw Exception(AppLocalizations.tr('svc_fs_new_src_not_found'));
       final newWallet = Wallet.fromMap(
           newWalletSnap.data() as Map<String, dynamic>, newWalletSnap.id);
 
@@ -616,7 +626,7 @@ class FirestoreService {
                 oldToWallet != null)
             ? await txn.get(oldToWalletRef!)
             : await txn.get(newToWalletRef);
-        if (!newToSnap.exists) throw Exception('Ví đích không tồn tại.');
+        if (!newToSnap.exists) throw Exception(AppLocalizations.tr('svc_tbl_dst_missing'));
         newToWallet = Wallet.fromMap(
             newToSnap.data() as Map<String, dynamic>, newToSnap.id);
       }
@@ -656,20 +666,41 @@ class FirestoreService {
             await createNotification(AppNotification(
               notificationId: '',
               userId: newTx.userId,
-              title: 'Cảnh báo ngân sách',
+              title: AppLocalizations.tr('svc_fs_bud_warn_title'),
               content:
-                  'Giao dịch vừa sửa đã làm bạn tiêu vượt 80% ngân sách tháng $monthStrNew cho danh mục này.',
+                  AppLocalizations.tr('svc_fs_bud_warn_edit', params: {'month': monthStrNew}),
               status: 'unread',
               type: 'budget',
               createdAt: DateTime.now(),
+              titleKey: 'svc_fs_bud_warn_title',
+              contentKey: 'svc_fs_bud_warn_edit',
+              contentParams: {'month': monthStrNew},
             ));
           }
         }
       } catch (_) {}
     }
+
+    if (oldTx.type == 'expense' && oldTx.userId.isNotEmpty) {
+      try {
+        await _syncFutureMonthlyPlansAfterSourceExpenseChange(
+          userId: oldTx.userId,
+          sourceMonth: monthStrOld,
+          affectedCategoryIds: {oldTx.categoryId},
+          currentReferenceDate: currentReferenceDate,
+        );
+      } catch (e) {
+        debugPrint('[updateTransactionSafely] Lỗi đồng bộ kế hoạch tương lai: $e');
+      }
+    }
+
+    FinancialContextRevisionTracker.notifyDataMutated();
   }
 
-  Future<void> deleteTransaction(AppTransaction tx) async {
+  Future<void> deleteTransaction(
+    AppTransaction tx, {
+    DateTime? currentReferenceDate,
+  }) async {
     final txRef = _db.collection('transactions').doc(tx.transactionId);
     final walletRef = _db.collection('wallets').doc(tx.walletId);
     final toWalletRef = (tx.type == 'transfer' &&
@@ -699,9 +730,18 @@ class FirestoreService {
       } catch (_) {}
     }
 
+    bool wasDeleted = false;
+    AppTransaction deletedTx = tx;
+
     await _db.runTransaction((transaction) async {
       final txSnap = await transaction.get(txRef);
       if (!txSnap.exists) return; // Giao dịch đã bị xóa trước đó
+      if (txSnap.data() != null) {
+        deletedTx = AppTransaction.fromMap(
+          txSnap.data() as Map<String, dynamic>,
+          txSnap.id,
+        );
+      }
 
       final walletSnap = await transaction.get(walletRef);
       Wallet? wallet;
@@ -765,6 +805,7 @@ class FirestoreService {
         }
       }
 
+      wasDeleted = true;
       transaction.delete(txRef);
     });
 
@@ -773,6 +814,22 @@ class FirestoreService {
         await StorageService().deleteImageByUrl(tx.image!);
       } catch (_) {}
     }
+
+    if (wasDeleted &&
+        deletedTx.type == 'expense' &&
+        deletedTx.userId.isNotEmpty) {
+      try {
+        await _syncFutureMonthlyPlansAfterSourceExpenseChange(
+          userId: deletedTx.userId,
+          sourceMonth: DateFormat('MM/yyyy').format(deletedTx.date),
+          affectedCategoryIds: {deletedTx.categoryId},
+          currentReferenceDate: currentReferenceDate,
+        );
+      } catch (e) {
+        debugPrint('[deleteTransaction] Lỗi đồng bộ kế hoạch & hạn mức tương lai: $e');
+      }
+    }
+
     FinancialContextRevisionTracker.notifyDataMutated();
   }
 
@@ -904,7 +961,7 @@ class FirestoreService {
       for (final doc in walletsSnap.docs) {
         final data = doc.data();
         walletNamesById[doc.id] =
-            data['walletName']?.toString() ?? 'Ví thanh toán';
+            data['walletName']?.toString() ?? AppLocalizations.tr('svc_tbl_pay_wallet');
       }
 
       final allTx = await getTransactionsSafely(goal.userId);
@@ -1027,6 +1084,10 @@ class FirestoreService {
     required String scheduleId,
     required String occurrenceKey,
     bool showLocalPush = true,
+    String? titleKey,
+    Map<String, String>? titleParams,
+    String? contentKey,
+    Map<String, String>? contentParams,
   }) async {
     try {
       // Dùng single-field query theo userId để tránh lỗi thiếu composite index trên Firestore
@@ -1053,6 +1114,10 @@ class FirestoreService {
           createdAt: DateTime.now(),
           scheduleId: scheduleId,
           occurrenceKey: occurrenceKey,
+          titleKey: titleKey,
+          titleParams: titleParams,
+          contentKey: contentKey,
+          contentParams: contentParams,
         ));
 
         if (showLocalPush) {
@@ -1080,6 +1145,8 @@ class FirestoreService {
     required String scheduleId,
     required String occurrenceKey,
     String? resolutionNote,
+    String? resolutionContentKey,
+    Map<String, String>? resolutionContentParams,
   }) async {
     try {
       await LocalNotificationService()
@@ -1102,6 +1169,19 @@ class FirestoreService {
           final updates = <String, dynamic>{'status': 'read'};
           if (resolutionNote != null && resolutionNote.isNotEmpty) {
             updates['content'] = resolutionNote;
+            if (resolutionContentKey != null &&
+                resolutionContentKey.isNotEmpty) {
+              updates['contentKey'] = resolutionContentKey;
+              if (resolutionContentParams != null &&
+                  resolutionContentParams.isNotEmpty) {
+                updates['contentParams'] = resolutionContentParams;
+              } else {
+                updates['contentParams'] = FieldValue.delete();
+              }
+            } else {
+              updates['contentKey'] = FieldValue.delete();
+              updates['contentParams'] = FieldValue.delete();
+            }
           }
           batch.update(doc.reference, updates);
           count++;
@@ -1147,10 +1227,50 @@ class FirestoreService {
     }
   }
 
+  /// Đồng bộ lại toàn bộ OS local notifications từ trạng thái mới nhất trong Firestore
+  Future<void> resyncLocalNotifications(
+    String userId, {
+    bool force = false,
+  }) async {
+    if (userId.isEmpty || !LocalNotificationService().isInitialized) return;
+    try {
+      final schedulesSnap = await _db
+          .collection('recurringTransactions')
+          .where('userId', isEqualTo: userId)
+          .get();
+      final walletsSnap = await _db
+          .collection('wallets')
+          .where('userId', isEqualTo: userId)
+          .get();
+
+      final schedules = schedulesSnap.docs
+          .map((d) => RecurringTransactionSchedule.fromMap(d.data(), d.id))
+          .toList();
+      final walletNamesMap = <String, String>{
+        for (final w in walletsSnap.docs)
+          w.id: WalletLocalizationHelper.localizeWallet(
+            Wallet.fromMap(w.data(), w.id),
+          ),
+      };
+
+      await LocalNotificationService().syncAllReminders(
+        schedules: schedules,
+        walletNamesMap: walletNamesMap,
+        force: force,
+      );
+    } catch (e) {
+      debugPrint('[resyncLocalNotifications] error: $e');
+    }
+  }
+
   /// Đồng bộ thông báo trong app và thanh trạng thái cho các kỳ đến hạn hoặc sắp đến hạn cần xử lý
   Future<void> syncRecurringNotifications(String userId) async {
     if (userId.isEmpty) return;
     try {
+      // Đảm bảo các lịch manualConfirmation quá hạn 3 ngày được tự động chuyển kỳ
+      // trước khi tạo hoặc giữ lại thông báo nhắc hạn cũ.
+      await processDueRecurringTransactions(userId);
+
       final now = DateTime.now();
       final today = DateTime(now.year, now.month, now.day);
       final schedulesSnap = await _db
@@ -1163,48 +1283,105 @@ class FirestoreService {
           .where((s) => s.isActive)
           .toList();
 
+      final walletsSnap = await _db
+          .collection('wallets')
+          .where('userId', isEqualTo: userId)
+          .get();
+      final walletNamesMap = <String, String>{
+        for (final w in walletsSnap.docs)
+          w.id: WalletLocalizationHelper.localizeWallet(
+            Wallet.fromMap(w.data(), w.id),
+          ),
+      };
+
       for (final s in schedules) {
         final occurrenceKey =
             RecurringTransactionService.getOccurrenceKey(s.nextDueDate);
         if (s.lastProcessedKey == occurrenceKey) continue;
 
-        final displayName = s.note != null && s.note!.trim().isNotEmpty
-            ? s.note!.trim()
-            : (s.type == 'income' ? 'Thu nhập định kỳ' : 'Khoản chi định kỳ');
+        final rawNote = s.note?.trim() ?? '';
+        final rawNameToken = rawNote.isNotEmpty
+            ? rawNote
+            : (s.type == 'income'
+                ? 'Thu nhập định kỳ'
+                : 'Khoản chi định kỳ');
+        final displayName = rawNote.isNotEmpty
+            ? CategoryLocalizationHelper.localizeName(rawNote)
+            : (s.type == 'income'
+                ? AppLocalizations.tr('svc_fs_rec_in_default')
+                : AppLocalizations.tr('svc_fs_rec_out_default'));
         final isIncome = s.type == 'income';
-        final amountFormatted = '${AppFormatters.number(s.amount)} VNĐ';
+        final dirWord = isIncome
+            ? AppLocalizations.tr('svc_fs_rec_in_word')
+            : AppLocalizations.tr('svc_fs_rec_out_word');
+        final amountFormatted =
+            '${AppFormatters.number(s.amount)} ${LanguageController.isEnglish ? 'VND' : 'VNĐ'}';
         final dueDateOnly = DateTime(
           s.nextDueDate.year,
           s.nextDueDate.month,
           s.nextDueDate.day,
         );
 
-        // 1. Quá hạn
+        // 1. Quá hạn (chỉ nằm trong cửa sổ hiệu lực hoặc auto bị kẹt)
         if (dueDateOnly.isBefore(today)) {
-          final diffDays = today.difference(dueDateOnly).inDays;
+          final diffDays =
+              RecurringTransactionService.calendarDaysBetween(dueDateOnly, today);
+          final isManual =
+              s.postingMode == RecurringTransactionSchedule.postingModeManual;
+          if (isManual &&
+              diffDays >=
+                  RecurringTransactionService.manualConfirmationGraceDays) {
+            continue;
+          }
+          final dueDateStr = DateFormat('dd/MM/yyyy').format(s.nextDueDate);
           await createRecurringNotificationIfNotExists(
             userId: userId,
-            title: 'Khoản $displayName đang quá hạn',
-            content:
-                'Khoản ${isIncome ? 'thu' : 'chi'} $amountFormatted đã quá hạn $diffDays ngày (từ ${DateFormat('dd/MM/yyyy').format(s.nextDueDate)}). Chạm để xử lý ngay.',
+            title: AppLocalizations.tr('svc_fs_rec_overdue_title',
+                params: {'name': displayName}),
+            content: AppLocalizations.tr('svc_fs_rec_overdue_body', params: {
+              'dir': dirWord,
+              'amount': amountFormatted,
+              'days': '$diffDays',
+              'date': dueDateStr,
+            }),
             type: 'recurring_due',
             scheduleId: s.scheduleId,
             occurrenceKey: occurrenceKey,
+            titleKey: 'svc_fs_rec_overdue_title',
+            titleParams: {'name': rawNameToken},
+            contentKey: 'svc_fs_rec_overdue_body',
+            contentParams: {
+              'dir': isIncome ? 'income' : 'expense',
+              'amount': amountFormatted,
+              'days': '$diffDays',
+              'date': dueDateStr,
+            },
           );
         }
         // 2. Đến hạn hôm nay
         else if (dueDateOnly == today) {
           final isManual =
               s.postingMode == RecurringTransactionSchedule.postingModeManual;
+          final bodyKey =
+              isManual ? 'svc_fs_rec_today_manual' : 'svc_fs_rec_today_auto';
           await createRecurringNotificationIfNotExists(
             userId: userId,
-            title: 'Khoản $displayName đến hạn hôm nay',
-            content: isManual
-                ? 'Khoản ${isIncome ? 'thu' : 'chi'} $amountFormatted cần bạn xác nhận để ghi nhận vào sổ.'
-                : 'Khoản ${isIncome ? 'thu' : 'chi'} $amountFormatted sẽ được tự động hạch toán.',
+            title: AppLocalizations.tr('svc_fs_rec_today_title',
+                params: {'name': displayName}),
+            content: AppLocalizations.tr(bodyKey, params: {
+              'dir': dirWord,
+              'amount': amountFormatted,
+            }),
             type: 'recurring_due',
             scheduleId: s.scheduleId,
             occurrenceKey: occurrenceKey,
+            titleKey: 'svc_fs_rec_today_title',
+            titleParams: {'name': rawNameToken},
+            contentKey: bodyKey,
+            contentParams: {
+              'dir': isIncome ? 'income' : 'expense',
+              'amount': amountFormatted,
+            },
           );
         }
         // 3. Sắp đến hạn (theo reminderDaysBefore)
@@ -1215,18 +1392,43 @@ class FirestoreService {
             dueDateOnly.day - s.reminderDaysBefore,
           );
           if (!today.isBefore(reminderDate) && today.isBefore(dueDateOnly)) {
-            final daysLeft = dueDateOnly.difference(today).inDays;
+            final daysLeft = RecurringTransactionService.calendarDaysBetween(
+              today,
+              dueDateOnly,
+            );
+            final dueDateStr = DateFormat('dd/MM/yyyy').format(s.nextDueDate);
             await createRecurringNotificationIfNotExists(
               userId: userId,
-              title: 'Khoản $displayName sắp đến hạn',
-              content:
-                  'Còn $daysLeft ngày nữa đến hạn khoản ${isIncome ? 'thu' : 'chi'} $amountFormatted (${DateFormat('dd/MM/yyyy').format(s.nextDueDate)}).',
+              title: AppLocalizations.tr('svc_fs_rec_soon_title',
+                  params: {'name': displayName}),
+              content: AppLocalizations.tr('svc_fs_rec_soon_body', params: {
+                'days': '$daysLeft',
+                'dir': dirWord,
+                'amount': amountFormatted,
+                'date': dueDateStr,
+              }),
               type: 'recurring_reminder',
               scheduleId: s.scheduleId,
               occurrenceKey: occurrenceKey,
+              titleKey: 'svc_fs_rec_soon_title',
+              titleParams: {'name': rawNameToken},
+              contentKey: 'svc_fs_rec_soon_body',
+              contentParams: {
+                'days': '$daysLeft',
+                'dir': isIncome ? 'income' : 'expense',
+                'amount': amountFormatted,
+                'date': dueDateStr,
+              },
             );
           }
         }
+      }
+
+      if (LocalNotificationService().isInitialized) {
+        await LocalNotificationService().syncAllReminders(
+          schedules: schedules,
+          walletNamesMap: walletNamesMap,
+        );
       }
     } catch (e) {
       debugPrint('[syncRecurringNotifications] error: $e');
@@ -1241,23 +1443,24 @@ class FirestoreService {
     final walletDoc =
         await _db.collection('wallets').doc(schedule.walletId).get();
     if (!walletDoc.exists) {
-      throw Exception('Ví được chọn không tồn tại.');
+      throw Exception(AppLocalizations.tr('svc_fs_rec_val_wallet'));
     }
     final wallet = Wallet.fromMap(walletDoc.data()!, walletDoc.id);
     if (!wallet.isActive) {
-      throw Exception('Không thể tạo lịch giao dịch với ví đã bị ẩn.');
+      throw Exception(AppLocalizations.tr('svc_fs_rec_val_wallet_hidden'));
     }
 
     if (schedule.categoryId.isNotEmpty) {
       final catDoc =
           await _db.collection('categories').doc(schedule.categoryId).get();
       if (!catDoc.exists) {
-        throw Exception('Danh mục được chọn không tồn tại.');
+        throw Exception(AppLocalizations.tr('svc_fs_rec_val_cat'));
       }
     }
 
     final ref =
         await _db.collection('recurringTransactions').add(schedule.toMap());
+    await resyncLocalNotifications(schedule.userId, force: true);
     return ref.id;
   }
 
@@ -1277,10 +1480,18 @@ class FirestoreService {
   }
 
   Future<void> updateRecurringTransaction(
-      String scheduleId, Map<String, dynamic> data) {
+      String scheduleId, Map<String, dynamic> data) async {
     data.remove('userId'); // Bảo vệ userId không bị thay đổi
     data['updatedAt'] = DateTime.now().toIso8601String();
-    return _db.collection('recurringTransactions').doc(scheduleId).update(data);
+    await _db.collection('recurringTransactions').doc(scheduleId).update(data);
+    try {
+      final snap =
+          await _db.collection('recurringTransactions').doc(scheduleId).get();
+      final userId = (snap.data()?['userId'] ?? '').toString();
+      if (userId.isNotEmpty) {
+        await resyncLocalNotifications(userId, force: true);
+      }
+    } catch (_) {}
   }
 
   Future<void> setRecurringTransactionActive(String scheduleId, bool isActive) async {
@@ -1331,13 +1542,16 @@ class FirestoreService {
         scheduleId: scheduleId,
       );
     }
+    await resyncLocalNotifications(schedule.userId, force: true);
   }
 
   Future<void> deleteRecurringTransaction(String scheduleId) async {
+    String deletedUserId = '';
     try {
       final snap = await _db.collection('recurringTransactions').doc(scheduleId).get();
       if (snap.exists && snap.data() != null) {
         final userId = (snap.data()!['userId'] ?? '').toString();
+        deletedUserId = userId;
         if (userId.isNotEmpty) {
           await resolvePendingNotificationsForSchedule(
             userId: userId,
@@ -1348,6 +1562,9 @@ class FirestoreService {
     } catch (_) {}
     // Chỉ xóa schedule, không xóa lịch sử giao dịch đã tạo trước đó
     await _db.collection('recurringTransactions').doc(scheduleId).delete();
+    if (deletedUserId.isNotEmpty) {
+      await resyncLocalNotifications(deletedUserId, force: true);
+    }
   }
 
   Future<Map<String, dynamic>> processDueRecurringTransactions(
@@ -1366,19 +1583,149 @@ class FirestoreService {
         .where('isActive', isEqualTo: true)
         .get();
 
-    final schedules = querySnap.docs
+    final allActiveSchedules = querySnap.docs
         .map((d) => RecurringTransactionSchedule.fromMap(d.data(), d.id))
+        .toList();
+
+    final schedules = allActiveSchedules
         .where((s) => s.postingMode == RecurringTransactionSchedule.postingModeAuto)
+        .toList();
+
+    final manualSchedules = allActiveSchedules
+        .where(
+            (s) => s.postingMode == RecurringTransactionSchedule.postingModeManual)
         .toList();
 
     int processedCount = 0;
     int skippedCount = 0;
+    int autoSkippedManualCount = 0;
     final List<String> failedSchedules = [];
+
+    // 1. Tự động bỏ qua kỳ quá hạn > 3 ngày (grace period) cho lịch cần xác nhận (manualConfirmation).
+    // Tuyệt đối KHÔNG áp dụng cho lịch autoPost.
+    for (final manualSchedule in manualSchedules) {
+      if (manualSchedule.userId.isEmpty || manualSchedule.userId != userId) {
+        continue;
+      }
+
+      final graceEval = recService.evaluateManualGracePeriod(
+        schedule: manualSchedule,
+        referenceDate: now,
+      );
+      if (!graceEval.wasAutoSkipped) continue;
+
+      final scheduleRef = _db
+          .collection('recurringTransactions')
+          .doc(manualSchedule.scheduleId);
+
+      List<DateTime> committedSkippedDates = [];
+
+      try {
+        Future<void> executeAutoSkipTxn({required bool withOccurrence}) async {
+          await _db.runTransaction((txn) async {
+            final freshSnap = await txn.get(scheduleRef);
+            if (!freshSnap.exists || freshSnap.data() == null) return;
+            final freshSchedule = RecurringTransactionSchedule.fromMap(
+              freshSnap.data()!,
+              freshSnap.id,
+            );
+            if (!freshSchedule.isActive ||
+                freshSchedule.postingMode !=
+                    RecurringTransactionSchedule.postingModeManual) {
+              return;
+            }
+
+            final freshEval = recService.evaluateManualGracePeriod(
+              schedule: freshSchedule,
+              referenceDate: now,
+            );
+            if (!freshEval.wasAutoSkipped) return;
+
+            final occEntries = <Map<String, dynamic>>[];
+            if (withOccurrence) {
+              // Đọc tất cả occurrence docs trước khi ghi (Firestore transaction rule)
+              for (final skippedDate in freshEval.skippedDates) {
+                final occKey =
+                    RecurringTransactionService.getOccurrenceKey(skippedDate);
+                final occDocId = '${freshSchedule.scheduleId}_$occKey';
+                final occRef = _db
+                    .collection('recurringTransactionOccurrences')
+                    .doc(occDocId);
+                final occSnap = await txn.get(occRef);
+                occEntries.add({
+                  'date': skippedDate,
+                  'key': occKey,
+                  'ref': occRef,
+                  'exists': occSnap.exists,
+                });
+              }
+            }
+
+            final actionAt = DateTime.now();
+            if (withOccurrence) {
+              for (final entry in occEntries) {
+                if (entry['exists'] == true) continue;
+                txn.set(entry['ref'] as DocumentReference, {
+                  'userId': userId,
+                  'scheduleId': freshSchedule.scheduleId,
+                  'occurrenceKey': entry['key'] as String,
+                  'scheduledDate':
+                      (entry['date'] as DateTime).toIso8601String(),
+                  'action': 'skipped',
+                  'actionAt': actionAt.toIso8601String(),
+                  'skipReason': 'auto_grace_expired',
+                });
+              }
+            }
+
+            final lastSkippedKey = RecurringTransactionService.getOccurrenceKey(
+              freshEval.skippedDates.last,
+            );
+            txn.update(scheduleRef, {
+              'nextDueDate': freshEval.newNextDueDate.toIso8601String(),
+              'lastProcessedKey': lastSkippedKey,
+              'updatedAt': actionAt.toIso8601String(),
+            });
+
+            committedSkippedDates = freshEval.skippedDates;
+          });
+        }
+
+        try {
+          await executeAutoSkipTxn(withOccurrence: true);
+        } catch (e) {
+          if (_isPermissionDeniedError(e)) {
+            await executeAutoSkipTxn(withOccurrence: false);
+          } else {
+            rethrow;
+          }
+        }
+
+        if (committedSkippedDates.isNotEmpty) {
+          autoSkippedManualCount += committedSkippedDates.length;
+          for (final skippedDate in committedSkippedDates) {
+            final skippedKey =
+                RecurringTransactionService.getOccurrenceKey(skippedDate);
+            await resolveRecurringNotificationsForOccurrence(
+              userId: userId,
+              scheduleId: manualSchedule.scheduleId,
+              occurrenceKey: skippedKey,
+              resolutionNote:
+                  AppLocalizations.tr('svc_fs_rec_autoskip_note'),
+              resolutionContentKey: 'svc_fs_rec_autoskip_note',
+            );
+          }
+        }
+      } catch (e) {
+        debugPrint(
+            '[processDueRecurringTransactions] Auto-skip manual grace error for ${manualSchedule.scheduleId}: $e');
+      }
+    }
 
     for (final schedule in schedules) {
       if (schedule.userId.isEmpty || schedule.userId != userId) {
         failedSchedules.add(
-            'Lịch định kỳ "${schedule.scheduleId}" thiếu userId hợp lệ.');
+            AppLocalizations.tr('svc_fs_rec_missing_uid', params: {'id': schedule.scheduleId}));
         continue;
       }
 
@@ -1468,7 +1815,7 @@ class FirestoreService {
               type: schedule.type,
               note: schedule.note != null && schedule.note!.isNotEmpty
                   ? schedule.note
-                  : 'Giao dịch định kỳ',
+                  : AppLocalizations.tr('svc_fs_rec_tx_default'),
               date: occurrenceDate,
               recurringScheduleId: schedule.scheduleId,
               recurringOccurrenceKey: occurrenceKey,
@@ -1527,36 +1874,55 @@ class FirestoreService {
           }
         }
 
-        final displayName =
-            schedule.note != null && schedule.note!.trim().isNotEmpty
-                ? schedule.note!.trim()
-                : (schedule.type == 'income'
-                    ? 'Thu nhập định kỳ'
-                    : 'Khoản chi định kỳ');
+        final rawNote = schedule.note?.trim() ?? '';
+        final rawNameToken = rawNote.isNotEmpty
+            ? rawNote
+            : (schedule.type == 'income'
+                ? 'Thu nhập định kỳ'
+                : 'Khoản chi định kỳ');
+        final displayName = rawNote.isNotEmpty
+            ? CategoryLocalizationHelper.localizeName(rawNote)
+            : (schedule.type == 'income'
+                ? AppLocalizations.tr('svc_fs_rec_in_default')
+                : AppLocalizations.tr('svc_fs_rec_out_default'));
 
         if (transactionAlreadyExists) {
           skippedCount++;
         } else if (invalidUserData) {
           failedSchedules.add(
-              'Ví cho khoản "$displayName" thiếu userId hợp lệ.');
+              AppLocalizations.tr('svc_fs_rec_w_missing_uid', params: {'name': displayName}));
           stopSchedule = true;
         } else if (walletUnavailable) {
           failedSchedules.add(
-              'Ví cho khoản "$displayName" không khả dụng.');
+              AppLocalizations.tr('svc_fs_rec_w_unavailable', params: {'name': displayName}));
           stopSchedule = true;
         } else if (insufficientBalance) {
           failedSchedules.add(
-              'Ví không đủ số dư để thanh toán khoản "$displayName" (${schedule.amount.round()}đ).');
+              AppLocalizations.tr('svc_fs_rec_w_insufficient_fail', params: {
+                  'name': displayName,
+                  'amount': '${schedule.amount.round()}',
+                }));
           stopSchedule = true;
+          final failAmountStr = AppFormatters.currency(schedule.amount);
           await createRecurringNotificationIfNotExists(
             userId: userId,
             title:
-                'Không thể ghi nhận "$displayName" vì ví không đủ số dư',
+                AppLocalizations.tr('svc_fs_rec_fail_title', params: {'name': displayName}),
             content:
-                'Ví không đủ số dư để tự động thanh toán ${AppFormatters.currency(schedule.amount)} cho kỳ $occurrenceKey. Vui lòng nạp thêm tiền hoặc đổi ví khác.',
+                AppLocalizations.tr('svc_fs_rec_fail_body', params: {
+                  'amount': failAmountStr,
+                  'key': occurrenceKey,
+                }),
             type: 'recurring_failed',
             scheduleId: schedule.scheduleId,
             occurrenceKey: occurrenceKey,
+            titleKey: 'svc_fs_rec_fail_title',
+            titleParams: {'name': rawNameToken},
+            contentKey: 'svc_fs_rec_fail_body',
+            contentParams: {
+              'amount': failAmountStr,
+              'key': occurrenceKey,
+            },
           );
         } else {
           processedCount++;
@@ -1565,22 +1931,42 @@ class FirestoreService {
             scheduleId: schedule.scheduleId,
             occurrenceKey: occurrenceKey,
           );
+          final okAmountStr = AppFormatters.currency(schedule.amount);
           await createRecurringNotificationIfNotExists(
             userId: userId,
-            title: 'Đã tự động hạch toán "$displayName"',
+            title: AppLocalizations.tr('svc_fs_rec_ok_title', params: {'name': displayName}),
             content:
-                'Đã ghi nhận giao dịch ${schedule.type == 'income' ? 'thu nhập' : 'chi tiêu'} ${AppFormatters.currency(schedule.amount)} cho kỳ $occurrenceKey.',
+                AppLocalizations.tr('svc_fs_rec_ok_body', params: {
+                  'dir': schedule.type == 'income'
+                      ? AppLocalizations.tr('svc_fs_rec_in_full_word')
+                      : AppLocalizations.tr('svc_fs_rec_out_full_word'),
+                  'amount': okAmountStr,
+                  'key': occurrenceKey,
+                }),
             type: 'recurring_success',
             scheduleId: schedule.scheduleId,
             occurrenceKey: occurrenceKey,
+            titleKey: 'svc_fs_rec_ok_title',
+            titleParams: {'name': rawNameToken},
+            contentKey: 'svc_fs_rec_ok_body',
+            contentParams: {
+              'dir': schedule.type == 'income' ? 'income' : 'expense',
+              'amount': okAmountStr,
+              'key': occurrenceKey,
+            },
           );
         }
       }
     }
 
+    if (processedCount > 0 || autoSkippedManualCount > 0) {
+      await resyncLocalNotifications(userId, force: true);
+    }
+
     return {
       'processedCount': processedCount,
       'skippedCount': skippedCount,
+      'autoSkippedManualCount': autoSkippedManualCount,
       'failedSchedules': failedSchedules,
     };
   }
@@ -1611,39 +1997,43 @@ class FirestoreService {
         if (withOccurrence) {
           final occSnap = await txn.get(occurrenceRef);
           if (occSnap.exists) {
-            throw Exception('Kỳ giao dịch này đã được xác nhận hoặc xử lý trước đó.');
+            throw Exception(AppLocalizations.tr('svc_fs_rec_already_confirmed'));
           }
         }
         final txSnap = await txn.get(txRef);
         if (txSnap.exists) {
-          throw Exception('Giao dịch của kỳ này đã tồn tại.');
+          throw Exception(AppLocalizations.tr('svc_fs_rec_tx_exists'));
         }
 
         final scheduleSnap = await txn.get(scheduleRef);
         if (scheduleSnap.exists) {
           final sData = scheduleSnap.data();
           if (sData != null && sData['lastProcessedKey'] == occurrenceKey) {
-            throw Exception('Kỳ giao dịch này đã được xác nhận hoặc xử lý trước đó.');
+            throw Exception(AppLocalizations.tr('svc_fs_rec_already_confirmed'));
           }
         }
 
         final walletSnap = await txn.get(walletRef);
         if (!walletSnap.exists) {
-          throw Exception('Ví thực hiện không tồn tại.');
+          throw Exception(AppLocalizations.tr('svc_fs_rec_exec_w_missing'));
         }
         final walletData = walletSnap.data() as Map<String, dynamic>;
         final wallet = Wallet.fromMap(walletData, walletSnap.id);
 
         if (wallet.userId.isEmpty || wallet.userId != userId) {
-          throw Exception('Ví thực hiện thiếu userId hợp lệ.');
+          throw Exception(AppLocalizations.tr('svc_fs_rec_exec_w_uid'));
         }
         if (!wallet.isActive) {
-          throw Exception('Ví thực hiện đã bị ẩn hoặc không hoạt động.');
+          throw Exception(AppLocalizations.tr('svc_fs_rec_exec_w_inactive'));
         }
         if (schedule.type == 'expense' && wallet.balance < schedule.amount) {
           throw InsufficientBalanceException(
             message:
-                'Ví "${wallet.walletName}" không đủ số dư (${AppFormatters.currency(wallet.balance)}) để thanh toán ${AppFormatters.currency(schedule.amount)}.',
+                AppLocalizations.tr('svc_fs_rec_exec_w_insuff', params: {
+                  'wallet': wallet.walletName,
+                  'bal': AppFormatters.currency(wallet.balance),
+                  'req': AppFormatters.currency(schedule.amount),
+                }),
             walletName: wallet.walletName,
             currentBalance: wallet.balance,
             requiredAmount: schedule.amount,
@@ -1660,7 +2050,7 @@ class FirestoreService {
           type: schedule.type,
           note: schedule.note != null && schedule.note!.trim().isNotEmpty
               ? schedule.note!.trim()
-              : 'Giao dịch định kỳ',
+              : AppLocalizations.tr('svc_fs_rec_tx_default'),
           date: occurrenceDate,
           recurringScheduleId: schedule.scheduleId,
           recurringOccurrenceKey: occurrenceKey,
@@ -1710,13 +2100,24 @@ class FirestoreService {
       }
     }
 
+    final confirmedAmountStr = AppFormatters.currency(schedule.amount);
+    final confirmedTimeStr = DateFormat('HH:mm dd/MM/yyyy').format(DateTime.now());
     await resolveRecurringNotificationsForOccurrence(
       userId: userId,
       scheduleId: schedule.scheduleId,
       occurrenceKey: occurrenceKey,
       resolutionNote:
-          'Đã xác nhận thanh toán ${AppFormatters.currency(schedule.amount)} vào lúc ${DateFormat('HH:mm dd/MM/yyyy').format(DateTime.now())}.',
+          AppLocalizations.tr('svc_fs_rec_confirmed_note', params: {
+            'amount': confirmedAmountStr,
+            'time': confirmedTimeStr,
+          }),
+      resolutionContentKey: 'svc_fs_rec_confirmed_note',
+      resolutionContentParams: {
+        'amount': confirmedAmountStr,
+        'time': confirmedTimeStr,
+      },
     );
+    await resyncLocalNotifications(userId, force: true);
   }
 
   /// Bỏ qua kỳ giao dịch định kỳ thủ công
@@ -1739,7 +2140,7 @@ class FirestoreService {
         if (withOccurrence) {
           final occSnap = await txn.get(occurrenceRef);
           if (occSnap.exists) {
-            throw Exception('Kỳ giao dịch này đã được xử lý trước đó.');
+            throw Exception(AppLocalizations.tr('svc_fs_rec_already_processed'));
           }
         }
 
@@ -1747,7 +2148,7 @@ class FirestoreService {
         if (scheduleSnap.exists) {
           final sData = scheduleSnap.data();
           if (sData != null && sData['lastProcessedKey'] == occurrenceKey) {
-            throw Exception('Kỳ giao dịch này đã được xử lý trước đó.');
+            throw Exception(AppLocalizations.tr('svc_fs_rec_already_processed'));
           }
         }
 
@@ -1786,13 +2187,19 @@ class FirestoreService {
       }
     }
 
+    final skippedDateStr = DateFormat('dd/MM/yyyy').format(occurrenceDate);
     await resolveRecurringNotificationsForOccurrence(
       userId: userId,
       scheduleId: schedule.scheduleId,
       occurrenceKey: occurrenceKey,
       resolutionNote:
-          'Đã bỏ qua kỳ giao dịch ${DateFormat('dd/MM/yyyy').format(occurrenceDate)}.',
+          AppLocalizations.tr('svc_fs_rec_skipped_note', params: {
+            'date': skippedDateStr,
+          }),
+      resolutionContentKey: 'svc_fs_rec_skipped_note',
+      resolutionContentParams: {'date': skippedDateStr},
     );
+    await resyncLocalNotifications(userId, force: true);
   }
 
   /// Dời ngày giao dịch định kỳ thủ công
@@ -1815,7 +2222,7 @@ class FirestoreService {
         if (withOccurrence) {
           final occSnap = await txn.get(occurrenceRef);
           if (occSnap.exists) {
-            throw Exception('Kỳ giao dịch này đã được xử lý trước đó.');
+            throw Exception(AppLocalizations.tr('svc_fs_rec_already_processed'));
           }
         }
 
@@ -1823,7 +2230,7 @@ class FirestoreService {
         if (scheduleSnap.exists) {
           final sData = scheduleSnap.data();
           if (sData != null && sData['lastProcessedKey'] == occurrenceKey) {
-            throw Exception('Kỳ giao dịch này đã được xử lý trước đó.');
+            throw Exception(AppLocalizations.tr('svc_fs_rec_already_processed'));
           }
         }
 
@@ -1857,13 +2264,19 @@ class FirestoreService {
       }
     }
 
+    final deferredDateStr = DateFormat('dd/MM/yyyy').format(newDueDate);
     await resolveRecurringNotificationsForOccurrence(
       userId: userId,
       scheduleId: schedule.scheduleId,
       occurrenceKey: occurrenceKey,
       resolutionNote:
-          'Đã dời kỳ thanh toán sang ngày ${DateFormat('dd/MM/yyyy').format(newDueDate)}.',
+          AppLocalizations.tr('svc_fs_rec_deferred_note', params: {
+            'date': deferredDateStr,
+          }),
+      resolutionContentKey: 'svc_fs_rec_deferred_note',
+      resolutionContentParams: {'date': deferredDateStr},
     );
+    await resyncLocalNotifications(userId, force: true);
   }
 
   Stream<List<RecurringTransactionOccurrence>> streamRecurringOccurrences(
@@ -2098,10 +2511,9 @@ class FirestoreService {
       return results;
     } on FirebaseException catch (e) {
       if (e.code == 'failed-precondition') {
-        throw const FirestoreIndexRequiredException(
+        throw FirestoreIndexRequiredException(
           collection: 'transactions',
-          message:
-              'Truy vấn giao dịch theo khoảng thời gian cần Composite Index (userId ASC, date DESC) trên Firestore. Vui lòng đồng bộ firestore.indexes.json.',
+          message: AppLocalizations.tr('svc_fs_query_index_err'),
         );
       }
       rethrow;
@@ -2335,7 +2747,7 @@ class FirestoreService {
             if (conflicts.isNotEmpty) {
               throw PlanBudgetConflictException(
                 message:
-                    'Ngân sách của ${conflicts.length} danh mục vừa có thay đổi mới trước khi xác nhận. Vui lòng kiểm tra lại số liệu mới nhất.',
+                    AppLocalizations.tr('svc_fs_plan_conflict', params: {'count': '${conflicts.length}'}),
                 conflictingCategoryIds: conflicts,
                 latestBudgetsByCategory: latestLimitsByCat,
               );
@@ -2347,6 +2759,7 @@ class FirestoreService {
             int nextRevision = 1;
             List<PlanAdjustmentLog> historyToKeep =
                 planToCommit.adjustmentHistory;
+            final Set<String> mergedSelectedIds = {...selectedCategoryIds};
 
             if (oldPlan != null) {
               if (oldPlan.status != PlanLifecycleStatus.draft) {
@@ -2354,11 +2767,17 @@ class FirestoreService {
               }
               nextRevision = oldPlan.revision + 1;
               historyToKeep = oldPlan.adjustmentHistory;
+              for (final prevId in oldPlan.selectedCategoryIds) {
+                if (latestBudgetDocsByCat.containsKey(prevId)) {
+                  mergedSelectedIds.add(prevId);
+                }
+              }
             }
 
             final finalizedPlan = planToCommit.copyWith(
               planId: planDocId,
               status: resolvedStatus,
+              selectedCategoryIds: mergedSelectedIds.toList(),
               originalSnapshot: originalSnapshotToKeep,
               adjustmentHistory: historyToKeep,
               revision: nextRevision,
@@ -2386,8 +2805,18 @@ class FirestoreService {
               }
               final existingDoc = latestBudgetDocsByCat[alloc.categoryId];
               if (existingDoc != null) {
+                final existingBudgetObj = Budget.fromMap(
+                  existingDoc.data()!,
+                  existingDoc.id,
+                );
+                final bool alreadyOwnedByThisPlan =
+                    existingBudgetObj.sourcePlanId == planDocId;
                 txn.update(existingDoc.reference, {
                   'limit': alloc.recommendedLimit,
+                  'sourcePlanId': planDocId,
+                  'isManual': false,
+                  if (!alreadyOwnedByThisPlan)
+                    'prePlanLimit': existingBudgetObj.limit,
                 });
               } else {
                 final newBudgetRef = _db.collection('budgets').doc();
@@ -2397,6 +2826,9 @@ class FirestoreService {
                   categoryId: alloc.categoryId,
                   limit: alloc.recommendedLimit,
                   month: finalizedPlan.targetMonth,
+                  sourcePlanId: planDocId,
+                  prePlanLimit: null,
+                  isManual: false,
                 );
                 txn.set(newBudgetRef, newBudget.toMap());
               }
@@ -2490,7 +2922,7 @@ class FirestoreService {
 
           if (currentPlan == null) {
             throw Exception(
-                'Không tìm thấy kế hoạch tháng $targetMonth để điều chỉnh.');
+                AppLocalizations.tr('svc_fs_plan_not_found', params: {'month': targetMonth}));
           }
 
           final Map<String, DocumentSnapshot<Map<String, dynamic>>>
@@ -2589,6 +3021,412 @@ class FirestoreService {
 
     FinancialContextRevisionTracker.notifyDataMutated();
     return updatedPlan;
+  }
+
+  DateTime? _tryParseMonthYear(String mmYyyy) {
+    final parts = mmYyyy.split('/');
+    if (parts.length != 2) return null;
+    final int? month = int.tryParse(parts[0].trim());
+    final int? year = int.tryParse(parts[1].trim());
+    if (month == null || year == null || month < 1 || month > 12) return null;
+    return DateTime(year, month, 1);
+  }
+
+  double _computeUpdatedPlanSavingTarget({
+    required MonthlyFinancialPlan basePlan,
+    required double essentialCap,
+    required double flexibleCap,
+    required bool isEssentialDeficit,
+  }) {
+    if (basePlan.referenceIncome <= 0 ||
+        basePlan.incomeMode == IncomeStabilityMode.noIncomeBasis ||
+        isEssentialDeficit) {
+      return 0.0;
+    }
+    final double maxAchievable = math.max(
+      0.0,
+      basePlan.referenceIncome - essentialCap - flexibleCap,
+    );
+    final double origMaxAchievable = math.max(
+      0.0,
+      basePlan.referenceIncome -
+          basePlan.essentialExpenseCap -
+          basePlan.flexibleExpenseCap,
+    );
+    if (basePlan.desiredGoalSavingAmount > 0 &&
+        (basePlan.targetSavingAmount - origMaxAchievable).abs() > 10.0 &&
+        basePlan.desiredGoalSavingAmount < maxAchievable) {
+      return basePlan.desiredGoalSavingAmount;
+    }
+    return maxAchievable;
+  }
+
+  /// Đồng bộ lại các Kế hoạch Tháng tương lai (`status == approved` / `draft`,
+  /// `targetMonth` sau `sourceMonth` và sau tháng hiện tại) cùng các Hạn mức (Budget)
+  /// do kế hoạch đó tạo ra khi giao dịch chi tiêu ở `sourceMonth` bị xóa hoặc giảm.
+  Future<void> _syncFutureMonthlyPlansAfterSourceExpenseChange({
+    required String userId,
+    required String sourceMonth,
+    required Set<String> affectedCategoryIds,
+    DateTime? currentReferenceDate,
+  }) async {
+    if (userId.isEmpty || affectedCategoryIds.isEmpty) return;
+    final DateTime? sourceMonthDate = _tryParseMonthYear(sourceMonth);
+    if (sourceMonthDate == null) return;
+
+    final DateTime nowRef = currentReferenceDate ?? DateTime.now();
+    final DateTime currentMonthDate = DateTime(nowRef.year, nowRef.month, 1);
+
+    final bool shouldTryTopLevel =
+        _customDb != null || !_topLevelMonthlyPlansBlocked;
+
+    final Map<String, MonthlyFinancialPlan> candidatePlans = {};
+    final Set<String> topLevelDocIds = {};
+    final Set<String> userMapPlanIds = {};
+    Map<String, dynamic>? userMonthlyPlansMap;
+    final userRef = _db.collection('users').doc(userId);
+
+    bool isSyncableFuturePlan(MonthlyFinancialPlan p) {
+      if (p.sourceMonth != sourceMonth) return false;
+      if (p.status != PlanLifecycleStatus.approved &&
+          p.status != PlanLifecycleStatus.draft) {
+        return false;
+      }
+      final targetDate = _tryParseMonthYear(p.targetMonth);
+      if (targetDate == null) return false;
+      return targetDate.isAfter(sourceMonthDate) &&
+          targetDate.isAfter(currentMonthDate);
+    }
+
+    if (shouldTryTopLevel) {
+      try {
+        final planSnap = await _db
+            .collection('monthly_plans')
+            .where('userId', isEqualTo: userId)
+            .get();
+        for (final doc in planSnap.docs) {
+          final p = MonthlyFinancialPlan.fromMap(doc.data(), doc.id);
+          if (isSyncableFuturePlan(p)) {
+            candidatePlans[p.planId] = p;
+            topLevelDocIds.add(doc.id);
+          }
+        }
+      } catch (e) {
+        if (_isPermissionDeniedError(e) && _customDb == null) {
+          _topLevelMonthlyPlansBlocked = true;
+        }
+      }
+    }
+
+    try {
+      final userSnap = await userRef.get();
+      final userData = userSnap.data();
+      final rawPlans = userData?['monthlyPlans'];
+      if (rawPlans is Map) {
+        userMonthlyPlansMap = Map<String, dynamic>.from(rawPlans);
+        for (final entry in userMonthlyPlansMap.entries) {
+          if (entry.value is! Map) continue;
+          final rawMap = Map<String, dynamic>.from(entry.value as Map);
+          final targetM = (rawMap['targetMonth'] ?? '').toString();
+          final docId = targetM.isNotEmpty
+              ? _buildPlanDocId(userId, targetM)
+              : '${userId}_${entry.key}';
+          final p = MonthlyFinancialPlan.fromMap(rawMap, docId);
+          if (isSyncableFuturePlan(p)) {
+            candidatePlans.putIfAbsent(p.planId, () => p);
+            userMapPlanIds.add(p.planId);
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[_syncFutureMonthlyPlans] Lỗi đọc fallback users/{uid}: $e');
+    }
+
+    if (candidatePlans.isEmpty) return;
+
+    // Tính lại tổng thực chi từng danh mục còn lại ở sourceMonth
+    final monthStart = DateTime(sourceMonthDate.year, sourceMonthDate.month, 1);
+    final monthEnd = DateTime(
+      sourceMonthDate.year,
+      sourceMonthDate.month + 1,
+      0,
+      23,
+      59,
+      59,
+      999,
+    );
+
+    List<AppTransaction> sourceMonthTx;
+    try {
+      sourceMonthTx = await getTransactionsByDateWindow(
+        userId,
+        from: monthStart,
+        to: monthEnd,
+      );
+    } catch (_) {
+      sourceMonthTx = await getTransactionsSafely(userId);
+    }
+
+    final Map<String, double> remainingSpentByCat = {};
+    for (final tx in sourceMonthTx) {
+      if (tx.type == 'expense' &&
+          DateFormat('MM/yyyy').format(tx.date) == sourceMonth) {
+        remainingSpentByCat[tx.categoryId] =
+            (remainingSpentByCat[tx.categoryId] ?? 0) + tx.amount;
+      }
+    }
+
+    for (final plan in candidatePlans.values) {
+      final budgetQuery = await _db
+          .collection('budgets')
+          .where('userId', isEqualTo: userId)
+          .where('month', isEqualTo: plan.targetMonth)
+          .get();
+
+      final Map<String, QueryDocumentSnapshot<Map<String, dynamic>>>
+          budgetDocByCat = {};
+      final Set<String> budgetOwnedCatIds = {};
+
+      for (final bDoc in budgetQuery.docs) {
+        final b = Budget.fromMap(bDoc.data(), bDoc.id);
+        budgetDocByCat[b.categoryId] = bDoc;
+        if (b.sourcePlanId == plan.planId) {
+          budgetOwnedCatIds.add(b.categoryId);
+        }
+      }
+
+      final Map<String, PlannedCategoryAllocation> originalByCat = {
+        for (final a in plan.originalSnapshot.allocations) a.categoryId: a,
+      };
+      final Set<String> effectiveSelectedIds = {
+        ...plan.selectedCategoryIds,
+        ...budgetOwnedCatIds,
+      };
+      final Set<String> updatedSelectedIds = {...effectiveSelectedIds};
+
+      final List<PlannedCategoryAllocation> updatedAllocations = [];
+      final List<PlannedCategoryAllocation> updatedOriginalAllocations = [];
+      bool planChanged = false;
+      bool budgetMutations = false;
+
+      final WriteBatch batch = _db.batch();
+
+      for (final alloc in plan.currentAllocations) {
+        final origAlloc = originalByCat[alloc.categoryId];
+
+        if (!affectedCategoryIds.contains(alloc.categoryId)) {
+          updatedAllocations.add(alloc);
+          if (origAlloc != null) {
+            updatedOriginalAllocations.add(origAlloc);
+          }
+          continue;
+        }
+
+        final double remainingSpent =
+            remainingSpentByCat[alloc.categoryId] ?? 0.0;
+
+        if (remainingSpent >= alloc.sourceMonthSpent - 0.01) {
+          updatedAllocations.add(alloc);
+          if (origAlloc != null) {
+            updatedOriginalAllocations.add(origAlloc);
+          }
+          continue;
+        }
+
+        final budgetSnap = budgetDocByCat[alloc.categoryId];
+        final Budget? budgetObj = budgetSnap != null
+            ? Budget.fromMap(budgetSnap.data(), budgetSnap.id)
+            : null;
+        final bool budgetManagedByPlan = budgetObj != null &&
+            (budgetObj.sourcePlanId == plan.planId ||
+                (budgetObj.sourcePlanId == null &&
+                    !budgetObj.isManual &&
+                    origAlloc != null &&
+                    origAlloc.existingBudget == null &&
+                    (budgetObj.limit - alloc.recommendedLimit).abs() < 0.01 &&
+                    (effectiveSelectedIds.isEmpty ||
+                        effectiveSelectedIds.contains(alloc.categoryId))));
+
+        if (remainingSpent <= 0) {
+          if (budgetSnap != null && budgetManagedByPlan) {
+            if (budgetObj.prePlanLimit != null && budgetObj.prePlanLimit! > 0) {
+              final double restoredLimit = budgetObj.prePlanLimit!;
+              batch.update(budgetSnap.reference, {
+                'limit': restoredLimit,
+                'sourcePlanId': null,
+                'prePlanLimit': null,
+                'isManual': true,
+              });
+              budgetMutations = true;
+              updatedAllocations.add(alloc.copyWith(
+                sourceMonthSpent: 0,
+                regularBaselineSpent: 0,
+                recommendedLimit: restoredLimit,
+              ));
+              if (origAlloc != null) {
+                updatedOriginalAllocations.add(origAlloc.copyWith(
+                  sourceMonthSpent: 0,
+                  regularBaselineSpent: 0,
+                  recommendedLimit: restoredLimit,
+                ));
+              }
+              planChanged = true;
+            } else {
+              batch.delete(budgetSnap.reference);
+              budgetMutations = true;
+              updatedSelectedIds.remove(alloc.categoryId);
+              planChanged = true;
+            }
+          } else if (budgetSnap == null) {
+            updatedSelectedIds.remove(alloc.categoryId);
+            planChanged = true;
+          } else {
+            // Ngân sách đang được người dùng giữ/chỉnh sửa thủ công -> không xóa ngân sách,
+            // chỉ đồng bộ sourceMonthSpent thực tế về 0.
+            updatedAllocations.add(alloc.copyWith(
+              sourceMonthSpent: 0,
+              regularBaselineSpent: 0,
+              recommendedLimit: budgetObj!.limit,
+            ));
+            if (origAlloc != null) {
+              updatedOriginalAllocations.add(origAlloc.copyWith(
+                sourceMonthSpent: 0,
+                regularBaselineSpent: 0,
+              ));
+            }
+            planChanged = true;
+          }
+          continue;
+        }
+
+        // Trường hợp còn lại: 0 < remainingSpent < alloc.sourceMonthSpent
+        double newLimit;
+        if ((alloc.recommendedLimit - alloc.sourceMonthSpent).abs() < 1.0) {
+          newLimit = remainingSpent;
+        } else if (alloc.sourceMonthSpent > 0) {
+          final double scaled = remainingSpent *
+              (alloc.recommendedLimit / alloc.sourceMonthSpent);
+          newLimit = scaled < 10000
+              ? scaled.roundToDouble()
+              : ((scaled / 10000).round() * 10000).toDouble();
+          if (newLimit <= 0) newLimit = remainingSpent;
+        } else {
+          newLimit = remainingSpent;
+        }
+
+        if (budgetSnap != null && budgetManagedByPlan) {
+          batch.update(budgetSnap.reference, {'limit': newLimit});
+          budgetMutations = true;
+        }
+
+        updatedAllocations.add(alloc.copyWith(
+          sourceMonthSpent: remainingSpent,
+          regularBaselineSpent: remainingSpent,
+          recommendedLimit: newLimit,
+        ));
+        if (origAlloc != null) {
+          updatedOriginalAllocations.add(origAlloc.copyWith(
+            sourceMonthSpent: remainingSpent,
+            regularBaselineSpent: remainingSpent,
+            recommendedLimit: newLimit,
+          ));
+        }
+        planChanged = true;
+      }
+
+      if (!planChanged && !budgetMutations) continue;
+
+      final bool hadExplicitSelection = effectiveSelectedIds.isNotEmpty;
+      final bool shouldDeletePlan = updatedAllocations.isEmpty ||
+          (hadExplicitSelection && updatedSelectedIds.isEmpty);
+
+      final monthKey = _buildMonthMapKey(plan.targetMonth);
+
+      if (shouldDeletePlan) {
+        if (topLevelDocIds.contains(plan.planId)) {
+          batch.delete(_db.collection('monthly_plans').doc(plan.planId));
+        }
+        if (userMapPlanIds.contains(plan.planId) &&
+            userMonthlyPlansMap != null) {
+          userMonthlyPlansMap.remove(monthKey);
+          userMonthlyPlansMap.remove(plan.targetMonth);
+          batch.update(userRef, {
+            'monthlyPlans': Map<String, dynamic>.from(userMonthlyPlansMap),
+          });
+        }
+      } else {
+        final double newEssCap = updatedAllocations
+            .where((a) => a.isEssential)
+            .fold<double>(0, (s, a) => s + a.recommendedLimit);
+        final double newFlexCap = updatedAllocations
+            .where((a) => !a.isEssential)
+            .fold<double>(0, (s, a) => s + a.recommendedLimit);
+        final bool newEssDeficit =
+            plan.referenceIncome > 0 && newEssCap >= plan.referenceIncome;
+        final double newSaving = _computeUpdatedPlanSavingTarget(
+          basePlan: plan,
+          essentialCap: newEssCap,
+          flexibleCap: newFlexCap,
+          isEssentialDeficit: newEssDeficit,
+        );
+        final bool newGoalFeasible =
+            plan.desiredGoalSavingAmount <= newSaving + 1000.0;
+        final double newInfeasibleGap = newGoalFeasible
+            ? 0.0
+            : math.max(0.0, plan.desiredGoalSavingAmount - newSaving);
+
+        final double origEssCap = updatedOriginalAllocations
+            .where((a) => a.isEssential)
+            .fold<double>(0, (s, a) => s + a.recommendedLimit);
+        final double origFlexCap = updatedOriginalAllocations
+            .where((a) => !a.isEssential)
+            .fold<double>(0, (s, a) => s + a.recommendedLimit);
+        final bool origEssDeficit =
+            plan.referenceIncome > 0 && origEssCap >= plan.referenceIncome;
+        final double origSaving = _computeUpdatedPlanSavingTarget(
+          basePlan: plan,
+          essentialCap: origEssCap,
+          flexibleCap: origFlexCap,
+          isEssentialDeficit: origEssDeficit,
+        );
+
+        final updatedOriginalSnapshot = plan.originalSnapshot.copyWith(
+          essentialExpenseTotal: origEssCap,
+          flexibleExpenseTotal: origFlexCap,
+          targetSavingAmount: origSaving,
+          allocations: updatedOriginalAllocations,
+        );
+
+        final nextPlan = plan.copyWith(
+          essentialExpenseCap: newEssCap,
+          flexibleExpenseCap: newFlexCap,
+          targetSavingAmount: newSaving,
+          isEssentialDeficit: newEssDeficit,
+          isSavingGoalFeasible: newGoalFeasible,
+          infeasibleSavingGap: newInfeasibleGap,
+          currentAllocations: updatedAllocations,
+          selectedCategoryIds: updatedSelectedIds.toList(),
+          originalSnapshot: updatedOriginalSnapshot,
+          updatedAt: DateTime.now(),
+        );
+
+        if (topLevelDocIds.contains(plan.planId)) {
+          batch.set(
+            _db.collection('monthly_plans').doc(plan.planId),
+            nextPlan.toMap(),
+          );
+        }
+        if (userMapPlanIds.contains(plan.planId) &&
+            userMonthlyPlansMap != null) {
+          userMonthlyPlansMap[monthKey] = nextPlan.toMap();
+          batch.update(userRef, {
+            'monthlyPlans': Map<String, dynamic>.from(userMonthlyPlansMap),
+          });
+        }
+      }
+
+      await batch.commit();
+    }
   }
 
   // ---------------- ADMIN OPERATIONS (USERS, SYSTEM CATEGORIES, ANNOUNCEMENTS, AUDIT LOGS) ----------------
@@ -2796,202 +3634,6 @@ class FirestoreService {
         },
       ),
     );
-  }
-
-  // ---------------- ADMIN AI & KNOWLEDGE GOVERNANCE ----------------
-
-  /// Theo dõi bản cấu hình đã xuất bản (`published_configs/{configType}`).
-  /// Trả về `null` nếu tài liệu chưa tồn tại trên Firestore.
-  Stream<Map<String, dynamic>?> streamPublishedConfigMap(String configType) {
-    return _db
-        .collection(AiConfigSyncService.kPublishedConfigsCollection)
-        .doc(configType)
-        .snapshots()
-        .map((snap) {
-      if (!snap.exists || snap.data() == null) return null;
-      return Map<String, dynamic>.from(snap.data()!);
-    });
-  }
-
-  /// Kết hợp realtime `draft_configs/{configType}` và `_sandbox_verifications/{configType}`
-  /// thành một [DraftConfigEnvelope] để kiểm tra trạng thái Hash/HMAC.
-  Stream<DraftConfigEnvelope?> streamDraftConfigEnvelope(String configType) {
-    late final StreamController<DraftConfigEnvelope?> controller;
-    StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? draftSub;
-    StreamSubscription<DocumentSnapshot<Map<String, dynamic>>>? verifySub;
-
-    Map<String, dynamic>? latestDraft;
-    bool hasDraftEmission = false;
-    Map<String, dynamic>? latestVerification;
-
-    void emitCombined() {
-      if (!hasDraftEmission || controller.isClosed) return;
-      if (latestDraft == null) {
-        controller.add(null);
-        return;
-      }
-      controller.add(
-        DraftConfigEnvelope.fromMap(
-          latestDraft!,
-          configType: configType,
-          verificationDoc: latestVerification,
-        ),
-      );
-    }
-
-    controller = StreamController<DraftConfigEnvelope?>(
-      onListen: () {
-        draftSub = _db
-            .collection(AiConfigSyncService.kDraftConfigsCollection)
-            .doc(configType)
-            .snapshots()
-            .listen(
-          (snap) {
-            latestDraft = (snap.exists && snap.data() != null)
-                ? Map<String, dynamic>.from(snap.data()!)
-                : null;
-            hasDraftEmission = true;
-            emitCombined();
-          },
-          onError: (Object err, StackTrace st) {
-            if (!controller.isClosed) {
-              controller.addError(err, st);
-            }
-          },
-        );
-
-        verifySub = _db
-            .collection('_sandbox_verifications')
-            .doc(configType)
-            .snapshots()
-            .listen(
-          (snap) {
-            latestVerification = (snap.exists && snap.data() != null)
-                ? Map<String, dynamic>.from(snap.data()!)
-                : null;
-            emitCombined();
-          },
-          onError: (Object err, StackTrace st) {
-            // Không chặn toàn bộ Draft nếu _sandbox_verifications lỗi quyền tạm thời,
-            // nhưng chỉ ghi log; riêng lỗi permission-denied trên draft_configs vẫn nổi lên.
-            debugPrint('[streamDraftConfigEnvelope] verify sub error: $err');
-          },
-        );
-      },
-      onCancel: () async {
-        await draftSub?.cancel();
-        await verifySub?.cancel();
-      },
-    );
-
-    return controller.stream;
-  }
-
-  /// Lưu bản nháp cấu hình (`draft_configs/{configType}`) tuân thủ nghiêm ngặt Rules `hasAll`/`hasOnly`.
-  Future<void> saveDraftConfigDoc({
-    required String configType,
-    required Map<String, dynamic> draftPayload,
-    required String draftHash,
-    required String updatedBy,
-    String? changeNote,
-  }) async {
-    final cleanNote = changeNote?.trim();
-    await _db
-        .collection(AiConfigSyncService.kDraftConfigsCollection)
-        .doc(configType)
-        .set({
-      'configType': configType,
-      'draftPayload': draftPayload,
-      'draftHash': draftHash,
-      'updatedAt': DateTime.now().toIso8601String(),
-      'updatedBy': updatedBy,
-      if (cleanNote != null && cleanNote.isNotEmpty) 'changeNote': cleanNote,
-    });
-  }
-
-  /// Theo dõi lịch sử phiên bản cấu hình (`config_versions`) theo từng loại.
-  Stream<List<ConfigVersionSnapshot>> streamConfigVersions(String configType) {
-    return _db
-        .collection(AiConfigSyncService.kConfigVersionsCollection)
-        .where('configType', isEqualTo: configType)
-        .snapshots()
-        .map((snap) {
-      final list = snap.docs
-          .map((d) => ConfigVersionSnapshot.fromMap(d.data(), docId: d.id))
-          .toList();
-      list.sort((a, b) => b.versionNumber.compareTo(a.versionNumber));
-      return list;
-    });
-  }
-
-  /// Đọc danh sách tài liệu nháp Kho tri thức Tài chính (`financial_knowledge_drafts`).
-  Stream<List<Map<String, dynamic>>> streamKnowledgeDraftDocs() {
-    return _db
-        .collection(AiConfigSyncService.kDraftKnowledgeCollection)
-        .snapshots()
-        .map((snap) {
-      return snap.docs.map((d) {
-        final data = Map<String, dynamic>.from(d.data());
-        data['articleId'] ??= d.id;
-        return data;
-      }).toList();
-    });
-  }
-
-  /// Đọc danh sách tài liệu đã xuất bản Kho tri thức Tài chính (`financial_knowledge_published`).
-  Stream<List<Map<String, dynamic>>> streamKnowledgePublishedDocs() {
-    return _db
-        .collection(AiConfigSyncService.kPublishedKnowledgeCollection)
-        .snapshots()
-        .map((snap) {
-      return snap.docs.map((d) {
-        final data = Map<String, dynamic>.from(d.data());
-        data['articleId'] ??= d.id;
-        return data;
-      }).toList();
-    });
-  }
-
-  /// Lưu bản nháp bài viết Tri thức Tài chính (`financial_knowledge_drafts/{articleId}`).
-  /// Sử dụng merge để giữ nguyên metadata `lastPublishedVersion`/`lastPublishedAt` từ Server.
-  Future<void> saveKnowledgeDraftDoc({
-    required FinancialKnowledgeArticle article,
-    required String updatedBy,
-  }) async {
-    final docData = <String, dynamic>{
-      'articleId': article.articleId.trim(),
-      'title': article.title.trim(),
-      'topic': article.topic.trim(),
-      'triggerCondition': article.triggerCondition.code,
-      'priority': article.priority.clamp(1, 10),
-      'summaryForUser': article.summaryForUser.trim(),
-      'aiGroundingSnippet': article.aiGroundingSnippet.trim(),
-      'suggestedPrompts': article.suggestedPrompts,
-      'isActive': article.isActive,
-      'updatedAt': DateTime.now().toIso8601String(),
-      'updatedBy': updatedBy,
-    };
-    await _db
-        .collection(AiConfigSyncService.kDraftKnowledgeCollection)
-        .doc(article.articleId.trim())
-        .set(docData, SetOptions(merge: true));
-  }
-
-  /// Theo dõi danh sách phản hồi chất lượng AI (`ai_feedback_reports`).
-  Stream<List<AiFeedbackReport>> streamAiFeedbackReports({int limit = 200}) {
-    return _db
-        .collection(AiConfigSyncService.kFeedbackReportsCollection)
-        .snapshots()
-        .map((snap) {
-      final list = snap.docs
-          .map((d) => AiFeedbackReport.fromMap(d.data(), docId: d.id))
-          .toList();
-      list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-      if (list.length > limit) {
-        return list.sublist(0, limit);
-      }
-      return list;
-    });
   }
 }
 

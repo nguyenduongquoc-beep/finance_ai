@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../l10n/app_localizations.dart';
 import '../utils/constants.dart';
 import 'app_card.dart';
 
@@ -7,26 +8,6 @@ class WeeklyHeatmapCard extends StatelessWidget {
   final Map<String, List<int>> heatmapData;
 
   const WeeklyHeatmapCard({super.key, required this.heatmapData});
-
-  static const List<String> _dayLabels = [
-    'T2',
-    'T3',
-    'T4',
-    'T5',
-    'T6',
-    'T7',
-    'CN',
-  ];
-
-  static const List<String> _fullDayNames = [
-    'Thứ Hai',
-    'Thứ Ba',
-    'Thứ Tư',
-    'Thứ Năm',
-    'Thứ Sáu',
-    'Thứ Bảy',
-    'Chủ Nhật',
-  ];
 
   Color _cellColor(BuildContext context, int level) {
     final baseColor = Theme.of(context).colorScheme.primary;
@@ -107,7 +88,7 @@ class WeeklyHeatmapCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Nhịp độ chi tiêu theo tuần',
+                      context.tr('heatmap_title'),
                       style: TextStyle(
                         fontWeight: FontWeight.w600,
                         fontSize: 15,
@@ -116,7 +97,7 @@ class WeeklyHeatmapCard extends StatelessWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      'Phân bổ tần suất & cường độ chi 30 ngày qua',
+                      context.tr('heatmap_subtitle'),
                       style: TextStyle(
                         fontSize: 12,
                         color: context.appTextSecondary,
@@ -125,20 +106,28 @@ class WeeklyHeatmapCard extends StatelessWidget {
                   ],
                 ),
               ),
-              Container(
-                padding:
-                    const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                decoration: BoxDecoration(
-                  color: context.appBackground,
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: context.appBorder),
-                ),
-                child: Text(
-                  '30 ngày',
-                  style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w500,
-                    color: context.appTextSecondary,
+              const SizedBox(width: 8),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 96),
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: context.appBackground,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: context.appBorder),
+                  ),
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    child: Text(
+                      context.tr('heatmap_30_days'),
+                      maxLines: 1,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                        color: context.appTextSecondary,
+                      ),
+                    ),
                   ),
                 ),
               ),
@@ -166,22 +155,28 @@ class WeeklyHeatmapCard extends StatelessWidget {
                   child: Text.rich(
                     TextSpan(
                       children: [
-                        const TextSpan(text: 'Cao điểm: '),
+                        TextSpan(text: context.tr('heatmap_peak_prefix')),
                         TextSpan(
-                          text: _fullDayNames[peakDayIndex],
+                          text: context.tr('heatmap_day_$peakDayIndex'),
                           style: TextStyle(
                             fontWeight: FontWeight.w600,
                             color: context.appTextPrimary,
                           ),
                         ),
                         TextSpan(
-                          text: ' (Ngày thường $weekdayPct% • Cuối tuần $weekendPct%)',
+                          text: context.tr(
+                            'heatmap_weekday_weekend_ratio',
+                            params: {
+                              'weekday': '$weekdayPct',
+                              'weekend': '$weekendPct',
+                            },
+                          ),
                           style: TextStyle(color: context.appTextSecondary),
                         ),
                       ],
                     ),
                     style: const TextStyle(fontSize: 12),
-                    maxLines: 1,
+                    maxLines: 2,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -210,18 +205,22 @@ class WeeklyHeatmapCard extends StatelessWidget {
                               borderRadius: BorderRadius.circular(4),
                             )
                           : null,
-                      child: Text(
-                        _dayLabels[i],
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: i == peakDayIndex
-                              ? FontWeight.w700
-                              : FontWeight.w500,
-                          color: i == peakDayIndex
-                              ? Theme.of(context).colorScheme.primary
-                              : context.appTextSecondary,
+                        child: FittedBox(
+                          fit: BoxFit.scaleDown,
+                          child: Text(
+                            context.tr('heatmap_wd_$i'),
+                            maxLines: 1,
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: i == peakDayIndex
+                                  ? FontWeight.w700
+                                  : FontWeight.w500,
+                              color: i == peakDayIndex
+                                  ? Theme.of(context).colorScheme.primary
+                                  : context.appTextSecondary,
+                            ),
+                          ),
                         ),
-                      ),
                     ),
                   ),
                 ),
@@ -281,9 +280,16 @@ class WeeklyHeatmapCard extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.end,
             children: [
-              Text(
-                'Ít',
-                style: TextStyle(fontSize: 11, color: context.appTextSecondary),
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    context.tr('heatmap_low'),
+                    maxLines: 1,
+                    style: TextStyle(
+                        fontSize: 11, color: context.appTextSecondary),
+                  ),
+                ),
               ),
               const SizedBox(width: 6),
               ...List.generate(
@@ -299,9 +305,16 @@ class WeeklyHeatmapCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 6),
-              Text(
-                'Nhiều',
-                style: TextStyle(fontSize: 11, color: context.appTextSecondary),
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    context.tr('heatmap_high'),
+                    maxLines: 1,
+                    style: TextStyle(
+                        fontSize: 11, color: context.appTextSecondary),
+                  ),
+                ),
               ),
             ],
           ),

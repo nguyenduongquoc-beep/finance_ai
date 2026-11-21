@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../../l10n/app_localizations.dart';
+import '../../models/user_model.dart';
 import '../../services/auth_service.dart';
+import '../../services/firestore_service.dart';
 import '../../utils/constants.dart';
 import '../../widgets/app_button.dart';
 import '../../widgets/app_text_field.dart';
-import '../setup/profile_setup_screen.dart';
+import '../setup/wallet_setup_screen.dart';
 
 /// Register Screen - Nhập Họ tên, Email, Password, Confirm Password
 class RegisterScreen extends StatefulWidget {
@@ -31,8 +34,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
   Future<void> _handleRegister() async {
     if (!_formKey.currentState!.validate()) return;
     if (!_agreeToTerms) {
-      setState(() => _errorMessage =
-          'Bạn phải đồng ý với Điều khoản & Chính sách bảo mật.');
+      setState(() => _errorMessage = AppLocalizations.tr('auth_terms_required'));
       return;
     }
 
@@ -41,18 +43,31 @@ class _RegisterScreenState extends State<RegisterScreen> {
       _errorMessage = null;
     });
     try {
-      await _authService.registerWithEmail(
-        email: _emailController.text.trim(),
+      final name = _nameController.text.trim();
+      final email = _emailController.text.trim();
+      final credential = await _authService.registerWithEmail(
+        email: email,
         password: _passwordController.text,
-        name: _nameController.text.trim(),
+        name: name,
       );
+      final uid = credential.user?.uid ?? '';
+      if (uid.isNotEmpty) {
+        await FirestoreService().createUserProfile(
+          AppUser(
+            uid: uid,
+            name: name,
+            email: email,
+            createdAt: DateTime.now(),
+          ),
+        );
+      }
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const ProfileSetupScreen()),
+        MaterialPageRoute(builder: (_) => const WalletSetupScreen()),
       );
     } catch (e) {
       setState(() =>
-          _errorMessage = 'Đăng ký thất bại. Email có thể đã được sử dụng.');
+          _errorMessage = AppLocalizations.tr('auth_err_register_failed'));
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -80,7 +95,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  'Tạo tài khoản ✨',
+                  context.tr('auth_create_title'),
                   style: GoogleFonts.inter(
                     fontSize: 26,
                     fontWeight: FontWeight.w600,
@@ -89,7 +104,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 ),
                 const SizedBox(height: 6),
                 Text(
-                  'Bắt đầu quản lý tài chính thông minh hơn cùng với Finance AI',
+                  context.tr('auth_create_sub'),
                   style: GoogleFonts.inter(
                     fontSize: 14,
                     color: context.appTextSecondary,
@@ -101,11 +116,11 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 // Name
                 AppTextField(
                   controller: _nameController,
-                  labelText: 'Họ và tên',
-                  hintText: 'Nguyễn Văn A',
+                  labelText: context.tr('auth_name_label'),
+                  hintText: context.tr('auth_name_hint'),
                   prefixIcon: Icons.person_outline_rounded,
                   validator: (v) => (v == null || v.trim().isEmpty)
-                      ? 'Vui lòng nhập họ tên'
+                      ? context.tr('auth_name_required')
                       : null,
                 ),
                 const SizedBox(height: 16),
@@ -113,12 +128,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 // Email
                 AppTextField(
                   controller: _emailController,
-                  labelText: 'Địa chỉ Email',
-                  hintText: 'nguyenvana@gmail.com',
+                  labelText: context.tr('auth_email_label'),
+                  hintText: context.tr('auth_email_hint'),
                   prefixIcon: Icons.email_outlined,
                   keyboardType: TextInputType.emailAddress,
                   validator: (v) => (v == null || !v.contains('@'))
-                      ? 'Email không hợp lệ'
+                      ? context.tr('auth_email_invalid')
                       : null,
                 ),
                 const SizedBox(height: 16),
@@ -126,7 +141,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 // Password
                 AppTextField(
                   controller: _passwordController,
-                  labelText: 'Mật khẩu',
+                  labelText: context.tr('auth_password_label'),
                   hintText: '••••••••',
                   prefixIcon: Icons.lock_outline_rounded,
                   obscureText: _obscurePassword,
@@ -142,7 +157,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         setState(() => _obscurePassword = !_obscurePassword),
                   ),
                   validator: (v) => (v == null || v.length < 6)
-                      ? 'Mật khẩu tối thiểu 6 ký tự'
+                      ? context.tr('auth_password_min')
                       : null,
                 ),
                 const SizedBox(height: 16),
@@ -150,7 +165,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                 // Confirm Password
                 AppTextField(
                   controller: _confirmPasswordController,
-                  labelText: 'Xác nhận mật khẩu',
+                  labelText: context.tr('auth_confirm_pw_label'),
                   hintText: '••••••••',
                   prefixIcon: Icons.lock_outline_rounded,
                   obscureText: _obscureConfirmPassword,
@@ -166,10 +181,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         _obscureConfirmPassword = !_obscureConfirmPassword),
                   ),
                   validator: (v) {
-                    if (v == null || v.isEmpty)
-                      return 'Vui lòng xác nhận mật khẩu';
-                    if (v != _passwordController.text)
-                      return 'Mật khẩu không khớp';
+                    if (v == null || v.isEmpty) {
+                      return context.tr('auth_confirm_pw_required');
+                    }
+                    if (v != _passwordController.text) {
+                      return context.tr('auth_pw_mismatch');
+                    }
                     return null;
                   },
                 ),
@@ -196,7 +213,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
-                        'Tôi đồng ý với Điều khoản và Chính sách bảo mật của ứng dụng',
+                        context.tr('auth_terms_agree'),
                         style: GoogleFonts.inter(
                           fontSize: 13,
                           color: context.appTextSecondary,
@@ -230,7 +247,9 @@ class _RegisterScreenState extends State<RegisterScreen> {
 
                 // Register Button
                 AppButton(
-                  text: 'Đăng ký',
+                  text: context.tr('auth_register_btn'),
+                  backgroundColor: const Color(0xFF161F28),
+                  textColor: Colors.white,
                   isLoading: _isLoading,
                   onPressed: _handleRegister,
                 ),
@@ -242,14 +261,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
                     onPressed: () => Navigator.of(context).pop(),
                     child: Text.rich(
                       TextSpan(
-                        text: 'Đã có tài khoản? ',
+                        text: context.tr('auth_have_account'),
                         style: GoogleFonts.inter(
                           color: context.appTextSecondary,
                           fontSize: 14,
                         ),
                         children: [
                           TextSpan(
-                            text: 'Đăng nhập',
+                            text: context.tr('auth_login_btn'),
                             style: GoogleFonts.inter(
                               color: AppColors.primaryLight,
                               fontWeight: FontWeight.w600,

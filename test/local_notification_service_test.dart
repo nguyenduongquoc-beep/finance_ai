@@ -33,7 +33,7 @@ void main() {
       expect(items, isEmpty);
     });
 
-    test('2. reminderDaysBefore == 0 yields 0 notifications', () {
+    test('2. reminderDaysBefore == 0 yields only due date notifications (no advance notifications)', () {
       final schedule = RecurringTransactionSchedule(
         scheduleId: 'sch_no_reminder',
         userId: 'u1',
@@ -55,7 +55,10 @@ void main() {
         referenceDate: refDate,
       );
 
-      expect(items, isEmpty);
+      expect(items.isNotEmpty, isTrue);
+      // All items must be due-date notifications, no advance notifications
+      expect(items.every((it) => it.isOnDueDate), isTrue);
+      expect(items.any((it) => !it.isOnDueDate), isFalse);
     });
 
     test('3. reminderDaysBefore == 3 generates both advance and due date notifications', () {
@@ -237,6 +240,75 @@ void main() {
       }
 
       expect(totalItems, greaterThan(0));
+    });
+
+    test('9. extractScheduleIdFromPayload handles prefixed string & JSON formats safely', () {
+      expect(
+        LocalNotificationService.extractScheduleIdFromPayload(
+            'bill_reminder_v1:sch_abc_123'),
+        equals('sch_abc_123'),
+      );
+      expect(
+        LocalNotificationService.extractScheduleIdFromPayload(
+            'bill_reminder_v1:{"scheduleId":"sch_json_99"}'),
+        equals('sch_json_99'),
+      );
+      expect(
+        LocalNotificationService.extractScheduleIdFromPayload('bill_reminder_v1:   '),
+        isNull,
+      );
+      expect(
+        LocalNotificationService.extractScheduleIdFromPayload('{bad_json'),
+        isNull,
+      );
+    });
+  });
+
+  group('LocalNotificationService Deep-Link Queue & Dispatch Tests', () {
+    tearDown(() {
+      LocalNotificationService().resetNavigationReadiness();
+      LocalNotificationService.onOpenRecurringSchedule = null;
+      LocalNotificationService.canNavigateToDeepLink = null;
+    });
+
+    testWidgets(
+        '10. Queues payload during Splash/unauthenticated start and dispatches once MainNavigation is ready',
+        (WidgetTester tester) async {
+      final service = LocalNotificationService();
+      service.resetNavigationReadiness();
+      final openedIds = <String>[];
+      LocalNotificationService.onOpenRecurringSchedule = openedIds.add;
+      var loggedInAndNavigatorReady = false;
+      LocalNotificationService.canNavigateToDeepLink =
+          () => loggedInAndNavigatorReady;
+
+      // App launches from notification before login/MainNavigation finishes
+      service.handleOrQueuePayloadForTest('bill_reminder_v1:sch_cold_start');
+      await tester.pump();
+
+      expect(openedIds, isEmpty);
+      expect(
+        service.pendingPayloadForTest,
+        equals('bill_reminder_v1:sch_cold_start'),
+      );
+
+      // Calling consume while Splash/Auth is still active keeps payload queued
+      service.consumePendingPayloadIfAny();
+      await tester.pump();
+      expect(openedIds, isEmpty);
+
+      // Once user passes login & MainNavigation mounts
+      LocalNotificationService.isAppReadyForDeepLink = true;
+      loggedInAndNavigatorReady = true;
+      service.consumePendingPayloadIfAny();
+      await tester.pump();
+
+      expect(openedIds, equals(['sch_cold_start']));
+      expect(service.pendingPayloadForTest, isNull);
+
+      // Subsequent in-app / background tap dispatches immediately
+      service.handleOrQueuePayloadForTest('bill_reminder_v1:sch_live_tap');
+      expect(openedIds, equals(['sch_cold_start', 'sch_live_tap']));
     });
   });
 }

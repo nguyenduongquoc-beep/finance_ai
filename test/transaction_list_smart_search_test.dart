@@ -261,5 +261,186 @@ void main() {
       // Dòng tiền ròng: 15,000,000 - 295,000 = 14,705,000
       expect(overview.netFlow, equals(14705000.0));
     });
+
+    test('9. Tìm kiếm song ngữ Anh-Việt cho danh mục hệ thống, loại giao dịch và ngày tháng',
+        () {
+      final catFood = Category(
+        categoryId: 'cat_food_sys',
+        userId: 'u1',
+        name: 'Ăn uống',
+        type: 'expense',
+        icon: 'restaurant',
+        color: 0xFF000000,
+      );
+      final catCustom = Category(
+        categoryId: 'cat_custom',
+        userId: 'u1',
+        name: 'Quỹ trà sữa',
+        type: 'expense',
+        icon: 'cafe',
+        color: 0xFF000000,
+      );
+
+      final catSysSalary = Category(
+        categoryId: 'cat_salary_sys',
+        userId: 'u1',
+        name: 'Lương',
+        type: 'income',
+        icon: 'work',
+        color: 0xFF10B981,
+      );
+
+      // Danh mục hệ thống lưu bằng tiếng Việt vẫn tìm được bằng tiếng Anh
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+            txCoffee, catFood, walletCash, null, 'Food'),
+        isTrue,
+      );
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+            txSalary, catSysSalary, walletBank, null, 'Salary'),
+        isTrue,
+      );
+
+      // Danh mục cá nhân giữ nguyên, không bị dịch sai sang tiếng Anh
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+            txCoffee, catCustom, walletCash, null, 'tra sua'),
+        isTrue,
+      );
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+            txCoffee, catCustom, walletCash, null, 'milk tea'),
+        isFalse,
+      );
+
+      // Loại giao dịch bằng tiếng Anh
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+            txSalary, catSalary, walletBank, null, 'income'),
+        isTrue,
+      );
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+            txCoffee, catFood, walletCash, null, 'expense'),
+        isTrue,
+      );
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+            txTransfer, null, walletBank, walletCash, 'transfer'),
+        isTrue,
+      );
+
+      // Ngày tháng bằng tiếng Anh
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+          txCoffee,
+          catFood,
+          walletCash,
+          null,
+          'today',
+          referenceDate: fixedDate,
+        ),
+        isTrue,
+      );
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+          txSalary,
+          catSalary,
+          walletBank,
+          null,
+          'yesterday',
+          referenceDate: fixedDate,
+        ),
+        isTrue,
+      );
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+          txCoffee,
+          catFood,
+          walletCash,
+          null,
+          'oct',
+          referenceDate: fixedDate,
+        ),
+        isTrue,
+      );
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+          txShopping,
+          null,
+          walletBank,
+          null,
+          'month 9',
+          referenceDate: fixedDate,
+        ),
+        isTrue,
+      );
+    });
+
+    test('10. Tim kiem hai chieu cho vi Tien mat mac dinh va giao dich muc tieu tiet kiem',
+        () {
+      final presetCash = Wallet(
+        walletId: 'w_sys_cash',
+        userId: 'u1',
+        walletName: 'Tiền mặt',
+        balance: 500000,
+        type: 'cash',
+        isUserNamed: false,
+        createdAt: fixedDate,
+      );
+      final customCash = Wallet(
+        walletId: 'w_usr_cash',
+        userId: 'u1',
+        walletName: 'Tiền mặt',
+        balance: 500000,
+        type: 'cash',
+        isUserNamed: true,
+        createdAt: fixedDate,
+      );
+      final goalDep = AppTransaction(
+        transactionId: 'tx_g1',
+        userId: 'u1',
+        walletId: 'w_sys_cash',
+        categoryId: '',
+        amount: 2000000,
+        type: 'goal_deposit',
+        goalId: 'g1',
+        note: 'Nạp vào mục tiêu "Laptop" từ ví Tiền mặt',
+        date: fixedDate,
+      );
+
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+          goalDep,
+          null,
+          presetCash,
+          null,
+          'Cash',
+        ),
+        isTrue,
+      );
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+          goalDep,
+          null,
+          presetCash,
+          null,
+          'Deposit to goal',
+        ),
+        isTrue,
+      );
+      // Vi do nguoi dung tu dat "Tien mat" giu nguyen khong map thanh Cash
+      expect(
+        TransactionSearchFilterHelper.matchesSearch(
+          txShopping,
+          null,
+          customCash,
+          null,
+          'Cash',
+        ),
+        isFalse,
+      );
+    });
   });
 }

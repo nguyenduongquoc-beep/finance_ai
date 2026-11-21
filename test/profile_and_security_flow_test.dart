@@ -1,5 +1,7 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:finance_ai_app/models/user_model.dart';
+import 'package:finance_ai_app/screens/profile_screen.dart';
 import 'package:finance_ai_app/utils/formatters.dart';
 
 void main() {
@@ -172,6 +174,67 @@ void main() {
           equals('Google + Email/Mật khẩu'));
       expect(resolveProviderLabel(hasGoogle: false, hasPassword: false),
           equals('Email'));
+    });
+
+    // -------------------------------------------------------------
+    // 6. Redesigned Logout Confirmation Dialog UI/UX Tests
+    // -------------------------------------------------------------
+    testWidgets(
+        '6.1. Hộp thoại đăng xuất hiện đại: bấm Hủy, bấm X hoặc chạm ra ngoài hộp thoại đều tương ứng với hủy bỏ (không đăng xuất); bấm Đăng xuất trả về true',
+        (tester) async {
+      bool? dialogResult = true;
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Builder(
+            builder: (ctx) => Scaffold(
+              body: Center(
+                child: ElevatedButton(
+                  onPressed: () async {
+                    dialogResult = await showLogoutConfirmationDialog(
+                      ctx,
+                      userEmail: 'user@financeai.vn',
+                    );
+                  },
+                  child: const Text('Open Logout Dialog'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      // 1. Mở hộp thoại và bấm nút "Hủy" -> trả về false
+      await tester.tap(find.text('Open Logout Dialog'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Đăng xuất tài khoản?'), findsOneWidget);
+      expect(find.text('user@financeai.vn'), findsOneWidget);
+      expect(find.text('Hủy'), findsOneWidget);
+      expect(find.text('Đăng xuất'), findsOneWidget);
+
+      await tester.tap(find.byKey(const ValueKey('logout_dialog_cancel')));
+      await tester.pumpAndSettle();
+      expect(dialogResult, isFalse);
+      expect(find.text('Đăng xuất tài khoản?'), findsNothing);
+
+      // 2. Mở lại hộp thoại và chạm ra ngoài vùng hộp thoại (barrier) -> đóng hộp thoại (dialogResult == null, tương đương hủy)
+      dialogResult = true;
+      await tester.tap(find.text('Open Logout Dialog'));
+      await tester.pumpAndSettle();
+      expect(find.text('Đăng xuất tài khoản?'), findsOneWidget);
+
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+      expect(dialogResult == true, isFalse);
+      expect(find.text('Đăng xuất tài khoản?'), findsNothing);
+
+      // 3. Mở lại hộp thoại và bấm nút "Đăng xuất" -> trả về true
+      await tester.tap(find.text('Open Logout Dialog'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const ValueKey('logout_dialog_confirm')));
+      await tester.pumpAndSettle();
+      expect(dialogResult, isTrue);
     });
   });
 }

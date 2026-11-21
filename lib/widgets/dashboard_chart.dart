@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
+import '../l10n/app_localizations.dart';
 import '../utils/constants.dart';
 import '../utils/formatters.dart';
 
@@ -44,7 +45,7 @@ class IncomeExpenseBarChart extends StatelessWidget {
                 final isIncome = rodIndex == 0;
                 final rawValue = (isIncome ? incomeByMonth : expenseByMonth)[groupIndex] * 1e6;
                 return BarTooltipItem(
-                  '${isIncome ? "Thu: " : "Chi: "}${AppFormatters.compactCurrency(rawValue, unit: '₫')}',
+                  '${isIncome ? context.tr('chart_income_prefix') : context.tr('chart_expense_prefix')}${AppFormatters.compactCurrency(rawValue, unit: '₫')}',
                   const TextStyle(
                     color: Colors.white,
                     fontWeight: FontWeight.w600,
@@ -220,7 +221,7 @@ class CategoryPieChart extends StatelessWidget {
                 Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    Text('Tổng', style: TextStyle(fontSize: 11, color: context.appTextSecondary)),
+                    Text(context.tr('chart_total_center'), style: TextStyle(fontSize: 11, color: context.appTextSecondary)),
                     Text(
                       '100%',
                       style: TextStyle(

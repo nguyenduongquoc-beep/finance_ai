@@ -1,5 +1,3 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
-
 class QuickTemplate {
   final String id;
   final String title; // e.g. "Cà phê sáng"

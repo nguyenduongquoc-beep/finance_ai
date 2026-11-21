@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'package:fake_cloud_firestore/fake_cloud_firestore.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:finance_ai_app/models/ai_runtime_config_model.dart';
 import 'package:finance_ai_app/models/budget_model.dart';
@@ -8,7 +7,6 @@ import 'package:finance_ai_app/models/financial_forecast_result.dart';
 import 'package:finance_ai_app/models/financial_issue.dart';
 import 'package:finance_ai_app/models/transaction_model.dart';
 import 'package:finance_ai_app/models/user_model.dart';
-import 'package:finance_ai_app/services/ai_config_sync_service.dart';
 import 'package:finance_ai_app/services/ai_service.dart';
 import 'package:finance_ai_app/services/financial_analytics_service.dart';
 import 'package:finance_ai_app/services/financial_chat_context_service.dart';
@@ -94,70 +92,6 @@ void main() {
     });
   });
 
-  group('Giai đoạn 1.2: Canonical SHA-256 Digest & Xác minh Sandbox Hash', () {
-    test('3. SHA-256 chuẩn RFC 6234 và Canonical JSON bất biến với thứ tự key', () {
-      // Vector chuẩn NIST cho chuỗi "abc"
-      expect(
-        sha256HexFromString('abc'),
-        'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
-      );
-
-      final mapA = <String, dynamic>{
-        'b': 2,
-        'a': 1,
-        'nested': {'z': true, 'x': 'hello'},
-      };
-      final mapB = <String, dynamic>{
-        'nested': {'x': 'hello', 'z': true},
-        'a': 1,
-        'b': 2.0,
-      };
-
-      expect(
-        computeCanonicalConfigHash(mapA),
-        equals(computeCanonicalConfigHash(mapB)),
-      );
-    });
-
-    test('4. Khi nội dung Draft thay đổi dù chỉ 1 tham số, xác minh Sandbox trước đó mất hiệu lực ngay lập tức', () {
-      final originalPayload = AiRuntimeConfig.defaults().toPayloadMap();
-      final originalHash = computeCanonicalConfigHash(originalPayload);
-
-      final verifiedEnvelope = DraftConfigEnvelope.fromMap(
-        {
-          'draftPayload': originalPayload,
-          'draftHash': originalHash,
-        },
-        configType: 'ai_runtime',
-        verificationDoc: {
-          'verifiedDraftHash': originalHash,
-          'verificationSignature': 'server_hmac_sig_01',
-        },
-      );
-      expect(verifiedEnvelope.isSandboxVerificationValid, isTrue);
-
-      // Admin chỉnh sửa temperature từ 0.35 -> 0.40 sau khi đã test Sandbox
-      final modifiedPayload = AiRuntimeConfig.defaults()
-          .copyWith(temperature: 0.40)
-          .toPayloadMap();
-
-      final modifiedEnvelope = DraftConfigEnvelope.fromMap(
-        {
-          'draftPayload': modifiedPayload,
-          'draftHash': originalHash, // Kể cả client cố giữ draftHash cũ
-        },
-        configType: 'ai_runtime',
-        verificationDoc: {
-          'verifiedDraftHash': originalHash,
-          'verificationSignature': 'server_hmac_sig_01',
-        },
-      );
-
-      // Kết quả kiểm thử Sandbox lập tức mất hiệu lực vì nội dung thực tế đã thay đổi
-      expect(modifiedEnvelope.isSandboxVerificationValid, isFalse);
-    });
-  });
-
   group('Giai đoạn 1.3: FinancialHeuristicsConfig & Tính nhất quán ngưỡng định lượng', () {
     test('5. Clamp an toàn và đảm bảo tính nhất quán giữa các cặp ngưỡng cảnh báo/nghiêm trọng', () {
       final config = FinancialHeuristicsConfig.fromMap(const {
@@ -240,45 +174,7 @@ void main() {
     });
   });
 
-  group('Giai đoạn 1.5: AiConfigSyncService (Tách Draft/Published & Giới hạn tiêm Tri thức)', () {
-    late FakeFirebaseFirestore fakeFirestore;
-    late AiConfigSyncService syncService;
-
-    setUp(() {
-      fakeFirestore = FakeFirebaseFirestore();
-      syncService = AiConfigSyncService.forTest(firestore: fakeFirestore);
-    });
-
-    test('7. User App chỉ đọc published_configs, tuyệt đối không bị ảnh hưởng bởi draft_configs chưa xuất bản', () async {
-      // Admin lưu bản nháp vào draft_configs nhưng chưa xuất bản
-      await fakeFirestore
-          .collection(AiConfigSyncService.kDraftConfigsCollection)
-          .doc(AiConfigSyncService.kDocFinancialHeuristics)
-          .set({
-        'configType': 'financial_heuristics',
-        'draftPayload': {'categorySpikeRatio': 0.55},
-        'draftHash': 'hash_draft',
-      });
-
-      await syncService.syncPublishedConfigsIfNeeded(forceRefresh: true);
-      // User vẫn dùng ngưỡng mặc định 0.30, không đọc bản nháp 0.55
-      expect(syncService.currentHeuristics.categorySpikeRatio, 0.30);
-
-      // Khi Backend Publish lên published_configs v2
-      await fakeFirestore
-          .collection(AiConfigSyncService.kPublishedConfigsCollection)
-          .doc(AiConfigSyncService.kDocFinancialHeuristics)
-          .set({
-        'configType': 'financial_heuristics',
-        'version': 2,
-        'payload': {'categorySpikeRatio': 0.42},
-      });
-
-      await syncService.syncPublishedConfigsIfNeeded(forceRefresh: true);
-      expect(syncService.currentHeuristics.version, 2);
-      expect(syncService.currentHeuristics.categorySpikeRatio, 0.42);
-    });
-
+  group('Giai đoạn 1.5: FinancialKnowledgeArticle (Giới hạn tiêm Tri thức chuẩn cố định)', () {
     test('8. Giới hạn tối đa 3 đoạn tri thức (<= 300 ký tự/đoạn) được tiêm vào Prompt theo đúng triggerCondition', () {
       final customArticles = List.generate(
         5,
@@ -294,7 +190,7 @@ void main() {
       );
 
       // Khi tỷ lệ tiết kiệm thấp -> Chọn tối đa 3 bài có priority cao nhất (5, 4, 3)
-      final snippets = syncService.selectKnowledgeSnippetsForPrompt(
+      final snippets = FinancialKnowledgeArticle.selectSnippetsForPrompt(
         isLowSavingRate: true,
         overrideArticles: customArticles,
       );
@@ -308,62 +204,6 @@ void main() {
       for (final s in snippets) {
         expect(s.length, lessThanOrEqualTo(330));
       }
-    });
-
-    test('9. AiFeedbackReport ẩn danh hóa chuỗi số nhạy cảm và kiểm thử đầy đủ cả chế độ anonymous & pseudonymous', () {
-      // 9a. Chế độ anonymous: tuyệt đối không lưu reporterHash hay định danh người dùng
-      final anonReport = AiFeedbackReport.createForSubmission(
-        reportId: 'rep_anon_001',
-        targetFeature: 'ocr_suggestion',
-        rating: 'negative',
-        reasonCode: 'ocr_missed_merchant',
-        feedbackMode: 'anonymous',
-        callerUid: 'user_secret_uid_999',
-        userNote:
-            'Quét hóa đơn số TK 19034567890123 số tiền 15.000.000 chưa nhận diện đúng',
-        suggestedKeywordOrMerchant: 'Katinat Saigon Kafe',
-        createdAt: DateTime(2026, 11, 14),
-      );
-
-      final anonMap = anonReport.toCreateMap();
-      for (final reqKey in AiFeedbackReport.requiredCreateKeys) {
-        expect(anonMap.containsKey(reqKey), isTrue, reason: 'Thiếu khóa $reqKey');
-      }
-      for (final k in anonMap.keys) {
-        expect(AiFeedbackReport.allowedCreateKeys.contains(k), isTrue);
-      }
-      expect(anonMap['feedbackMode'], 'anonymous');
-      expect(anonMap.containsKey('reporterHash'), isFalse);
-      expect(anonMap['status'], 'open');
-      expect(anonMap['userNote'], contains('[SỐ_ẨN_DANH]'));
-      expect(anonMap['userNote'], isNot(contains('19034567890123')));
-
-      // 9b. Chế độ pseudonymous: sinh mã băm một chiều reporterHash 64 ký tự hex, không lộ UID gốc
-      final pseudoReport = AiFeedbackReport.createForSubmission(
-        reportId: 'rep_pseudo_002',
-        targetFeature: 'ai_chat',
-        rating: 'negative',
-        reasonCode: 'wrong_calculation',
-        feedbackMode: 'pseudonymous',
-        callerUid: 'user_secret_uid_999',
-        userNote: 'Số điện thoại 0987654321 không nên hiện',
-        createdAt: DateTime(2026, 11, 14),
-      );
-
-      final pseudoMap = pseudoReport.toCreateMap();
-      expect(pseudoMap['feedbackMode'], 'pseudonymous');
-      expect(pseudoMap.containsKey('reporterHash'), isTrue);
-      final hash = pseudoMap['reporterHash'] as String;
-      expect(hash.length, 64);
-      expect(hash, isNot(contains('user_secret_uid_999')));
-      expect(
-        hash,
-        equals(
-          AiFeedbackReport.computePseudonymousReporterHash('user_secret_uid_999'),
-        ),
-      );
-      expect(pseudoMap['userNote'], contains('[SỐ_ẨN_DANH]'));
-      expect(pseudoMap['userNote'], isNot(contains('0987654321')));
     });
   });
 
@@ -891,101 +731,36 @@ void main() {
       expect(offlineCalls.length, 1);
     });
 
-    test('15. Chỉnh sửa draft_configs hoàn toàn không ảnh hưởng đến các Service của User cho tới khi Publish sang published_configs', () async {
-      final fakeFirestore = FakeFirebaseFirestore();
-      AiConfigSyncService.instance.configureForTesting(
-        firestore: fakeFirestore,
-        resetCache: true,
-      );
-
-      // Admin lưu hàng loạt thay đổi vào draft_configs (chưa Publish)
-      await fakeFirestore
-          .collection(AiConfigSyncService.kDraftConfigsCollection)
-          .doc(AiConfigSyncService.kDocFinancialHeuristics)
-          .set({
-        'configType': 'financial_heuristics',
-        'draftPayload': {
-          'budgetNearLimitRatio': 0.95,
-          'txAnomalyWarningMultiplier': 3.5,
-          'txAnomalyCriticalMultiplier': 5.0,
-        },
-      });
-      await fakeFirestore
-          .collection(AiConfigSyncService.kDraftConfigsCollection)
-          .doc(AiConfigSyncService.kDocTransactionRules)
-          .set({
-        'configType': 'transaction_rules',
-        'draftPayload': {
-          'addedExpenseKeywords': {
-            'an uong': ['phe la'],
-          },
-        },
-      });
-      await fakeFirestore
-          .collection(AiConfigSyncService.kDraftConfigsCollection)
-          .doc(AiConfigSyncService.kDocAiRuntime)
-          .set({
-        'configType': 'ai_runtime',
-        'draftPayload': {
-          'primaryModel': 'gemini-3.8-flash',
-          'temperature': 0.2,
-        },
-      });
-
-      await AiConfigSyncService.instance.syncPublishedConfigsIfNeeded(
-        forceRefresh: true,
-      );
-
-      // Các Service của User vẫn giữ 100% hành vi mặc định (không bị ảnh hưởng bởi draft_configs)
+    test('15. Toàn bộ Service Mobile mặc định chạy độc lập bằng hằng số chuẩn cố định (không phụ thuộc Admin Config/Firestore)', () {
+      final analyticsSvc = FinancialAnalyticsService();
       final forecastSvc = FinancialForecastService();
+      final chatContextSvc = FinancialChatContextService();
       final txIntelSvc = TransactionIntelligenceService();
       final aiSvc = AiService(allowMissingApiKeyForTest: true);
 
-      expect(forecastSvc.effectiveHeuristics.budgetNearLimitRatio, 0.80);
-      expect(txIntelSvc.effectiveHeuristics.txAnomalyWarningMultiplier, 2.0);
+      final defaultHeuristics = FinancialHeuristicsConfig.defaults();
+      final defaultRuntime = AiRuntimeConfig.defaults();
+
       expect(
-        txIntelSvc.effectiveRules.addedExpenseKeywords['an uong'],
-        isNull,
+        analyticsSvc.effectiveHeuristics.categorySpikeRatio,
+        defaultHeuristics.categorySpikeRatio,
       );
-      expect(aiSvc.effectiveRuntimeConfig.primaryModel, 'gemini-3.5-flash');
-
-      // Khi Admin xuất bản chính thức sang published_configs
-      await fakeFirestore
-          .collection(AiConfigSyncService.kPublishedConfigsCollection)
-          .doc(AiConfigSyncService.kDocFinancialHeuristics)
-          .set({
-        'configType': 'financial_heuristics',
-        'version': 2,
-        'payload': {
-          'budgetNearLimitRatio': 0.90,
-          'txAnomalyWarningMultiplier': 3.0,
-          'txAnomalyCriticalMultiplier': 5.0,
-        },
-      });
-      await fakeFirestore
-          .collection(AiConfigSyncService.kPublishedConfigsCollection)
-          .doc(AiConfigSyncService.kDocAiRuntime)
-          .set({
-        'configType': 'ai_runtime',
-        'version': 2,
-        'payload': {
-          'primaryModel': 'gemini-3.8-flash',
-          'temperature': 0.25,
-        },
-      });
-
-      await AiConfigSyncService.instance.syncPublishedConfigsIfNeeded(
-        forceRefresh: true,
+      expect(
+        forecastSvc.effectiveHeuristics.budgetNearLimitRatio,
+        defaultHeuristics.budgetNearLimitRatio,
       );
-
-      // Ngay lập tức các Service nhận cấu hình đã xuất bản v2
-      expect(forecastSvc.effectiveHeuristics.budgetNearLimitRatio, 0.90);
-      expect(txIntelSvc.effectiveHeuristics.txAnomalyWarningMultiplier, 3.0);
-      expect(aiSvc.effectiveRuntimeConfig.primaryModel, 'gemini-3.8-flash');
-      expect(aiSvc.effectiveRuntimeConfig.temperature, 0.25);
-
-      // Khôi phục mặc định sau test
-      AiConfigSyncService.instance.resetToDefaults();
+      expect(
+        chatContextSvc.effectiveHeuristics.minRecommendedSavingRate,
+        defaultHeuristics.minRecommendedSavingRate,
+      );
+      expect(
+        txIntelSvc.effectiveHeuristics.txAnomalyWarningMultiplier,
+        defaultHeuristics.txAnomalyWarningMultiplier,
+      );
+      expect(txIntelSvc.effectiveRules.addedExpenseKeywords, isEmpty);
+      expect(aiSvc.effectiveRuntimeConfig.primaryModel, defaultRuntime.primaryModel);
+      expect(aiSvc.effectiveRuntimeConfig.temperature, defaultRuntime.temperature);
+      expect(aiSvc.effectiveRuntimeConfig.isEnabled, isTrue);
     });
   });
 }

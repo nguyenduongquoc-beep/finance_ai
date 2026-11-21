@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import '../../l10n/app_localizations.dart';
 import '../../models/budget_model.dart';
 import '../../models/category_model.dart';
 import '../../models/transaction_model.dart';
@@ -41,26 +42,29 @@ class _BudgetManagementScreenState extends State<BudgetManagementScreen> {
       builder: (ctx) => StatefulBuilder(
         builder: (context, setDlgState) {
           return AlertDialog(
-            title: const Text('Chọn tháng/năm'),
-            content: Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+            title: Text(context.tr('bud_mgmt_pick_month_title')),
+            content: Wrap(
+              alignment: WrapAlignment.center,
+              spacing: 16,
+              runSpacing: 8,
               children: [
                 DropdownButton<int>(
                   value: selectedM,
                   items: List.generate(12, (i) => i + 1)
-                      .map((m) =>
-                          DropdownMenuItem(value: m, child: Text('Tháng $m')))
+                      .map((m) => DropdownMenuItem(
+                          value: m, child: Text(context.tr('common_month_$m'))))
                       .toList(),
                   onChanged: (v) {
                     if (v != null) setDlgState(() => selectedM = v);
                   },
                 ),
-                const SizedBox(width: 20),
                 DropdownButton<int>(
                   value: selectedY,
                   items: years
-                      .map((y) =>
-                          DropdownMenuItem(value: y, child: Text('Năm $y')))
+                      .map((y) => DropdownMenuItem(
+                          value: y,
+                          child: Text(context.tr('bud_mgmt_year_item',
+                              params: {'year': '$y'}))))
                       .toList(),
                   onChanged: (v) {
                     if (v != null) setDlgState(() => selectedY = v);
@@ -71,7 +75,7 @@ class _BudgetManagementScreenState extends State<BudgetManagementScreen> {
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(ctx),
-                child: const Text('Hủy'),
+                child: Text(context.tr('common_cancel')),
               ),
               TextButton(
                 onPressed: () {
@@ -80,8 +84,8 @@ class _BudgetManagementScreenState extends State<BudgetManagementScreen> {
                     _selectedMonth = DateTime(selectedY, selectedM, 1);
                   });
                 },
-                child: const Text('Chọn',
-                    style: TextStyle(fontWeight: FontWeight.w600)),
+                child: Text(context.tr('bud_mgmt_select_btn'),
+                    style: const TextStyle(fontWeight: FontWeight.w600)),
               ),
             ],
           );
@@ -146,13 +150,17 @@ class _BudgetManagementScreenState extends State<BudgetManagementScreen> {
       scrollDirection: Axis.horizontal,
       child: Row(
         children: [
-          chip(_BudgetFilter.all, 'Tất cả', total, AppColors.primary),
+          chip(_BudgetFilter.all, context.tr('common_all'), total,
+              AppColors.primary),
           if (over > 0)
-            chip(_BudgetFilter.over, 'Vượt', over, AppColors.expense),
+            chip(_BudgetFilter.over, context.tr('bud_mgmt_filter_over'), over,
+                AppColors.expense),
           if (near > 0)
-            chip(_BudgetFilter.near, 'Sắp hết', near, AppColors.warning),
+            chip(_BudgetFilter.near, context.tr('budget_card_near'), near,
+                AppColors.warning),
           if (safe > 0)
-            chip(_BudgetFilter.safe, 'An toàn', safe, AppColors.income),
+            chip(_BudgetFilter.safe, context.tr('budget_card_safe'), safe,
+                AppColors.income),
         ],
       ),
     );
@@ -169,7 +177,7 @@ class _BudgetManagementScreenState extends State<BudgetManagementScreen> {
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surface,
       appBar: AppBar(
-        title: const Text('Ngân sách'),
+        title: Text(context.tr('bud_mgmt_title')),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new_rounded),
           onPressed: () => Navigator.of(context).pop(),
@@ -277,7 +285,7 @@ class _BudgetManagementScreenState extends State<BudgetManagementScreen> {
                                 padding:
                                     const EdgeInsets.only(left: 2, bottom: 12),
                                 child: Text(
-                                  'Hạn mức theo danh mục',
+                                  context.tr('bud_mgmt_category_limits'),
                                   style: TextStyle(
                                     fontSize: 16,
                                     fontWeight: FontWeight.w700,
@@ -319,7 +327,7 @@ class _BudgetManagementScreenState extends State<BudgetManagementScreen> {
                                 top: BorderSide(color: context.appBorder)),
                           ),
                           child: AppButton(
-                            text: 'Thiết lập ngân sách',
+                            text: context.tr('bud_mgmt_setup_btn'),
                             icon: Icons.tune_rounded,
                             onPressed: _openSetup,
                           ),
@@ -374,10 +382,10 @@ class _BudgetHero extends StatelessWidget {
             : const [Color(0xFF2A86A6), Color(0xFF14485B)];
 
     final String statusText = isOver
-        ? 'Đã vượt ngân sách'
+        ? context.tr('bud_mgmt_status_over')
         : isNear
-            ? 'Sắp chạm hạn mức'
-            : 'Trong tầm kiểm soát';
+            ? context.tr('bud_mgmt_status_near')
+            : context.tr('bud_mgmt_status_safe');
     final IconData statusIcon = isOver
         ? Icons.warning_amber_rounded
         : isNear
@@ -414,35 +422,47 @@ class _BudgetHero extends StatelessWidget {
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(
-                    'Đã chi trong tháng',
-                    style: TextStyle(
-                      color: Colors.white.withAlpha(220),
-                      fontWeight: FontWeight.w500,
-                      fontSize: 13,
+                  Expanded(
+                    child: Text(
+                      context.tr('bud_mgmt_spent_month'),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        color: Colors.white.withAlpha(220),
+                        fontWeight: FontWeight.w500,
+                        fontSize: 13,
+                      ),
                     ),
                   ),
-                  Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withAlpha(36),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(statusIcon, size: 13, color: Colors.white),
-                        const SizedBox(width: 4),
-                        Text(
-                          statusText,
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 11,
-                          ),
+                  const SizedBox(width: 8),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 150),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withAlpha(36),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(statusIcon, size: 13, color: Colors.white),
+                            const SizedBox(width: 4),
+                            Text(
+                              statusText,
+                              maxLines: 1,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                                fontSize: 11,
+                              ),
+                            ),
+                          ],
                         ),
-                      ],
+                      ),
                     ),
                   ),
                 ],
@@ -492,7 +512,8 @@ class _BudgetHero extends StatelessWidget {
               ),
               const SizedBox(height: 8),
               Text(
-                'Đã dùng ${(ratio * 100).round()}% hạn mức',
+                context.tr('bud_mgmt_used_pct',
+                    params: {'pct': '${(ratio * 100).round()}'}),
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: FontWeight.w500,
@@ -504,7 +525,9 @@ class _BudgetHero extends StatelessWidget {
                 children: [
                   Expanded(
                     child: _heroStat(
-                      isOver ? 'Đã vượt' : 'Còn lại',
+                      isOver
+                          ? context.tr('bud_mgmt_over_label')
+                          : context.tr('bud_mgmt_remaining_label'),
                       AppFormatters.compactCurrency(remaining.abs(), unit: '₫'),
                     ),
                   ),
@@ -512,13 +535,15 @@ class _BudgetHero extends StatelessWidget {
                   Expanded(
                     child: _heroStat(
                       daysLeft != null
-                          ? 'Chi mỗi ngày (còn $daysLeft ngày)'
-                          : 'Số danh mục',
+                          ? context.tr('bud_mgmt_daily_left',
+                              params: {'days': '$daysLeft'})
+                          : context.tr('bud_mgmt_cat_count_label'),
                       daysLeft != null
                           ? (perDay != null
                               ? AppFormatters.compactCurrency(perDay, unit: '₫')
                               : '—')
-                          : '${overCount + nearCount} cần chú ý',
+                          : context.tr('bud_mgmt_need_attention',
+                              params: {'count': '${overCount + nearCount}'}),
                     ),
                   ),
                 ],
@@ -595,7 +620,7 @@ class _EmptyBudgets extends StatelessWidget {
             ),
             const SizedBox(height: 18),
             Text(
-              'Chưa có ngân sách tháng này',
+              context.tr('bud_mgmt_empty_title'),
               style: TextStyle(
                 fontSize: 18,
                 fontWeight: FontWeight.w700,
@@ -604,7 +629,7 @@ class _EmptyBudgets extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'Đặt hạn mức cho từng danh mục chi tiêu để ứng dụng cảnh báo khi bạn sắp chi vượt.',
+              context.tr('bud_mgmt_empty_desc'),
               textAlign: TextAlign.center,
               style: TextStyle(
                   fontSize: 13, height: 1.4, color: context.appTextSecondary),
@@ -615,7 +640,7 @@ class _EmptyBudgets extends StatelessWidget {
               child: ElevatedButton.icon(
                 onPressed: onSetup,
                 icon: const Icon(Icons.add_rounded),
-                label: const Text('Thiết lập ngay'),
+                label: Text(context.tr('bud_mgmt_setup_now')),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppColors.primary,
                   foregroundColor: Colors.white,

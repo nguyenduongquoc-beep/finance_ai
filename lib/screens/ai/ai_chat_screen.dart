@@ -2,10 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:uuid/uuid.dart';
+import '../../l10n/app_localizations.dart';
 import '../../models/category_model.dart';
 import '../../services/firestore_service.dart';
 import '../../services/ai_service.dart';
 import '../../services/financial_chat_context_service.dart';
+import '../../services/financial_context_revision_tracker.dart';
+import '../../services/language_controller.dart';
+import '../../utils/category_localization_helper.dart';
 import '../../utils/constants.dart';
 import '../../utils/formatters.dart';
 import '../../widgets/app_snackbar.dart';
@@ -101,16 +105,66 @@ class _AiChatScreenState extends State<AiChatScreen> {
 
   // Quản lý Conversation Session
   String _currentSessionId = const Uuid().v4();
-  String _currentSessionTitle = 'Cuộc trò chuyện mới';
+  String _currentSessionTitle =
+      AppLocalizations.tr('ai_chat_new_session_title');
+  String _lastLocaleCode = LanguageController.currentLocale.value.languageCode;
 
   // Trạng thái cuộn mượt mà & vị trí đọc tin nhắn
   bool _showScrollToBottom = false;
 
+  bool _isDefaultSessionTitle(String title) =>
+      title == 'Cuộc trò chuyện mới' ||
+      title == 'New conversation' ||
+      title == 'Cuộc trò chuyện' ||
+      title == 'Conversation';
+
   @override
   void initState() {
     super.initState();
+    LanguageController.currentLocale.addListener(_onLocaleChanged);
     _scrollController.addListener(_onScroll);
     _initChatData();
+  }
+
+  void _onLocaleChanged() {
+    final nextCode = LanguageController.currentLocale.value.languageCode;
+    if (nextCode == _lastLocaleCode || !mounted) return;
+    _lastLocaleCode = nextCode;
+    _refreshChatLocalization();
+  }
+
+  Future<void> _refreshChatLocalization() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    if (!mounted) return;
+    if (_isDefaultSessionTitle(_currentSessionTitle)) {
+      _currentSessionTitle = AppLocalizations.tr('ai_chat_new_session_title');
+    }
+    if (uid == null || uid.isEmpty) {
+      if (!_messages.any((m) => m.isUser) && _messages.length == 1) {
+        setState(() {
+          _messages[0] = _ChatMessage(
+            text: AppLocalizations.tr('ai_chat_sign_in_required'),
+            isUser: false,
+          );
+        });
+      }
+      return;
+    }
+
+    try {
+      final ctx = await _contextService.buildContext(uid);
+      if (!mounted) return;
+      setState(() {
+        _financialContext = ctx;
+        if (!_messages.any((m) => m.isUser)) {
+          _setupInitialGreeting();
+        }
+      });
+    } catch (_) {
+      if (mounted && !_messages.any((m) => m.isUser)) {
+        setState(() => _setupInitialGreeting());
+      }
+    }
   }
 
   void _onScroll() {
@@ -127,6 +181,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
 
   @override
   void dispose() {
+    LanguageController.currentLocale.removeListener(_onLocaleChanged);
     _scrollController.removeListener(_onScroll);
     _inputController.dispose();
     _scrollController.dispose();
@@ -142,8 +197,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
         setState(() {
           _isLoadingContext = false;
           _messages.add(_ChatMessage(
-            text:
-                'Vui lòng đăng nhập để Trợ lý AI có thể truy xuất dữ liệu tài chính của bạn.',
+            text: AppLocalizations.tr('ai_chat_sign_in_required'),
             isUser: false,
           ));
         });
@@ -199,11 +253,17 @@ class _AiChatScreenState extends State<AiChatScreen> {
       }
     }
 
+    final rawTitle = (sessionData['title'] as String?)?.trim();
+    final resolvedTitle = (rawTitle == null ||
+            rawTitle.isEmpty ||
+            _isDefaultSessionTitle(rawTitle))
+        ? AppLocalizations.tr('ai_chat_session_default_title')
+        : rawTitle;
+
     setState(() {
       _currentSessionId =
           sessionData['sessionId'] as String? ?? const Uuid().v4();
-      _currentSessionTitle =
-          sessionData['title'] as String? ?? 'Cuộc trò chuyện';
+      _currentSessionTitle = resolvedTitle;
       _messages.clear();
       if (loadedMessages.isNotEmpty) {
         _messages.addAll(loadedMessages);
@@ -231,45 +291,48 @@ class _AiChatScreenState extends State<AiChatScreen> {
 
     if (ctx == null || ctx.isEmptyData) {
       _messages.add(_ChatMessage(
-        text:
-            'Xin chào! Mình là Trợ lý AI Tài chính Cá nhân của bạn. Hiện tại bạn chưa có giao dịch nào được ghi nhận. Hãy thêm các giao dịch đầu tiên để mình có thể theo dõi và phân tích tài chính giúp bạn nhé! 💡',
+        text: AppLocalizations.tr('ai_chat_empty_greeting'),
         isUser: false,
-        insightCard: const ChatInsightCardData(
+        insightCard: ChatInsightCardData(
           type: ChatInsightCardType.emptyDataPrompt,
-          title: 'Khởi đầu quản lý tài chính',
-          subtitle:
-              'Ghi chép giao dịch để kích hoạt toàn bộ tính năng phân tích của AI',
-          primaryMetric: '0 giao dịch',
-          actionLabel: 'Thêm giao dịch ngay',
+          title: AppLocalizations.tr('ai_chat_empty_card_title'),
+          subtitle: AppLocalizations.tr('ai_chat_empty_card_sub'),
+          primaryMetric: AppLocalizations.tr('ai_chat_empty_card_metric'),
+          actionLabel: AppLocalizations.tr('ai_chat_empty_card_action'),
         ),
       ));
       return;
     }
 
     final greetingBuffer = StringBuffer();
-    greetingBuffer
-        .writeln('Xin chào! Mình là Trợ lý AI Tài chính Cá nhân của bạn.');
-    greetingBuffer.writeln(
-        'Mình đã đồng bộ toàn bộ dữ liệu thu - chi, ngân sách và mục tiêu trong 90 ngày qua.');
+    greetingBuffer.writeln(AppLocalizations.tr('ai_chat_greet_hello'));
+    greetingBuffer.writeln(AppLocalizations.tr('ai_chat_greet_synced'));
     greetingBuffer.writeln('');
-    greetingBuffer.writeln('📊 **Tóm tắt nhanh tháng này:**');
-    greetingBuffer.writeln(
-        '• **Thu nhập:** ${AppFormatters.compactCurrency(ctx.incomeThisMonth)}');
-    greetingBuffer.writeln(
-        '• **Chi tiêu:** ${AppFormatters.compactCurrency(ctx.expenseThisMonth)}');
-    greetingBuffer.writeln(
-        '• **Dòng tiền ròng:** ${ctx.netCashFlow >= 0 ? '+' : ''}${AppFormatters.compactCurrency(ctx.netCashFlow)} (${ctx.netCashFlow >= 0 ? 'Thặng dư' : 'Thâm hụt'})');
-    greetingBuffer.writeln('• **Tỷ lệ tiết kiệm:** ${ctx.savingsRate}%');
+    greetingBuffer.writeln(AppLocalizations.tr('ai_chat_greet_summary_hdr'));
+    greetingBuffer.writeln(AppLocalizations.tr('ai_chat_greet_income',
+        params: {'amount': AppFormatters.compactCurrency(ctx.incomeThisMonth)}));
+    greetingBuffer.writeln(AppLocalizations.tr('ai_chat_greet_expense',
+        params: {
+          'amount': AppFormatters.compactCurrency(ctx.expenseThisMonth)
+        }));
+    greetingBuffer.writeln(AppLocalizations.tr('ai_chat_greet_net', params: {
+      'sign': ctx.netCashFlow >= 0 ? '+' : '',
+      'amount': AppFormatters.compactCurrency(ctx.netCashFlow),
+      'status': ctx.netCashFlow >= 0
+          ? AppLocalizations.tr('ai_chat_surplus_word')
+          : AppLocalizations.tr('ai_chat_deficit_word'),
+    }));
+    greetingBuffer.writeln(AppLocalizations.tr('ai_chat_greet_save_rate',
+        params: {'pct': '${ctx.savingsRate}'}));
 
     if (ctx.overBudgets.isNotEmpty) {
       greetingBuffer.writeln('');
-      greetingBuffer.writeln(
-          '⚠️ **Cảnh báo:** Bạn đang có ${ctx.overBudgets.length} danh mục vượt ngân sách.');
+      greetingBuffer.writeln(AppLocalizations.tr('ai_chat_greet_over_warn',
+          params: {'count': '${ctx.overBudgets.length}'}));
     }
 
     greetingBuffer.writeln('');
-    greetingBuffer.writeln(
-        'Bạn có thể chọn nhanh các câu hỏi gợi ý bên dưới hoặc hỏi mình bất cứ điều gì nhé! 💡');
+    greetingBuffer.writeln(AppLocalizations.tr('ai_chat_greet_footer'));
 
     ChatInsightCardData? initialCard;
     if (ctx.overBudgets.isNotEmpty) {
@@ -279,17 +342,20 @@ class _AiChatScreenState extends State<AiChatScreen> {
         orElse: () => Category(
             categoryId: b.categoryId,
             userId: '',
-            name: 'Danh mục',
+            name: AppLocalizations.tr('ai_rep_default_cat'),
             type: 'expense',
             icon: '',
             color: 0),
       );
       initialCard = ChatInsightCardData(
         type: ChatInsightCardType.budgetOverrun,
-        title: 'Cảnh báo: ${cat.name}',
-        subtitle: 'Đã vượt hạn mức ngân sách tháng này',
-        primaryMetric: 'Hạn mức: ${AppFormatters.compactCurrency(b.limit)}',
-        actionLabel: 'Xem ngân sách',
+        title: AppLocalizations.tr('ai_chat_budget_alert_title', params: {
+          'category': CategoryLocalizationHelper.localizeName(cat.name),
+        }),
+        subtitle: AppLocalizations.tr('ai_chat_budget_over_sub'),
+        primaryMetric: AppLocalizations.tr('ai_chat_budget_limit_metric',
+            params: {'amount': AppFormatters.compactCurrency(b.limit)}),
+        actionLabel: AppLocalizations.tr('ai_chat_view_budget_btn'),
         targetId: b.budgetId,
       );
     }
@@ -310,8 +376,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
     final hasUserMessage = _messages.any((m) => m.isUser);
     if (!hasUserMessage) return;
 
-    if (_currentSessionTitle == 'Cuộc trò chuyện mới' ||
-        _currentSessionTitle == 'Cuộc trò chuyện') {
+    if (_isDefaultSessionTitle(_currentSessionTitle)) {
       final firstUserMsg = _messages.firstWhere(
         (m) => m.isUser,
         orElse: () => _ChatMessage(text: '', isUser: false),
@@ -382,13 +447,29 @@ class _AiChatScreenState extends State<AiChatScreen> {
     _scrollToBottom();
 
     try {
-      // Đảm bảo dữ liệu tài chính luôn được tải đầy đủ
-      if (_financialContext == null && uid.isNotEmpty) {
-        _financialContext = await _contextService.buildContext(uid);
+      // Đảm bảo dữ liệu tài chính luôn được đồng bộ mới nhất khi có thay đổi
+      // ở các màn hình khác (transactions, budgets, categories, savingGoals, monthly_plans)
+      // hoặc khi trạng thái trước đó là chưa có dữ liệu.
+      final bool needsContextRefresh = _financialContext == null ||
+          _financialContext!.isEmptyData ||
+          _financialContext!.mutationVersion !=
+              FinancialContextRevisionTracker.localMutationVersion;
+
+      if (needsContextRefresh && uid.isNotEmpty) {
+        final refreshed = await Future.wait<dynamic>([
+          _contextService.buildContext(uid),
+          _firestoreService.getCategoriesSafely(uid),
+        ]);
+        if (mounted) {
+          setState(() {
+            _financialContext = refreshed[0] as FinancialChatContext;
+            _categories = refreshed[1] as List<Category>;
+          });
+        }
       }
 
       final contextData = _financialContext?.rawPromptContext ??
-          'Người dùng chưa có dữ liệu tài chính.';
+          AppLocalizations.tr('ai_chat_no_fin_data_ctx');
 
       final aiMessage = _ChatMessage(
         text: '',
@@ -454,8 +535,8 @@ class _AiChatScreenState extends State<AiChatScreen> {
       if (mounted) {
         final isNoNet = AiService.isNoNetworkException(e);
         final errorMessage = isNoNet
-            ? 'Không có kết nối mạng. Vui lòng kiểm tra Internet và thử lại.'
-            : 'Đã có sự cố khi kết nối tới Trợ lý AI. Vui lòng thử lại sau giây lát.';
+            ? AppLocalizations.tr('ai_chat_err_no_net')
+            : AppLocalizations.tr('ai_chat_err_generic');
         setState(() {
           _messages.add(_ChatMessage(
             text: errorMessage,
@@ -482,11 +563,11 @@ class _AiChatScreenState extends State<AiChatScreen> {
     _aiService.resetChatSession();
     setState(() {
       _currentSessionId = const Uuid().v4();
-      _currentSessionTitle = 'Cuộc trò chuyện mới';
+      _currentSessionTitle = AppLocalizations.tr('ai_chat_new_session_title');
       _setupInitialGreeting();
     });
     if (mounted && showSnack) {
-      AppSnackbar.show(context, 'Đã mở cuộc trò chuyện mới');
+      AppSnackbar.show(context, AppLocalizations.tr('ai_chat_new_opened_snack'));
     }
   }
 
@@ -516,20 +597,26 @@ class _AiChatScreenState extends State<AiChatScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.history_rounded,
-                            color: AppColors.primary, size: 22),
-                        const SizedBox(width: 8),
-                        Text(
-                          'Lịch sử trò chuyện',
-                          style: TextStyle(
-                            fontSize: 16.5,
-                            fontWeight: FontWeight.bold,
-                            color: context.appTextPrimary,
+                    Expanded(
+                      child: Row(
+                        children: [
+                          const Icon(Icons.history_rounded,
+                              color: AppColors.primary, size: 22),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              context.tr('ai_chat_history_title'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontSize: 16.5,
+                                fontWeight: FontWeight.bold,
+                                color: context.appTextPrimary,
+                              ),
+                            ),
                           ),
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                     IconButton(
                       icon: const Icon(Icons.close),
@@ -543,7 +630,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
                     padding: const EdgeInsets.symmetric(vertical: 24),
                     child: Center(
                       child: Text(
-                        'Chưa có phiên trò chuyện nào được lưu.',
+                        context.tr('ai_chat_no_sessions'),
                         style: TextStyle(
                             color: context.appTextSecondary, fontSize: 13.5),
                       ),
@@ -559,8 +646,13 @@ class _AiChatScreenState extends State<AiChatScreen> {
                       itemBuilder: (context, index) {
                         final s = sessions[index];
                         final sId = s['sessionId'] as String? ?? '';
-                        final sTitle =
-                            s['title'] as String? ?? 'Cuộc trò chuyện';
+                        final rawTitle = (s['title'] as String?)?.trim();
+                        final sTitle = (rawTitle == null ||
+                                rawTitle.isEmpty ||
+                                _isDefaultSessionTitle(rawTitle))
+                            ? AppLocalizations.tr(
+                                'ai_chat_session_default_title')
+                            : rawTitle;
                         final sUpdated = s['updatedAt'] as String? ?? '';
                         final isCurrent = sId == _currentSessionId;
 
@@ -620,8 +712,8 @@ class _AiChatScreenState extends State<AiChatScreen> {
                                         .withValues(alpha: 0.12),
                                     borderRadius: BorderRadius.circular(10),
                                   ),
-                                  child: const Text('Hiện tại',
-                                      style: TextStyle(
+                                  child: Text(ctx.tr('ai_chat_current_badge'),
+                                      style: const TextStyle(
                                           fontSize: 10,
                                           color: AppColors.primary,
                                           fontWeight: FontWeight.bold)),
@@ -629,7 +721,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
                               IconButton(
                                 icon: const Icon(Icons.delete_outline_rounded,
                                     size: 19, color: AppColors.expense),
-                                tooltip: 'Xóa phiên',
+                                tooltip: ctx.tr('ai_chat_delete_session_tip'),
                                 onPressed: () async {
                                   final sheetNav = Navigator.of(ctx);
                                   final confirm = await showDialog<bool>(
@@ -639,27 +731,31 @@ class _AiChatScreenState extends State<AiChatScreen> {
                                       shape: RoundedRectangleBorder(
                                           borderRadius:
                                               BorderRadius.circular(16)),
-                                      title: const Text('Xóa phiên trò chuyện?',
-                                          style: TextStyle(
+                                      title: Text(
+                                          dCtx.tr(
+                                              'ai_chat_delete_session_dlg_title'),
+                                          style: const TextStyle(
                                               fontSize: 16,
                                               fontWeight: FontWeight.bold)),
-                                      content: const Text(
-                                        'Phiên trò chuyện này sẽ bị xóa khỏi lịch sử. Dữ liệu tài chính của bạn hoàn toàn không bị ảnh hưởng.',
-                                        style: TextStyle(fontSize: 13),
+                                      content: Text(
+                                        dCtx.tr(
+                                            'ai_chat_delete_session_dlg_body'),
+                                        style: const TextStyle(fontSize: 13),
                                       ),
                                       actions: [
                                         TextButton(
                                             onPressed: () =>
                                                 Navigator.pop(dCtx, false),
-                                            child: const Text('Hủy')),
+                                            child:
+                                                Text(dCtx.tr('common_cancel'))),
                                         ElevatedButton(
                                           style: ElevatedButton.styleFrom(
                                               backgroundColor:
                                                   AppColors.expense),
                                           onPressed: () =>
                                               Navigator.pop(dCtx, true),
-                                          child: const Text('Xóa',
-                                              style: TextStyle(
+                                          child: Text(dCtx.tr('common_delete'),
+                                              style: const TextStyle(
                                                   color: Colors.white,
                                                   fontWeight: FontWeight.bold)),
                                         ),
@@ -675,8 +771,10 @@ class _AiChatScreenState extends State<AiChatScreen> {
                                       _createNewChatSession(showSnack: false);
                                     }
                                     if (!mounted) return;
-                                    AppSnackbar.show(this.context,
-                                        'Đã xóa phiên trò chuyện');
+                                    AppSnackbar.show(
+                                        this.context,
+                                        AppLocalizations.tr(
+                                            'ai_chat_session_deleted_snack'));
                                   }
                                 },
                               ),
@@ -690,8 +788,14 @@ class _AiChatScreenState extends State<AiChatScreen> {
                               }
                               if (!mounted) return;
                               _loadExistingSession(s);
-                              AppSnackbar.show(this.context,
-                                  'Đã mở: ${sTitle.length > 25 ? "${sTitle.substring(0, 25)}..." : sTitle}');
+                              final shortTitle = sTitle.length > 25
+                                  ? '${sTitle.substring(0, 25)}...'
+                                  : sTitle;
+                              AppSnackbar.show(
+                                  this.context,
+                                  AppLocalizations.tr(
+                                      'ai_chat_session_opened_snack',
+                                      params: {'title': shortTitle}));
                             }
                           },
                         );
@@ -718,11 +822,13 @@ class _AiChatScreenState extends State<AiChatScreen> {
             const Icon(Icons.delete_outline_rounded,
                 color: AppColors.expense, size: 22),
             const SizedBox(width: 8),
-            Text('Xóa cuộc trò chuyện?',
-                style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: context.appTextPrimary)),
+            Expanded(
+              child: Text(ctx.tr('ai_chat_delete_chat_title'),
+                  style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: context.appTextPrimary)),
+            ),
           ],
         ),
         content: Column(
@@ -730,7 +836,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Cuộc trò chuyện này sẽ bị xóa khỏi lịch sử và không thể khôi phục.',
+              ctx.tr('ai_chat_delete_chat_body'),
               style: TextStyle(fontSize: 13.5, color: context.appTextSecondary),
             ),
             const SizedBox(height: 10),
@@ -747,7 +853,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      'Dữ liệu tài chính (giao dịch, ví, ngân sách, mục tiêu) hoàn toàn KHÔNG bị ảnh hưởng.',
+                      ctx.tr('ai_chat_delete_chat_safe_note'),
                       style: TextStyle(
                           fontSize: 12,
                           color: context.appTextPrimary,
@@ -762,8 +868,8 @@ class _AiChatScreenState extends State<AiChatScreen> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx),
-            child:
-                Text('Hủy', style: TextStyle(color: context.appTextSecondary)),
+            child: Text(ctx.tr('common_cancel'),
+                style: TextStyle(color: context.appTextSecondary)),
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(backgroundColor: AppColors.expense),
@@ -776,11 +882,12 @@ class _AiChatScreenState extends State<AiChatScreen> {
               }
               _createNewChatSession(showSnack: false);
               if (mounted) {
-                AppSnackbar.show(context, 'Đã xóa cuộc trò chuyện');
+                AppSnackbar.show(
+                    context, AppLocalizations.tr('ai_chat_chat_deleted_snack'));
               }
             },
-            child: const Text('Xóa',
-                style: TextStyle(
+            child: Text(ctx.tr('common_delete'),
+                style: const TextStyle(
                     color: Colors.white, fontWeight: FontWeight.bold)),
           ),
         ],
@@ -793,27 +900,23 @@ class _AiChatScreenState extends State<AiChatScreen> {
     final quickQueries = [
       {
         'icon': '📊',
-        'title': 'Tóm tắt dòng tiền tháng này',
-        'prompt':
-            'Tóm tắt toàn diện tình hình thu chi và dòng tiền tháng này cho tôi.'
+        'title': context.tr('ai_chat_qa_1_title'),
+        'prompt': context.tr('ai_chat_qa_1_prompt'),
       },
       {
         'icon': '⚠️',
-        'title': 'Khoản chi tăng bất thường',
-        'prompt':
-            'Kiểm tra xem tháng này có khoản chi tiêu nào tăng bất thường hoặc đáng chú ý không?'
+        'title': context.tr('ai_chat_qa_2_title'),
+        'prompt': context.tr('ai_chat_qa_2_prompt'),
       },
       {
         'icon': '🎯',
-        'title': 'Tính khả thi mục tiêu tiết kiệm',
-        'prompt':
-            'Đánh giá tính khả thi của các mục tiêu tiết kiệm hiện tại dựa trên thặng dư tài chính của tôi.'
+        'title': context.tr('ai_chat_qa_3_title'),
+        'prompt': context.tr('ai_chat_qa_3_prompt'),
       },
       {
         'icon': '💡',
-        'title': 'Gợi ý cắt giảm chi tiêu',
-        'prompt':
-            'Dựa trên chi tiêu thực tế, tôi nên cắt giảm khoản nào để tối ưu dòng tiền nhất?'
+        'title': context.tr('ai_chat_qa_4_title'),
+        'prompt': context.tr('ai_chat_qa_4_prompt'),
       },
     ];
 
@@ -833,19 +936,25 @@ class _AiChatScreenState extends State<AiChatScreen> {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
-                    Row(
-                      children: [
-                        const Icon(Icons.bolt_rounded,
-                            color: AppColors.primary, size: 24),
-                        const SizedBox(width: 8),
-                        Text(
-                          '⚡ Phân tích tài chính nhanh',
-                          style: TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.bold,
-                              color: context.appTextPrimary),
-                        ),
-                      ],
+                    Expanded(
+                      child: Row(
+                        children: [
+                          const Icon(Icons.bolt_rounded,
+                              color: AppColors.primary, size: 24),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              context.tr('ai_chat_qa_sheet_title'),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  color: context.appTextPrimary),
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                     IconButton(
                       icon: const Icon(Icons.close),
@@ -892,7 +1001,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
 
   void _copyToClipboard(String text) {
     Clipboard.setData(ClipboardData(text: text));
-    AppSnackbar.show(context, 'Đã sao chép nội dung');
+    AppSnackbar.show(context, context.tr('ai_chat_copied_snack'));
   }
 
   void _showAiAssistantInfo() {
@@ -924,7 +1033,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
                     const SizedBox(width: 12),
                     Expanded(
                       child: Text(
-                        'Về Trợ lý AI Tài chính',
+                        context.tr('ai_chat_info_title'),
                         style: TextStyle(
                           fontSize: 17,
                           fontWeight: FontWeight.bold,
@@ -941,20 +1050,20 @@ class _AiChatScreenState extends State<AiChatScreen> {
                 const SizedBox(height: 16),
                 _buildInfoRow(
                   Icons.calculate_outlined,
-                  'Số liệu định lượng chính xác',
-                  'Toàn bộ thu chi, số dư ví, ngân sách và mục tiêu được hệ thống trích xuất và tính toán trước 100% từ cơ sở dữ liệu của bạn.',
+                  context.tr('ai_chat_info_1_title'),
+                  context.tr('ai_chat_info_1_desc'),
                 ),
                 const SizedBox(height: 12),
                 _buildInfoRow(
                   Icons.psychology_outlined,
-                  'Đóng vai Cố vấn Tài chính (CFP AI)',
-                  'AI tập trung phân tích nguyên nhân thặng dư/thâm hụt, phát hiện nguy cơ bội chi và phản biện tính khả thi của mục tiêu.',
+                  context.tr('ai_chat_info_2_title'),
+                  context.tr('ai_chat_info_2_desc'),
                 ),
                 const SizedBox(height: 12),
                 _buildInfoRow(
                   Icons.forum_outlined,
-                  'Lưu trữ phiên trò chuyện (Conversation Sessions)',
-                  'Các cuộc hội thoại được lưu an toàn trên Firestore, giúp bạn xem lại hoặc tiếp tục trò chuyện bất kỳ lúc nào.',
+                  context.tr('ai_chat_info_3_title'),
+                  context.tr('ai_chat_info_3_desc'),
                 ),
                 const SizedBox(height: 20),
                 SizedBox(
@@ -968,8 +1077,8 @@ class _AiChatScreenState extends State<AiChatScreen> {
                       padding: const EdgeInsets.symmetric(vertical: 12),
                     ),
                     onPressed: () => Navigator.pop(ctx),
-                    child: const Text('Đã hiểu',
-                        style: TextStyle(fontWeight: FontWeight.w600)),
+                    child: Text(context.tr('ai_chat_understood'),
+                        style: const TextStyle(fontWeight: FontWeight.w600)),
                   ),
                 ),
               ],
@@ -1136,7 +1245,9 @@ class _AiChatScreenState extends State<AiChatScreen> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
-                  'Trợ lý AI Tài chính',
+                  context.tr('ai_chat_appbar_title'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,
@@ -1156,16 +1267,20 @@ class _AiChatScreenState extends State<AiChatScreen> {
                       ),
                     ),
                     const SizedBox(width: 5),
-                    Text(
-                      _isLoadingContext
-                          ? 'Đang đồng bộ...'
-                          : (_financialContext?.isEmptyData ?? false)
-                              ? 'Dữ liệu mới bắt đầu'
-                              : 'Hiểu dữ liệu 90 ngày',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: context.appTextSecondary,
-                        fontWeight: FontWeight.w500,
+                    Expanded(
+                      child: Text(
+                        _isLoadingContext
+                            ? context.tr('ai_chat_status_syncing')
+                            : (_financialContext?.isEmptyData ?? false)
+                                ? context.tr('ai_chat_status_starter')
+                                : context.tr('ai_chat_status_90d'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: context.appTextSecondary,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
                     ),
                   ],
@@ -1178,13 +1293,13 @@ class _AiChatScreenState extends State<AiChatScreen> {
       actions: [
         IconButton(
           icon: const Icon(Icons.bolt_rounded),
-          tooltip: 'Phân tích nhanh',
+          tooltip: context.tr('ai_chat_quick_tip'),
           color: AppColors.primary,
           onPressed: _isSending ? null : _showQuickAnalysisSheet,
         ),
         PopupMenuButton<String>(
           icon: Icon(Icons.more_vert_rounded, color: context.appTextSecondary),
-          tooltip: 'Tùy chọn cuộc trò chuyện',
+          tooltip: context.tr('ai_chat_options_tip'),
           color: context.appCard,
           shape:
               RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -1198,38 +1313,52 @@ class _AiChatScreenState extends State<AiChatScreen> {
             }
           },
           itemBuilder: (context) => [
-            const PopupMenuItem(
+            PopupMenuItem(
               value: 'new',
               child: Row(
                 children: [
-                  Icon(Icons.add_comment_outlined,
+                  const Icon(Icons.add_comment_outlined,
                       size: 18, color: AppColors.primary),
-                  SizedBox(width: 10),
-                  Text('Cuộc trò chuyện mới', style: TextStyle(fontSize: 13.5)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(context.tr('ai_chat_menu_new'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13.5)),
+                  ),
                 ],
               ),
             ),
-            const PopupMenuItem(
+            PopupMenuItem(
               value: 'history',
               child: Row(
                 children: [
-                  Icon(Icons.history_rounded,
+                  const Icon(Icons.history_rounded,
                       size: 18, color: AppColors.primary),
-                  SizedBox(width: 10),
-                  Text('Lịch sử trò chuyện', style: TextStyle(fontSize: 13.5)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(context.tr('ai_chat_menu_history'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(fontSize: 13.5)),
+                  ),
                 ],
               ),
             ),
-            const PopupMenuItem(
+            PopupMenuItem(
               value: 'delete',
               child: Row(
                 children: [
-                  Icon(Icons.delete_outline_rounded,
+                  const Icon(Icons.delete_outline_rounded,
                       size: 18, color: AppColors.expense),
-                  SizedBox(width: 10),
-                  Text('Xóa cuộc trò chuyện',
-                      style:
-                          TextStyle(fontSize: 13.5, color: AppColors.expense)),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(context.tr('ai_chat_menu_delete'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                            fontSize: 13.5, color: AppColors.expense)),
+                  ),
                 ],
               ),
             ),
@@ -1237,7 +1366,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
         ),
         IconButton(
           icon: const Icon(Icons.info_outline_rounded),
-          tooltip: 'Thông tin Trợ lý',
+          tooltip: context.tr('ai_chat_info_tip'),
           color: context.appTextSecondary,
           onPressed: _showAiAssistantInfo,
         ),
@@ -1274,12 +1403,16 @@ class _AiChatScreenState extends State<AiChatScreen> {
               const Icon(Icons.arrow_downward_rounded,
                   size: 16, color: AppColors.primary),
               const SizedBox(width: 5),
-              Text(
-                'Mới nhất',
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.w600,
-                  color: context.appTextPrimary,
+              Flexible(
+                child: Text(
+                  context.tr('ai_chat_latest_btn'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: context.appTextPrimary,
+                  ),
                 ),
               ),
             ],
@@ -1292,12 +1425,12 @@ class _AiChatScreenState extends State<AiChatScreen> {
   /// Thanh chọn danh mục câu hỏi gợi ý
   Widget _buildPromptFilterBar() {
     final tabs = [
-      {'id': 'all', 'label': 'Tất cả'},
-      {'id': 'featured', 'label': '⚡ Nổi bật'},
-      {'id': 'overview', 'label': '📊 Tổng quan'},
-      {'id': 'expense', 'label': '💸 Chi tiêu'},
-      {'id': 'budget', 'label': '🎯 Ngân sách'},
-      {'id': 'saving', 'label': '💎 Tiết kiệm'},
+      {'id': 'all', 'label': context.tr('ai_chat_tab_all')},
+      {'id': 'featured', 'label': context.tr('ai_chat_tab_featured')},
+      {'id': 'overview', 'label': context.tr('ai_chat_tab_overview')},
+      {'id': 'expense', 'label': context.tr('ai_chat_tab_expense')},
+      {'id': 'budget', 'label': context.tr('ai_chat_tab_budget')},
+      {'id': 'saving', 'label': context.tr('ai_chat_tab_saving')},
     ];
 
     return Container(
@@ -1350,34 +1483,34 @@ class _AiChatScreenState extends State<AiChatScreen> {
   Widget _buildDynamicPromptsList() {
     final allPrompts = _financialContext?.dynamicPrompts ??
         [
-          const DynamicPromptChip(
-              label: 'Tôi đang có vấn đề tài chính nào cần chú ý?',
+          DynamicPromptChip(
+              label: context.tr('ai_chat_chip_1'),
               category: 'featured',
               icon: '🔥'),
-          const DynamicPromptChip(
-              label: 'Tôi nên cải thiện khoản chi nào trước?',
+          DynamicPromptChip(
+              label: context.tr('ai_chat_chip_2'),
               category: 'featured',
               icon: '💡'),
-          const DynamicPromptChip(
-              label: 'Làm thế nào để tôi tiết kiệm thêm mỗi tháng?',
+          DynamicPromptChip(
+              label: context.tr('ai_chat_chip_3'),
               category: 'featured',
               icon: '💎'),
-          const DynamicPromptChip(
-              label: 'Tóm tắt tình hình tài chính tháng này',
+          DynamicPromptChip(
+              label: context.tr('ai_chat_chip_4'),
               category: 'overview'),
-          const DynamicPromptChip(
-              label: 'Thu nhập và chi tiêu đang thay đổi ra sao?',
+          DynamicPromptChip(
+              label: context.tr('ai_chat_chip_5'),
               category: 'overview'),
-          const DynamicPromptChip(
-              label: 'Danh mục nào đang chiếm chi tiêu nhiều nhất?',
+          DynamicPromptChip(
+              label: context.tr('ai_chat_chip_6'),
               category: 'expense'),
-          const DynamicPromptChip(
-              label: 'Tôi nên cắt giảm khoản chi tiêu nào?',
+          DynamicPromptChip(
+              label: context.tr('ai_chat_chip_7'),
               category: 'expense'),
-          const DynamicPromptChip(
-              label: 'Ngân sách nào sắp vượt hạn mức?', category: 'budget'),
-          const DynamicPromptChip(
-              label: 'Tôi có thể đạt mục tiêu tiết kiệm đúng hạn không?',
+          DynamicPromptChip(
+              label: context.tr('ai_chat_chip_8'), category: 'budget'),
+          DynamicPromptChip(
+              label: context.tr('ai_chat_chip_9'),
               category: 'saving'),
         ];
 
@@ -1415,12 +1548,17 @@ class _AiChatScreenState extends State<AiChatScreen> {
                   Text(prompt.icon!, style: const TextStyle(fontSize: 12)),
                   const SizedBox(width: 4),
                 ],
-                Text(
-                  prompt.label,
-                  style: TextStyle(
-                    fontSize: 12.5,
-                    fontWeight: FontWeight.w500,
-                    color: isAlert ? AppColors.expense : context.appTextPrimary,
+                Flexible(
+                  child: Text(
+                    prompt.label,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w500,
+                      color:
+                          isAlert ? AppColors.expense : context.appTextPrimary,
+                    ),
                   ),
                 ),
               ],
@@ -1469,8 +1607,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
                   focusNode: _inputFocusNode,
                   style: TextStyle(fontSize: 14, color: context.appTextPrimary),
                   decoration: InputDecoration(
-                    hintText:
-                        'Hỏi Trợ lý AI về thu chi, ngân sách, mục tiêu...',
+                    hintText: context.tr('ai_chat_input_hint'),
                     hintStyle: TextStyle(
                         color: context.appTextSecondary, fontSize: 13.5),
                     border: InputBorder.none,
@@ -1644,17 +1781,17 @@ class _ChatBubble extends StatelessWidget {
                             InkWell(
                               onTap: onRetry,
                               borderRadius: BorderRadius.circular(4),
-                              child: const Padding(
-                                padding: EdgeInsets.symmetric(
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
                                     horizontal: 6, vertical: 2),
                                 child: Row(
                                   mainAxisSize: MainAxisSize.min,
                                   children: [
-                                    Icon(Icons.refresh,
+                                    const Icon(Icons.refresh,
                                         size: 14, color: AppColors.expense),
-                                    SizedBox(width: 4),
-                                    Text('Thử lại',
-                                        style: TextStyle(
+                                    const SizedBox(width: 4),
+                                    Text(context.tr('common_retry'),
+                                        style: const TextStyle(
                                             fontSize: 11,
                                             color: AppColors.expense,
                                             fontWeight: FontWeight.bold)),
@@ -1677,7 +1814,7 @@ class _ChatBubble extends StatelessWidget {
                                         color: context.appTextSecondary),
                                     const SizedBox(width: 4),
                                     Text(
-                                      'Sao chép',
+                                      context.tr('ai_chat_copy_btn'),
                                       style: TextStyle(
                                           fontSize: 11,
                                           color: context.appTextSecondary),
@@ -1808,39 +1945,51 @@ class _ActionableInsightCard extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                card.primaryMetric,
-                style: TextStyle(
-                  fontSize: 12.5,
-                  fontWeight: FontWeight.bold,
-                  color: themeColor,
+              Expanded(
+                child: Text(
+                  card.primaryMetric,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.bold,
+                    color: themeColor,
+                  ),
                 ),
               ),
-              InkWell(
-                onTap: onAction,
-                borderRadius: BorderRadius.circular(8),
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-                  decoration: BoxDecoration(
-                    color: themeColor,
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        card.actionLabel,
-                        style: const TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.white,
-                        ),
+              const SizedBox(width: 8),
+              ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 145),
+                child: InkWell(
+                  onTap: onAction,
+                  borderRadius: BorderRadius.circular(8),
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                    decoration: BoxDecoration(
+                      color: themeColor,
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(
+                            card.actionLabel,
+                            maxLines: 1,
+                            style: const TextStyle(
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white,
+                            ),
+                          ),
+                          const SizedBox(width: 4),
+                          const Icon(Icons.arrow_forward_ios_rounded,
+                              size: 10, color: Colors.white),
+                        ],
                       ),
-                      const SizedBox(width: 4),
-                      const Icon(Icons.arrow_forward_ios_rounded,
-                          size: 10, color: Colors.white),
-                    ],
+                    ),
                   ),
                 ),
               ),

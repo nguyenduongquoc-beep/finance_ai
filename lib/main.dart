@@ -1,3 +1,4 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:firebase_core/firebase_core.dart';
@@ -19,10 +20,17 @@ Future<void> main() async {
   await initializeDateFormatting('vi_VN', null);
   await initializeDateFormatting('en_US', null);
   await LanguageController.loadSavedLanguage();
+  LocalNotificationService.canNavigateToDeepLink = () =>
+      FirebaseAuth.instance.currentUser != null &&
+      AppRoutes.navigatorKey.currentState != null;
   LocalNotificationService.onOpenRecurringSchedule = (scheduleId) {
+    if (RecurringTransactionScreen.focusActiveScheduleIfOpen(scheduleId)) {
+      return;
+    }
     AppRoutes.navigatorKey.currentState?.push(
       MaterialPageRoute(
-        builder: (_) => RecurringTransactionScreen(targetScheduleId: scheduleId),
+        builder: (_) =>
+            RecurringTransactionScreen(targetScheduleId: scheduleId),
       ),
     );
   };
@@ -148,7 +156,7 @@ class FinanceAiApp extends StatelessWidget {
           foregroundColor: onAccent,
           elevation: 0,
           shadowColor: Colors.transparent,
-          minimumSize: const Size.fromHeight(48),
+          minimumSize: const Size(64, 48),
           padding: const EdgeInsets.symmetric(vertical: 13, horizontal: 20),
           shape: controlShape,
           textStyle: GoogleFonts.inter(
@@ -161,7 +169,7 @@ class FinanceAiApp extends StatelessWidget {
         style: FilledButton.styleFrom(
           backgroundColor: accent,
           foregroundColor: onAccent,
-          minimumSize: const Size.fromHeight(48),
+          minimumSize: const Size(64, 48),
           shape: controlShape,
           textStyle: GoogleFonts.inter(
             fontSize: 15,
@@ -172,7 +180,7 @@ class FinanceAiApp extends StatelessWidget {
       outlinedButtonTheme: OutlinedButtonThemeData(
         style: OutlinedButton.styleFrom(
           foregroundColor: textPrimary,
-          minimumSize: const Size.fromHeight(48),
+          minimumSize: const Size(64, 48),
           side: BorderSide(color: border, width: 1),
           padding: const EdgeInsets.symmetric(vertical: 13, horizontal: 20),
           shape: controlShape,

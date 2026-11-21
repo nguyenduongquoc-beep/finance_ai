@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:fake_cloud_firestore/fake_cloud_firestore.dart';
-import 'package:finance_ai_app/admin_web/services/admin_ai_sandbox_service.dart';
 import 'package:finance_ai_app/admin_web/services/admin_http_helper.dart';
 import 'package:finance_ai_app/admin_web/services/admin_web_service.dart';
 import 'package:finance_ai_app/models/admin_audit_log_model.dart';
@@ -31,7 +30,7 @@ void main() {
           utf8.encode(
             jsonEncode({
               'success': true,
-              'data': {'publishedVersion': 7, 'configType': 'ai_runtime'},
+              'data': {'categoryId': 'sys_cat_7', 'action': 'save'},
             }),
           ),
           200,
@@ -40,9 +39,9 @@ void main() {
       });
 
       final response = await postAdminCloudEndpoint(
-        url: 'https://example.cloudfunctions.net/adminPublishConfig',
+        url: 'https://example.cloudfunctions.net/adminManageSystemCategory',
         idToken: 'fake-id-token-123',
-        body: {'configType': 'ai_runtime'},
+        body: {'action': 'save'},
         client: client,
       );
 
@@ -54,7 +53,7 @@ void main() {
       expect(response.isSuccess, isTrue);
       expect(response.statusCode, 200);
       expect(response.errorKind, AdminCloudErrorKind.none);
-      expect(response.requireSuccessData()['publishedVersion'], 7);
+      expect(response.requireSuccessData()['categoryId'], 'sys_cat_7');
     });
 
     test('GET request chuẩn hóa response và không gửi body JSON thừa', () async {
@@ -224,7 +223,7 @@ void main() {
     });
 
     test(
-        'Các thao tác publishKnowledgeArticle, runLiveGeminiSandbox, listUsersViaBackend, fetchDashboardStatsViaBackend và CRUD System Category/Announcement đều đi qua Backend',
+        'Các thao tác listUsersViaBackend, fetchDashboardStatsViaBackend và CRUD System Category/Announcement đều đi qua Backend',
         () async {
       final fakeFirestore = FakeFirebaseFirestore();
       final firestoreService = FirestoreService(firestore: fakeFirestore);
@@ -263,20 +262,6 @@ void main() {
                 'success': true,
                 'stats': {'totalUsers': 42, 'lockedUsers': 1},
               };
-            case 'adminPublishKnowledgeBase':
-              return {'success': true, 'articleId': payload['articleId']};
-            case 'adminRunSandbox':
-              return {
-                'success': true,
-                'modelUsed': 'gemini-3.5-flash',
-                'triedModels': ['gemini-3.5-flash'],
-                'responseText': '{"summarySummary":"OK"}',
-                'jsonValid': true,
-                'jsonValidationErrors': [],
-                'latencyMs': 185,
-                'logId': 'log_sb_1',
-                'draftVerificationNote': 'Khong thay doi trang thai Draft',
-              };
             case 'adminManageSystemCategory':
               return {'success': true, 'categoryId': 'sys_food'};
             case 'adminManageAnnouncement':
@@ -294,24 +279,6 @@ void main() {
       final stats =
           await service.fetchDashboardStatsViaBackend(adminUid: 'admin_1');
       expect(stats['totalUsers'], 42);
-
-      final pubRes = await service.publishKnowledgeArticle(
-        adminUid: 'admin_1',
-        articleId: 'kb_rule_1',
-        action: 'publish',
-        isActive: true,
-      );
-      expect(pubRes['articleId'], 'kb_rule_1');
-
-      final sandboxRes = await service.runLiveGeminiSandbox(
-        adminUid: 'admin_1',
-        prompt: 'Phân tích thử',
-        expectStructuredPlanJson: true,
-      );
-      expect(sandboxRes.modelUsed, 'gemini-3.5-flash');
-      expect(sandboxRes.jsonValid, isTrue);
-      expect(sandboxRes.latencyMs, 185);
-      expect(sandboxRes.logId, 'log_sb_1');
 
       await service.saveSystemCategory(
         adminUid: 'admin_1',
@@ -341,8 +308,6 @@ void main() {
       // Đảm bảo Client hoàn toàn KHÔNG tự ghi trực tiếp vào admin_logs hay collection hệ thống
       final logs = await fakeFirestore.collection('admin_logs').get();
       expect(logs.docs, isEmpty);
-      expect(called.any((c) => c['fn'] == 'adminPublishKnowledgeBase'), isTrue);
-      expect(called.any((c) => c['fn'] == 'adminRunSandbox'), isTrue);
       expect(called.any((c) => c['fn'] == 'adminManageSystemCategory'), isTrue);
       expect(called.any((c) => c['fn'] == 'adminManageAnnouncement'), isTrue);
     });
@@ -618,29 +583,8 @@ void main() {
     });
   });
 
-  group('Bản vá 6 & 8: AiPromptBuilder, AdminAiSandboxService, AiService clamp 0.1..0.8 & Audit Labels',
+  group('Bản vá 6 & 8: AiPromptBuilder, AiService clamp 0.1..0.8 & Audit Labels',
       () {
-    test('AdminAiSandboxService chạy mượt cả 3 SyntheticPersona chuẩn', () {
-      const sandboxService = AdminAiSandboxService();
-      final personas = SyntheticPersona.builtInPersonas();
-      expect(personas.length, 3);
-
-      for (final persona in personas) {
-        final sim = sandboxService.simulatePersona(
-          persona: persona,
-          runtimeConfig: AiRuntimeConfig.defaults(),
-          heuristicsConfig: FinancialHeuristicsConfig.defaults(),
-          transactionRules: TransactionIntelligenceConfig.defaults(),
-          sampleCategoryText: 'Ăn phở bò 55k',
-          sampleReceiptText: 'Thanh toán MoMo 55.000đ',
-        );
-        expect(sim.personaId, persona.id);
-        expect(sim.healthScore, inInclusiveRange(0, 100));
-        expect(sim.systemPromptPreview, contains('DATA GROUNDING'));
-        expect(sim.structuredPlanPromptPreview, contains('JSON'));
-      }
-    });
-
     test('AiService clamp temperature vào đúng [0.1, 0.8] (không còn 0.0)',
         () async {
       double? capturedTemp;
@@ -690,19 +634,6 @@ void main() {
         );
       }
 
-      final sandboxSrc =
-          File('lib/admin_web/services/admin_ai_sandbox_service.dart')
-              .readAsStringSync();
-      expect(
-        RegExp(r'^import\s+.*api_keys\.dart', multiLine: true)
-            .hasMatch(sandboxSrc),
-        isFalse,
-      );
-      expect(
-        RegExp(r'^import\s+.*ai_service\.dart', multiLine: true)
-            .hasMatch(sandboxSrc),
-        isFalse,
-      );
       expect(AiPromptBuilder.stripMarkdownCodeFence('```json\n{}\n```'), '{}');
 
       // Kiểm tra toàn bộ đồ thị import bắc cầu từ lib/main_admin.dart

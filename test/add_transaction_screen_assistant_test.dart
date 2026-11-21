@@ -1,6 +1,10 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:finance_ai_app/models/category_model.dart';
+import 'package:finance_ai_app/models/receipt_info.dart';
 import 'package:finance_ai_app/models/transaction_model.dart';
+import 'package:finance_ai_app/models/wallet_model.dart';
+import 'package:finance_ai_app/screens/home/add_transaction_screen.dart';
 import 'package:finance_ai_app/services/transaction_intelligence_service.dart';
 import 'package:finance_ai_app/utils/category_utils.dart';
 
@@ -161,5 +165,211 @@ void main() {
       );
       expect(resultWithoutSelf.isAnomalous, isFalse);
     });
+  });
+
+  group('AddTransactionScreen OCR vs Manual Entry Widget Tests', () {
+    final testWallets = [
+      Wallet(
+        walletId: 'w_cash',
+        userId: 'u1',
+        walletName: 'Tiền mặt',
+        balance: 16000000,
+        type: 'cash',
+        createdAt: DateTime(2026, 1, 1),
+      ),
+      Wallet(
+        walletId: 'w_mb',
+        userId: 'u1',
+        walletName: 'MB Bank',
+        balance: 5000000,
+        type: 'bank',
+        createdAt: DateTime(2026, 1, 1),
+      ),
+    ];
+
+    final testCategories = [
+      Category(
+        categoryId: 'cat_food',
+        userId: 'u1',
+        name: 'Ăn uống',
+        type: 'expense',
+        icon: 'restaurant',
+        color: 0xFFE53935,
+      ),
+      Category(
+        categoryId: 'cat_bonus',
+        userId: 'u1',
+        name: 'Thưởng',
+        type: 'income',
+        icon: 'card_giftcard',
+        color: 0xFFFB8C00,
+      ),
+      Category(
+        categoryId: 'cat_salary',
+        userId: 'u1',
+        name: 'Lương',
+        type: 'income',
+        icon: 'work',
+        color: 0xFF43A047,
+      ),
+    ];
+
+    testWidgets(
+      '11. Nhập thủ công (Manual entry): KHÔNG hiển thị chip "AI gợi ý" khi chọn danh mục hoặc nhập ghi chú thủ công',
+      (tester) async {
+        await tester.pumpWidget(
+          MaterialApp(
+            home: AddTransactionScreen(
+              initialType: 'income',
+              walletsStream: Stream.value(testWallets),
+              categoriesStream: Stream.value(testCategories),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Nhập ghi chú thủ công có chứa từ khóa "thưởng" / "lương"
+        await tester.enterText(
+          find.widgetWithText(TextField, 'Ghi chú'),
+          'Thưởng dự án tháng 11',
+        );
+        await tester.pump(const Duration(milliseconds: 400));
+        await tester.pumpAndSettle();
+
+        // Không được hiển thị câu đề xuất "AI gợi ý:" khi nhập thủ công
+        expect(find.textContaining('AI gợi ý:'), findsNothing);
+      },
+    );
+
+    testWidgets(
+      '12. Trích xuất OCR (khi người dùng CÓ ví tương ứng): Tự động chọn cả Ví ("Tiền mặt") và Danh mục ("Ăn uống"), hiển thị gợi ý AI',
+      (tester) async {
+        final ocrReceipt = ReceiptInfo(
+          merchant: 'Kang Tea & Coffee - Bạch Đằng',
+          total: 50000,
+          date: DateTime(2026, 11, 13),
+          address: '20 Bạch Đằng, Phú Cường, Tp Thủ Dầu Một, Bình Dương',
+          paymentMethod: 'Tiền mặt',
+          rawText:
+              'Kang Tea & Coffee\nCà Phê Sữa Đá Máy 50,000\n+Thanh toán tiền mặt 50,000 đ\nTiền nhận 50,000 đ\nTiền thừa 0 đ',
+          items: [
+            ReceiptItem(description: 'Cà Phê Sữa Đá Máy', amount: 50000),
+          ],
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: AddTransactionScreen(
+              walletsStream: Stream.value(testWallets),
+              categoriesStream: Stream.value(testCategories),
+              initialOcrReceiptForTest: ocrReceipt,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Số tiền 50.000 đã được điền
+        expect(find.text('50.000'), findsOneWidget);
+
+        // Ví "Tiền mặt" và Danh mục "Ăn uống" đều hiển thị chip AI gợi ý và đã được tự động chọn
+        expect(find.text('AI gợi ý: Tiền mặt (90% tin cậy)'), findsOneWidget);
+        expect(
+          find.textContaining('AI gợi ý: Ăn uống'),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      '13. Trích xuất OCR (khi người dùng KHÔNG CÓ loại ví trên hóa đơn): Không chọn nhầm ví, hiển thị thông báo không có loại ví này',
+      (tester) async {
+        final ocrReceipt = ReceiptInfo(
+          merchant: 'Kang Tea & Coffee - Bạch Đằng',
+          total: 50000,
+          date: DateTime(2026, 11, 13),
+          paymentMethod: 'MoMo',
+          items: [
+            ReceiptItem(description: 'Cà Phê Sữa Đá Máy', amount: 50000),
+          ],
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: AddTransactionScreen(
+              walletsStream: Stream.value(testWallets), // Chỉ có Tiền mặt & MB Bank, không có MoMo
+              categoriesStream: Stream.value(testCategories),
+              initialOcrReceiptForTest: ocrReceipt,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Hiển thị cảnh báo không có loại ví MoMo
+        expect(
+          find.text(
+            'Bạn không có loại ví "MoMo" như trên hóa đơn. Vui lòng chọn ví khác.',
+          ),
+          findsOneWidget,
+        );
+
+        // Danh mục vẫn được nhận diện bình thường
+        expect(
+          find.textContaining('AI gợi ý: Ăn uống'),
+          findsOneWidget,
+        );
+      },
+    );
+
+    testWidgets(
+      '14. Trích xuất OCR chi tiết (SL, Đơn giá, Thành tiền), kết hợp Địa điểm và hiển thị thông báo khi AI khôi phục chữ mờ',
+      (tester) async {
+        final ocrReceipt = ReceiptInfo.fromJson({
+          'merchant': 'Kang Tea & Coffee - Bạch Đằng',
+          'total': 50000,
+          'date': '2026-11-13',
+          'address': '20 Bạch Đằng, Phú Cường, Tp Thủ Dầu Một, Bình Dương',
+          'paymentMethod': 'Tiền mặt',
+          'items': [
+            {
+              'description': 'Cà Phê Sữa Đa Máy',
+              'quantity': 2,
+              'unitPrice': 25000,
+              'amount': 50000,
+            },
+          ],
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: AddTransactionScreen(
+              walletsStream: Stream.value(testWallets),
+              categoriesStream: Stream.value(testCategories),
+              initialOcrReceiptForTest: ocrReceipt,
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Ghi chú hiển thị đầy đủ Tên mặt hàng + SL + Đơn giá + Thành tiền (đã khôi phục "Đa" -> "Đá")
+        expect(
+          find.text('Cà Phê Sữa Đá Máy: 2 x 25.000₫ = 50.000₫'),
+          findsOneWidget,
+        );
+
+        // Địa điểm kết hợp cả Tên cửa hàng và Địa chỉ
+        expect(
+          find.text(
+            'Kang Tea & Coffee - Bạch Đằng - 20 Bạch Đằng, Phú Cường, Tp Thủ Dầu Một, Bình Dương',
+          ),
+          findsOneWidget,
+        );
+
+        // Hiển thị cảnh báo nhẹ để người dùng biết AI đã hỗ trợ khôi phục chữ mờ và có thể chỉnh sửa lại
+        expect(
+          find.textContaining('AI đã hỗ trợ khôi phục một số chữ mờ trên hóa đơn'),
+          findsOneWidget,
+        );
+      },
+    );
   });
 }

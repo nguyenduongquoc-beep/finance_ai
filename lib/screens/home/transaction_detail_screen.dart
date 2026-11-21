@@ -1,10 +1,16 @@
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
+import '../../l10n/app_localizations.dart';
+import '../../models/saving_goal_model.dart';
 import '../../models/transaction_model.dart';
+import '../../models/wallet_model.dart';
 import '../../services/firestore_service.dart';
+import '../../utils/category_localization_helper.dart';
 import '../../utils/constants.dart';
 import '../../utils/formatters.dart';
+import '../../utils/transaction_note_localization_helper.dart';
+import '../../utils/wallet_localization_helper.dart';
 import 'dart:io';
 import 'add_transaction_screen.dart';
 import '../../widgets/app_button.dart';
@@ -19,7 +25,7 @@ class TransactionDetailScreen extends StatelessWidget {
 
   IconData getCategoryIcon(String? iconName, String type) {
     if (iconName == null) {
-      return type == 'income' ? Icons.arrow_downward : Icons.arrow_upward;
+      return type == 'income' ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded;
     }
     switch (iconName) {
       case 'restaurant':
@@ -54,9 +60,10 @@ class TransactionDetailScreen extends StatelessWidget {
     final txDate = DateTime(date.year, date.month, date.day);
     final dateStr = DateFormat('dd/MM/yyyy').format(date);
     if (txDate == today) {
-      return 'Hôm nay, $dateStr';
+      return AppLocalizations.tr('tx_detail_today', params: {'date': dateStr});
     } else if (txDate == yesterday) {
-      return 'Hôm qua, $dateStr';
+      return AppLocalizations.tr('tx_detail_yesterday',
+          params: {'date': dateStr});
     } else {
       return dateStr;
     }
@@ -114,9 +121,20 @@ class TransactionDetailScreen extends StatelessWidget {
       debugPrint('❌ Error loading transaction details: $e');
     }
 
-    String? goalName = (goalDoc != null && goalDoc.exists)
-        ? ((goalDoc.data() as Map<String, dynamic>?)?['name'] as String?)
+    final walletObj = (walletDoc != null && walletDoc.exists)
+        ? Wallet.fromMap(
+            walletDoc.data() as Map<String, dynamic>, walletDoc.id)
         : null;
+    final toWalletObj = (toWalletDoc != null && toWalletDoc.exists)
+        ? Wallet.fromMap(
+            toWalletDoc.data() as Map<String, dynamic>, toWalletDoc.id)
+        : null;
+    final goalObj = (goalDoc != null && goalDoc.exists)
+        ? SavingGoal.fromMap(
+            goalDoc.data() as Map<String, dynamic>, goalDoc.id)
+        : null;
+
+    String? goalName = goalObj?.name;
 
     if ((goalName == null || goalName.isEmpty) && transaction.note != null) {
       final note = transaction.note!;
@@ -125,26 +143,24 @@ class TransactionDetailScreen extends StatelessWidget {
       }
     }
 
+    final unknownLabel = AppLocalizations.tr('tx_detail_unknown');
     return {
-      'walletName': (walletDoc != null && walletDoc.exists)
-          ? ((walletDoc.data() as Map<String, dynamic>?)?['walletName'] ??
-              'Không rõ')
-          : 'Không rõ',
+      'walletObj': walletObj,
+      'toWalletObj': toWalletObj,
+      'goalObj': goalObj,
+      'walletName': walletObj?.walletName ?? unknownLabel,
       'categoryName': (categoryDoc != null && categoryDoc.exists)
           ? ((categoryDoc.data() as Map<String, dynamic>?)?['name'] ??
-              'Không rõ')
-          : 'Không rõ',
+              unknownLabel)
+          : unknownLabel,
       'categoryColor': (categoryDoc != null && categoryDoc.exists)
           ? ((categoryDoc.data() as Map<String, dynamic>?)?['color'] as int?)
           : null,
       'categoryIcon': (categoryDoc != null && categoryDoc.exists)
           ? ((categoryDoc.data() as Map<String, dynamic>?)?['icon'] as String?)
           : null,
-      'toWalletName': (toWalletDoc != null && toWalletDoc.exists)
-          ? ((toWalletDoc.data() as Map<String, dynamic>?)?['walletName'] ??
-              'Không rõ')
-          : null,
-      'goalName': goalName ?? 'Không rõ',
+      'toWalletName': toWalletObj?.walletName,
+      'goalName': goalName ?? unknownLabel,
     };
   }
 
@@ -163,7 +179,7 @@ class TransactionDetailScreen extends StatelessWidget {
     return Scaffold(
       backgroundColor: Theme.of(context).colorScheme.surface,
       appBar: AppBar(
-        title: const Text('Chi tiết giao dịch'),
+        title: Text(context.tr('tx_detail_title')),
         leading: IconButton(
           icon: const Icon(Icons.arrow_back_ios_new_rounded),
           onPressed: () => Navigator.of(context).pop(),
@@ -176,11 +192,32 @@ class TransactionDetailScreen extends StatelessWidget {
             return const Center(child: CircularProgressIndicator());
           }
           final details = snapshot.data ?? {};
-          final walletName = details['walletName'] ?? 'Không rõ';
-          final categoryName = details['categoryName'] ?? 'Không rõ';
+          final unknown = context.tr('tx_detail_unknown');
+          final walletObj = details['walletObj'] as Wallet?;
+          final toWalletObj = details['toWalletObj'] as Wallet?;
+          final goalObj = details['goalObj'] as SavingGoal?;
+          final walletName = walletObj != null
+              ? WalletLocalizationHelper.localizeWalletWithContext(
+                  context, walletObj)
+              : (details['walletName'] as String? ?? unknown);
+          final rawCategoryName = details['categoryName'] ?? unknown;
+          final categoryName = rawCategoryName == unknown
+              ? unknown
+              : CategoryLocalizationHelper.localizeNameWithContext(
+                  context, rawCategoryName);
           final categoryIcon = details['categoryIcon'];
-          final toWalletName = details['toWalletName'];
+          final toWalletName = toWalletObj != null
+              ? WalletLocalizationHelper.localizeWalletWithContext(
+                  context, toWalletObj)
+              : details['toWalletName'];
           final goalName = details['goalName'];
+          final localizedNote =
+              TransactionNoteLocalizationHelper.localizeNoteWithContext(
+            context,
+            transaction,
+            wallet: walletObj,
+            goal: goalObj,
+          );
 
           return SingleChildScrollView(
             padding: const EdgeInsets.all(20),
@@ -211,14 +248,15 @@ class TransactionDetailScreen extends StatelessWidget {
                       const SizedBox(height: 14),
                       Text(
                         isGoalDeposit
-                            ? 'Số tiền đã nạp'
+                            ? context.tr('tx_detail_amount_deposit')
                             : (isGoalWithdraw
-                                ? 'Số tiền đã rút'
+                                ? context.tr('tx_detail_amount_withdraw')
                                 : (transaction.type == 'transfer'
-                                    ? 'Số tiền đã chuyển'
+                                    ? context.tr('tx_detail_amount_transfer')
                                     : (isIncome
-                                        ? 'Số tiền đã thu'
-                                        : 'Số tiền đã chi'))),
+                                        ? context.tr('tx_detail_amount_income')
+                                        : context.tr(
+                                            'tx_detail_amount_expense')))),
                         style: TextStyle(
                           color: context.appTextSecondary,
                           fontSize: 13,
@@ -233,9 +271,9 @@ class TransactionDetailScreen extends StatelessWidget {
                               ? (isHuge
                                   ? AppFormatters.compactCurrency(
                                       transaction.amount,
-                                      unit: 'VNĐ')
+                                      unit: context.tr('common_vnd_label'))
                                   : AppFormatters.currency(transaction.amount))
-                              : '${isIncome ? '+' : '-'}${isHuge ? AppFormatters.compactCurrency(transaction.amount, unit: 'VNĐ') : AppFormatters.currency(transaction.amount)}';
+                              : '${isIncome ? '+' : '-'}${isHuge ? AppFormatters.compactCurrency(transaction.amount, unit: context.tr('common_vnd_label')) : AppFormatters.currency(transaction.amount)}';
                           return Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
@@ -254,7 +292,13 @@ class TransactionDetailScreen extends StatelessWidget {
                               if (isHuge) ...[
                                 const SizedBox(height: 4),
                                 Text(
-                                  'Chính xác: ${AppFormatters.currency(transaction.amount)}',
+                                  context.tr(
+                                    'tx_detail_exact',
+                                    params: {
+                                      'amount': AppFormatters.currency(
+                                          transaction.amount),
+                                    },
+                                  ),
                                   style: TextStyle(
                                     fontSize: 12,
                                     color: context.appTextSecondary,
@@ -276,12 +320,14 @@ class TransactionDetailScreen extends StatelessWidget {
                         ),
                         child: Text(
                           isGoalDeposit
-                              ? 'Nạp tiết kiệm'
+                              ? context.tr('tx_detail_badge_deposit')
                               : (isGoalWithdraw
-                                  ? 'Rút tiết kiệm'
+                                  ? context.tr('tx_detail_badge_withdraw')
                                   : (transaction.type == 'transfer'
-                                      ? 'Chuyển tiền'
-                                      : (isIncome ? 'Thu nhập' : 'Chi tiêu'))),
+                                      ? context.tr('tx_detail_badge_transfer')
+                                      : (isIncome
+                                          ? context.tr('common_income')
+                                          : context.tr('common_expense')))),
                           style: TextStyle(
                             color: color,
                             fontWeight: FontWeight.w600,
@@ -298,51 +344,60 @@ class TransactionDetailScreen extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       if (isGoalTx) ...[
-                        _buildDetailRow(context, 'Ví', walletName),
-                        Divider(
-                            height: 24,
-                            thickness: 0.5,
-                            color: context.appBorder),
-                        _buildDetailRow(context, 'Mục tiêu tiết kiệm',
-                            goalName ?? 'Không rõ'),
-                        Divider(
-                            height: 24,
-                            thickness: 0.5,
-                            color: context.appBorder),
-                      ] else if (transaction.type == 'transfer') ...[
-                        _buildDetailRow(context, 'Từ ví', walletName),
+                        _buildDetailRow(
+                            context, context.tr('tx_detail_wallet'), walletName),
                         Divider(
                             height: 24,
                             thickness: 0.5,
                             color: context.appBorder),
                         _buildDetailRow(
-                            context, 'Đến ví', toWalletName ?? 'Không rõ'),
+                            context,
+                            context.tr('tx_detail_goal'),
+                            goalName ?? context.tr('tx_detail_unknown')),
+                        Divider(
+                            height: 24,
+                            thickness: 0.5,
+                            color: context.appBorder),
+                      ] else if (transaction.type == 'transfer') ...[
+                        _buildDetailRow(context,
+                            context.tr('tx_detail_from_wallet'), walletName),
+                        Divider(
+                            height: 24,
+                            thickness: 0.5,
+                            color: context.appBorder),
+                        _buildDetailRow(
+                            context,
+                            context.tr('tx_detail_to_wallet'),
+                            toWalletName ?? context.tr('tx_detail_unknown')),
                         Divider(
                             height: 24,
                             thickness: 0.5,
                             color: context.appBorder),
                       ] else ...[
-                        _buildDetailRow(context, 'Danh mục', categoryName),
+                        _buildDetailRow(context,
+                            context.tr('tx_detail_category'), categoryName),
                         Divider(
                             height: 24,
                             thickness: 0.5,
                             color: context.appBorder),
-                        _buildDetailRow(context, 'Ví thanh toán', walletName),
+                        _buildDetailRow(
+                            context,
+                            context.tr('tx_detail_payment_wallet'),
+                            walletName),
                         Divider(
                             height: 24,
                             thickness: 0.5,
                             color: context.appBorder),
                       ],
-                      _buildDetailRow(context, 'Thời gian',
+                      _buildDetailRow(context, context.tr('tx_detail_time'),
                           getFormattedDate(transaction.date)),
-                      if (transaction.note != null &&
-                          transaction.note!.isNotEmpty) ...[
+                      if (localizedNote.isNotEmpty) ...[
                         Divider(
                             height: 24,
                             thickness: 0.5,
                             color: context.appBorder),
                         Text(
-                          'Ghi chú',
+                          context.tr('tx_detail_note'),
                           style: TextStyle(
                             color: context.appTextSecondary,
                             fontSize: 13,
@@ -350,7 +405,7 @@ class TransactionDetailScreen extends StatelessWidget {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          transaction.note!,
+                          localizedNote,
                           style: TextStyle(
                             fontWeight: FontWeight.w600,
                             color: context.appTextPrimary,
@@ -365,7 +420,7 @@ class TransactionDetailScreen extends StatelessWidget {
                             thickness: 0.5,
                             color: context.appBorder),
                         Text(
-                          'Địa điểm',
+                          context.tr('tx_detail_location'),
                           style: TextStyle(
                             color: context.appTextSecondary,
                             fontSize: 13,
@@ -388,7 +443,7 @@ class TransactionDetailScreen extends StatelessWidget {
                             thickness: 0.5,
                             color: context.appBorder),
                         Text(
-                          'Ảnh hóa đơn',
+                          context.tr('tx_detail_receipt'),
                           style: TextStyle(
                             color: context.appTextSecondary,
                             fontSize: 13,
@@ -451,7 +506,7 @@ class TransactionDetailScreen extends StatelessWidget {
             children: [
               Expanded(
                 child: AppOutlinedButton(
-                  text: 'Xóa',
+                  text: context.tr('common_delete'),
                   icon: Icons.delete_outline_rounded,
                   textColor: AppColors.expense,
                   borderColor: AppColors.expense.withValues(alpha: 0.5),
@@ -459,22 +514,22 @@ class TransactionDetailScreen extends StatelessWidget {
                     final confirm = await showDialog<bool>(
                       context: context,
                       builder: (ctx) => AlertDialog(
-                        title: const Text('Xóa giao dịch?'),
+                        title: Text(context.tr('tx_detail_delete_title')),
                         content: Text(
                           isGoalTx
-                              ? 'Xóa giao dịch này sẽ hoàn tác cả số dư ví lẫn tiến độ mục tiêu tiết kiệm liên quan.'
-                              : 'Hành động này không thể hoàn tác.',
+                              ? context.tr('tx_detail_delete_goal_msg')
+                              : context.tr('tx_detail_delete_msg'),
                         ),
                         actions: [
                           TextButton(
                             onPressed: () => Navigator.pop(ctx, false),
-                            child: const Text('Hủy'),
+                            child: Text(context.tr('common_cancel')),
                           ),
                           TextButton(
                             onPressed: () => Navigator.pop(ctx, true),
-                            child: const Text(
-                              'Xóa',
-                              style: TextStyle(color: AppColors.expense),
+                            child: Text(
+                              context.tr('common_delete'),
+                              style: const TextStyle(color: AppColors.expense),
                             ),
                           ),
                         ],
@@ -499,7 +554,7 @@ class TransactionDetailScreen extends StatelessWidget {
                 const SizedBox(width: 12),
                 Expanded(
                   child: AppButton(
-                    text: 'Sửa',
+                    text: context.tr('common_edit'),
                     icon: Icons.edit_outlined,
                     onPressed: () async {
                       final result = await Navigator.push(
@@ -528,20 +583,29 @@ class TransactionDetailScreen extends StatelessWidget {
   Widget _buildDetailRow(BuildContext context, String label, String value) {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          label,
-          style: TextStyle(
-            color: context.appTextSecondary,
-            fontSize: 14,
+        Expanded(
+          flex: 2,
+          child: Text(
+            label,
+            style: TextStyle(
+              color: context.appTextSecondary,
+              fontSize: 14,
+            ),
           ),
         ),
-        Text(
-          value,
-          style: TextStyle(
-            color: context.appTextPrimary,
-            fontSize: 14,
-            fontWeight: FontWeight.w600,
+        const SizedBox(width: 12),
+        Expanded(
+          flex: 3,
+          child: Text(
+            value,
+            textAlign: TextAlign.end,
+            style: TextStyle(
+              color: context.appTextPrimary,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+            ),
           ),
         ),
       ],
@@ -565,7 +629,8 @@ class FullscreenImageScreen extends StatelessWidget {
           icon: const Icon(Icons.arrow_back_ios_new_rounded),
           onPressed: () => Navigator.of(context).pop(),
         ),
-        title: const Text('Ảnh hóa đơn', style: TextStyle(color: Colors.white)),
+        title: Text(context.tr('tx_detail_receipt'),
+            style: const TextStyle(color: Colors.white)),
       ),
       body: Center(
         child: InteractiveViewer(

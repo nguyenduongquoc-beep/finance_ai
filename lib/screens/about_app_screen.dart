@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../utils/constants.dart';
 import '../widgets/app_card.dart';
+import '../l10n/app_localizations.dart';
+import 'support/support_center_screen.dart';
 
 /// Thông tin về ứng dụng — màn tĩnh
 class AboutAppScreen extends StatelessWidget {
@@ -15,7 +17,7 @@ class AboutAppScreen extends StatelessWidget {
         backgroundColor: Colors.transparent,
         elevation: 0,
         title: Text(
-          'Thông tin ứng dụng',
+          context.tr('about_title'),
           style: GoogleFonts.inter(
             fontWeight: FontWeight.w600,
             color: context.appTextPrimary,
@@ -58,7 +60,7 @@ class AboutAppScreen extends StatelessWidget {
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Text(
-                'Phiên bản v1.0.0',
+                context.tr('about_version'),
                 style: GoogleFonts.inter(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
@@ -74,7 +76,7 @@ class AboutAppScreen extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Giới thiệu',
+                    context.tr('about_intro'),
                     style: GoogleFonts.inter(
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
@@ -83,9 +85,7 @@ class AboutAppScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 10),
                   Text(
-                    'Finance AI là ứng dụng quản lý tài chính cá nhân thông minh, '
-                    'tích hợp trí tuệ nhân tạo (AI) để giúp bạn theo dõi thu chi, '
-                    'phân tích thói quen chi tiêu và đưa ra các đề xuất cải thiện tài chính vượt trội.',
+                    context.tr('about_intro_desc'),
                     style: GoogleFonts.inter(
                       fontSize: 14,
                       color: context.appTextSecondary,
@@ -103,7 +103,7 @@ class AboutAppScreen extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Tính năng nổi bật',
+                    context.tr('about_features'),
                     style: GoogleFonts.inter(
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
@@ -112,17 +112,17 @@ class AboutAppScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 14),
                   _featureItem(context, Icons.account_balance_wallet_outlined,
-                      'Quản lý đa ví (tiền mặt, ngân hàng, ví điện tử)'),
+                      context.tr('about_feat_wallet')),
                   _featureItem(context, Icons.bar_chart_rounded,
-                      'Ngân sách thông minh với cảnh báo vượt hạn mức'),
+                      context.tr('about_feat_budget')),
                   _featureItem(context, Icons.auto_awesome_rounded,
-                      'Trợ lý AI phân tích chi tiêu và đề xuất cải thiện'),
+                      context.tr('about_feat_ai')),
                   _featureItem(context, Icons.document_scanner_outlined,
-                      'OCR hóa đơn — tự động nhận diện thông tin từ ảnh'),
+                      context.tr('about_feat_ocr')),
                   _featureItem(context, Icons.savings_outlined,
-                      'Mục tiêu tiết kiệm với theo dõi tiến độ'),
+                      context.tr('about_feat_goal')),
                   _featureItem(context, Icons.show_chart_rounded,
-                      'Biểu đồ xu hướng tài chính và phân tích xu hướng'),
+                      context.tr('about_feat_trend')),
                 ],
               ),
             ),
@@ -134,7 +134,7 @@ class AboutAppScreen extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Công nghệ sử dụng',
+                    context.tr('about_tech'),
                     style: GoogleFonts.inter(
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
@@ -143,23 +143,23 @@ class AboutAppScreen extends StatelessWidget {
                   ),
                   const SizedBox(height: 14),
                   _techItem(context, 'Flutter',
-                      'Framework phát triển ứng dụng đa nền tảng'),
+                      context.tr('about_tech_flutter')),
                   _techItem(context, 'Firebase',
                       'Backend: Authentication, Firestore, Cloud Messaging'),
                   _techItem(context, 'Gemini AI',
-                      'Trí tuệ nhân tạo phân tích và tư vấn tài chính'),
+                      context.tr('about_tech_gemini')),
                 ],
               ),
             ),
             const SizedBox(height: 16),
 
-            // Contact
+            // Contact & Support Center
             AppCard(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Liên hệ hỗ trợ',
+                    context.tr('about_contact'),
                     style: GoogleFonts.inter(
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
@@ -179,15 +179,33 @@ class AboutAppScreen extends StatelessWidget {
                             size: 18, color: AppColors.primary),
                       ),
                       const SizedBox(width: 12),
-                      Text(
-                        'support@financeai.app',
-                        style: GoogleFonts.inter(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: AppColors.primary,
+                      Expanded(
+                        child: Text(
+                          'support@financeai.app',
+                          style: GoogleFonts.inter(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.primary,
+                          ),
                         ),
                       ),
                     ],
+                  ),
+                  const SizedBox(height: 14),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      key: const ValueKey('about_open_support_btn'),
+                      onPressed: () {
+                        Navigator.of(context).push(
+                          MaterialPageRoute(
+                            builder: (_) => const SupportCenterScreen(),
+                          ),
+                        );
+                      },
+                      icon: const Icon(Icons.support_agent_rounded, size: 18),
+                      label: Text(context.tr('about_open_support_cta')),
+                    ),
                   ),
                 ],
               ),

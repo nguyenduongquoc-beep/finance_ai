@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../l10n/app_localizations.dart';
 import '../utils/constants.dart';
 
 /// Bộ chọn tháng dùng cho các màn hình Ngân sách.
@@ -18,18 +19,21 @@ class BudgetMonthSelector extends StatelessWidget {
     this.onNext,
   });
 
-  String _caption() {
+  String _caption(BuildContext context) {
     final now = DateTime.now();
     final diff = (month.year - now.year) * 12 + (month.month - now.month);
-    if (diff == 0) return 'Tháng hiện tại';
-    if (diff == -1) return 'Tháng trước';
-    if (diff == 1) return 'Tháng sau';
-    return diff < 0 ? '${-diff} tháng trước' : '$diff tháng nữa';
+    if (diff == 0) return context.tr('budget_sel_current_month');
+    if (diff == -1) return context.tr('budget_sel_prev_month');
+    if (diff == 1) return context.tr('budget_sel_next_month');
+    return diff < 0
+        ? context.tr('budget_sel_months_ago', params: {'count': '${-diff}'})
+        : context.tr('budget_sel_months_ahead', params: {'count': '$diff'});
   }
 
   @override
   Widget build(BuildContext context) {
-    final isCurrent = _caption() == 'Tháng hiện tại';
+    final now = DateTime.now();
+    final isCurrent = month.year == now.year && month.month == now.month;
 
     Widget arrow(IconData icon, VoidCallback? onPressed, String tooltip) {
       if (onPressed == null) return const SizedBox(width: 8);
@@ -49,7 +53,11 @@ class BudgetMonthSelector extends StatelessWidget {
       ),
       child: Row(
         children: [
-          arrow(Icons.chevron_left_rounded, onPrevious, 'Tháng trước'),
+          arrow(
+            Icons.chevron_left_rounded,
+            onPrevious,
+            context.tr('budget_sel_prev_month'),
+          ),
           Expanded(
             child: InkWell(
               onTap: onTap,
@@ -66,7 +74,13 @@ class BudgetMonthSelector extends StatelessWidget {
                         const SizedBox(width: 8),
                         Flexible(
                           child: Text(
-                            'Tháng ${month.month}, ${month.year}',
+                            context.tr(
+                              'budget_sel_month_year',
+                              params: {
+                                'month': context.tr('common_month_${month.month}'),
+                                'year': '${month.year}',
+                              },
+                            ),
                             maxLines: 1,
                             softWrap: false,
                             overflow: TextOverflow.ellipsis,
@@ -84,7 +98,7 @@ class BudgetMonthSelector extends StatelessWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      _caption(),
+                      _caption(context),
                       maxLines: 1,
                       style: TextStyle(
                         fontSize: 12,
@@ -97,7 +111,11 @@ class BudgetMonthSelector extends StatelessWidget {
               ),
             ),
           ),
-          arrow(Icons.chevron_right_rounded, onNext, 'Tháng sau'),
+          arrow(
+            Icons.chevron_right_rounded,
+            onNext,
+            context.tr('budget_sel_next_month'),
+          ),
         ],
       ),
     );

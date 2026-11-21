@@ -9,13 +9,20 @@ import 'package:share_plus/share_plus.dart';
 
 import '../models/budget_model.dart';
 import '../models/category_model.dart';
+import '../models/financial_forecast_result.dart';
 import '../models/financial_issue.dart';
 import '../models/financial_report_data.dart';
+import '../models/recurring_transaction_model.dart';
 import '../models/saving_goal_model.dart';
 import '../models/transaction_model.dart';
 import '../models/wallet_model.dart';
 import 'financial_analytics_service.dart';
 import 'financial_forecast_service.dart';
+import '../l10n/app_localizations.dart';
+import '../utils/category_localization_helper.dart';
+import '../utils/transaction_note_localization_helper.dart';
+import '../utils/wallet_localization_helper.dart';
+import 'language_controller.dart';
 
 /// Exception được throw khi xuất dữ liệu gặp lỗi hợp lệ (ví dụ danh sách rỗng)
 class ExportException implements Exception {
@@ -54,6 +61,8 @@ class FinancialExportService {
     required bool isCurrentMonth,
     List<AppTransaction>? lastMonthTx,
     List<List<AppTransaction>>? preceding3MonthsTx,
+    double? monthlyIncome,
+    List<RecurringTransactionSchedule>? recurringSchedules,
     DateTime? refDate,
   }) {
     final now = refDate ?? DateTime.now();
@@ -92,7 +101,9 @@ class FinancialExportService {
             (c) => c?.categoryId == entry.key,
             orElse: () => null,
           );
-      final catName = cat?.name ?? 'Đã xóa';
+      final catName = cat != null
+          ? CategoryLocalizationHelper.localizeName(cat.name)
+          : AppLocalizations.tr('svc_exp_deleted');
       final pct = totalExp > 0 ? (entry.value / totalExp) * 100 : 0.0;
 
       categoryBreakdown.add(CategoryExpenseItem(
@@ -102,24 +113,63 @@ class FinancialExportService {
       ));
     }
 
-    // 3. Ngân sách
+    // Mốc tham chiếu phân tích: tháng hiện tại dùng `now`; tháng quá khứ dùng ngày
+    // cuối của kỳ báo cáo để không kích hoạt cảnh báo `atRisk` giữa tháng giả.
+    final DateTime analysisRefDate;
+    if (isCurrentMonth) {
+      analysisRefDate = now;
+    } else if (currentPeriodTx.isNotEmpty) {
+      final sampleDate = currentPeriodTx.first.date;
+      analysisRefDate = DateTime(sampleDate.year, sampleDate.month + 1, 0);
+    } else {
+      analysisRefDate = now;
+    }
+
+    final List<List<AppTransaction>> effectivePreceding3Months =
+        (preceding3MonthsTx != null && preceding3MonthsTx.isNotEmpty)
+            ? preceding3MonthsTx
+            : (lastMonthTx != null && lastMonthTx.isNotEmpty
+                ? [lastMonthTx]
+                : const <List<AppTransaction>>[]);
+    final List<AppTransaction> effectiveLastMonthTx = lastMonthTx ??
+        (effectivePreceding3Months.isNotEmpty
+            ? effectivePreceding3Months.last
+            : const <AppTransaction>[]);
+    final double effectiveMonthlyIncome =
+        (monthlyIncome != null && monthlyIncome > 0) ? monthlyIncome : totalInc;
+
+    // 3. Dự báo ngân sách & danh sách trạng thái ngân sách đồng nhất với AI Insight
+    final budgetForecasts = _forecastService.calculateBudgetForecasts(
+      currentMonthBudgets: budgets,
+      categories: categories,
+      currentMonthTx: currentPeriodTx,
+      refDate: analysisRefDate,
+    );
+    final Map<String, BudgetForecast> forecastByBudgetId = {
+      for (final bf in budgetForecasts) bf.budgetId: bf,
+    };
+
     final List<BudgetReportItem> budgetItems = [];
     for (final b in budgets) {
       final cat = categories.cast<Category?>().firstWhere(
             (c) => c?.categoryId == b.categoryId,
             orElse: () => null,
           );
-      final catName = cat?.name ?? 'Đã xóa';
+      final catName = cat != null
+          ? CategoryLocalizationHelper.localizeName(cat.name)
+          : AppLocalizations.tr('svc_exp_deleted');
       final spent = catAmounts[b.categoryId] ?? 0;
       final pct = b.limit <= 0 ? 0.0 : (spent / b.limit) * 100;
+      final bfStatus = forecastByBudgetId[b.budgetId]?.status;
 
-      String statusStr;
-      if (spent >= b.limit) {
-        statusStr = 'Đã vượt';
-      } else if (pct >= 80) {
-        statusStr = 'Có nguy cơ';
+      final String statusStr;
+      if (bfStatus == BudgetForecastStatus.exceeded || spent >= b.limit) {
+        statusStr = AppLocalizations.tr('svc_exp_bud_exceeded');
+      } else if (bfStatus == BudgetForecastStatus.atRisk ||
+          bfStatus == BudgetForecastStatus.warning) {
+        statusStr = AppLocalizations.tr('svc_exp_bud_risk');
       } else {
-        statusStr = 'An toàn';
+        statusStr = AppLocalizations.tr('svc_exp_bud_safe');
       }
 
       budgetItems.add(BudgetReportItem(
@@ -134,7 +184,7 @@ class FinancialExportService {
     // 4. Mục tiêu tiết kiệm
     final List<SavingGoalReportItem> savingGoalItems = [];
     for (final g in savingGoals) {
-      final nameStr = g.name.trim().isNotEmpty ? g.name : 'Đã xóa';
+      final nameStr = g.name.trim().isNotEmpty ? g.name : AppLocalizations.tr('svc_exp_deleted');
       final pct = g.targetAmount <= 0
           ? 0.0
           : (g.savedAmount / g.targetAmount * 100).clamp(0, 100).toDouble();
@@ -147,25 +197,40 @@ class FinancialExportService {
       ));
     }
 
-    // 5. Insights & Điểm sức khỏe tài chính từ Dart Services
-    final issues = _analyticsService.detectIssues(
+    // 5. Dự báo cuối tháng (chỉ tính khi là tháng hiện tại) & Bất thường danh mục
+    final monthEndForecast = isCurrentMonth
+        ? _forecastService.calculateMonthEndForecast(
+            activeWallets: wallets,
+            currentMonthTx: currentPeriodTx,
+            recurringSchedules: recurringSchedules,
+            refDate: now,
+          )
+        : null;
+
+    final anomalies = _forecastService.detectSpendingAnomalies(
       currentMonthTx: currentPeriodTx,
-      lastMonthTx: lastMonthTx ?? [],
+      preceding3MonthsTx: effectivePreceding3Months,
       categories: categories,
-      monthlyIncome: totalInc,
+      refDate: analysisRefDate,
     );
 
-    final healthScore = _analyticsService.calculateHealthScore(issues);
-    final String healthRating;
-    if (healthScore >= 80) {
-      healthRating = 'Tốt';
-    } else if (healthScore >= 60) {
-      healthRating = 'Cần theo dõi';
-    } else if (healthScore >= 40) {
-      healthRating = 'Có rủi ro';
-    } else {
-      healthRating = 'Cần hành động ngay';
-    }
+    // 6. Insights & Điểm sức khỏe tài chính thống nhất 100% với AI Insight
+    final issues = _analyticsService.detectIssues(
+      currentMonthTx: currentPeriodTx,
+      lastMonthTx: effectiveLastMonthTx,
+      categories: categories,
+      monthlyIncome: effectiveMonthlyIncome,
+    );
+
+    final deductions = <HealthScoreDeduction>[];
+    final healthScore = _forecastService.calculateOverallHealthScore(
+      monthEndForecast: monthEndForecast,
+      budgetForecasts: budgetForecasts,
+      anomalies: anomalies,
+      issues: issues,
+      outDeductions: deductions,
+    );
+    final healthRating = _forecastService.resolveHealthRating(healthScore);
 
     final List<ReportInsightItem> insightItems = [];
     for (final issue in issues.take(4)) {
@@ -177,23 +242,14 @@ class FinancialExportService {
     }
     if (insightItems.isEmpty) {
       insightItems.add(ReportInsightItem(
-        title: 'Quản lý tài chính ổn định',
-        description: 'Các chỉ số thu chi đang trong mức kiểm soát an toàn.',
+        title: AppLocalizations.tr('svc_exp_stable_title'),
+        description: AppLocalizations.tr('svc_exp_stable_desc'),
         type: 'success',
       ));
     }
 
-    // 6. Forecast (chỉ tính khi là tháng hiện tại)
-    final monthEndForecast = isCurrentMonth
-        ? _forecastService.calculateMonthEndForecast(
-            activeWallets: wallets,
-            currentMonthTx: currentPeriodTx,
-            refDate: now,
-          )
-        : null;
-
     return FinancialReportData(
-      reportTitle: 'BÁO CÁO TÀI CHÍNH CÁ NHÂN',
+      reportTitle: AppLocalizations.tr('svc_exp_report_title'),
       periodLabel: periodLabel,
       exportDate: now,
       isCurrentMonth: isCurrentMonth,
@@ -238,7 +294,7 @@ class FinancialExportService {
     Directory? outputDir,
   }) async {
     if (transactions.isEmpty) {
-      throw ExportException('Không có giao dịch nào trong khoảng thời gian được chọn.');
+      throw ExportException(AppLocalizations.tr('svc_exp_csv_empty_err'));
     }
 
     // Sắp xếp giao dịch mới nhất trước
@@ -254,17 +310,17 @@ class FinancialExportService {
 
     // 1. Cột bắt buộc
     final headers = [
-      'Mã giao dịch',
-      'Ngày',
-      'Loại giao dịch',
-      'Số tiền (VNĐ)',
-      'Ví nguồn',
-      'Ví đích',
-      'Danh mục',
-      'Ghi chú',
-      'Địa điểm',
-      'Nguồn giao dịch',
-      'Lịch định kỳ liên quan',
+      AppLocalizations.tr('svc_exp_csv_h_id'),
+      AppLocalizations.tr('svc_exp_csv_h_date'),
+      AppLocalizations.tr('svc_exp_csv_h_type'),
+      AppLocalizations.tr('svc_exp_csv_h_amount'),
+      AppLocalizations.tr('svc_exp_csv_h_src_wallet'),
+      AppLocalizations.tr('svc_exp_csv_h_dst_wallet'),
+      AppLocalizations.tr('svc_exp_csv_h_cat'),
+      AppLocalizations.tr('svc_exp_csv_h_note'),
+      AppLocalizations.tr('svc_exp_csv_h_loc'),
+      AppLocalizations.tr('svc_exp_csv_h_source'),
+      AppLocalizations.tr('svc_exp_csv_h_rec'),
     ];
     csvBuffer.writeln(headers.map(_escapeCsvField).join(','));
 
@@ -276,19 +332,19 @@ class FinancialExportService {
       String typeLabel;
       switch (tx.type) {
         case 'income':
-          typeLabel = 'Thu nhập';
+          typeLabel = AppLocalizations.tr('svc_exp_type_income');
           break;
         case 'expense':
-          typeLabel = 'Chi tiêu';
+          typeLabel = AppLocalizations.tr('svc_exp_type_expense');
           break;
         case 'transfer':
-          typeLabel = 'Chuyển tiền';
+          typeLabel = AppLocalizations.tr('svc_exp_type_transfer');
           break;
         case 'goal_deposit':
-          typeLabel = 'Nạp mục tiêu';
+          typeLabel = AppLocalizations.tr('svc_exp_type_goal_dep');
           break;
         case 'goal_withdraw':
-          typeLabel = 'Rút mục tiêu';
+          typeLabel = AppLocalizations.tr('svc_exp_type_goal_wdr');
           break;
         default:
           typeLabel = tx.type;
@@ -296,39 +352,53 @@ class FinancialExportService {
 
       // Ví nguồn
       final sourceWallet = walletMap[tx.walletId];
-      final sourceWalletName = sourceWallet?.walletName ?? 'Đã xóa';
+      final sourceWalletName = sourceWallet != null
+          ? WalletLocalizationHelper.localizeWallet(sourceWallet)
+          : AppLocalizations.tr('svc_exp_deleted');
 
       // Ví đích (dành cho transfer)
       String targetWalletName = '';
       if (tx.type == 'transfer') {
         if (tx.toWalletId != null) {
           final targetWallet = walletMap[tx.toWalletId];
-          targetWalletName = targetWallet?.walletName ?? 'Đã xóa';
+          targetWalletName = targetWallet != null
+              ? WalletLocalizationHelper.localizeWallet(targetWallet)
+              : AppLocalizations.tr('svc_exp_deleted');
         } else {
-          targetWalletName = 'Đã xóa';
+          targetWalletName = AppLocalizations.tr('svc_exp_deleted');
         }
       }
 
       // Danh mục / Mục tiêu
       String categoryOrGoalName = '';
+      SavingGoal? matchedGoal;
       if (tx.type == 'goal_deposit' || tx.type == 'goal_withdraw') {
         if (tx.goalId != null) {
-          final goal = goalMap[tx.goalId];
-          categoryOrGoalName = goal?.name ?? 'Đã xóa';
+          matchedGoal = goalMap[tx.goalId];
+          categoryOrGoalName =
+              matchedGoal?.name ?? AppLocalizations.tr('svc_exp_deleted');
         } else {
-          categoryOrGoalName = 'Đã xóa';
+          categoryOrGoalName = AppLocalizations.tr('svc_exp_deleted');
         }
       } else {
         if (tx.categoryId.isNotEmpty) {
           final cat = categoryMap[tx.categoryId];
-          categoryOrGoalName = cat?.name ?? 'Đã xóa';
+          categoryOrGoalName = cat != null
+              ? CategoryLocalizationHelper.localizeName(cat.name)
+              : AppLocalizations.tr('svc_exp_deleted');
         }
       }
 
       // Nguồn giao dịch
       final isRecurring =
           tx.recurringScheduleId != null && tx.recurringScheduleId!.isNotEmpty;
-      final sourceLabel = isRecurring ? 'Định kỳ' : 'Thủ công';
+      final sourceLabel = isRecurring ? AppLocalizations.tr('svc_exp_src_rec') : AppLocalizations.tr('svc_exp_src_manual');
+
+      final localizedNote = TransactionNoteLocalizationHelper.localizeNote(
+        tx,
+        wallet: sourceWallet,
+        goal: matchedGoal,
+      );
 
       final row = [
         tx.transactionId,
@@ -338,7 +408,7 @@ class FinancialExportService {
         sourceWalletName,
         targetWalletName,
         categoryOrGoalName,
-        tx.note ?? '',
+        localizedNote,
         tx.location ?? '',
         sourceLabel,
         tx.recurringScheduleId ?? '',
@@ -397,7 +467,8 @@ class FinancialExportService {
     final lightBg = PdfColor.fromHex('#F8FAFC');
 
     final currencyFormat = NumberFormat('#,##0', 'vi_VN');
-    String formatMoney(double amount) => '${currencyFormat.format(amount.round())} VNĐ';
+    String formatMoney(double amount) =>
+        '${currencyFormat.format(amount.round())} ${LanguageController.isEnglish ? 'VND' : 'VNĐ'}';
 
     pdf.addPage(
       pw.MultiPage(
@@ -425,7 +496,7 @@ class FinancialExportService {
                   ),
                 ),
                 pw.Text(
-                  'Kỳ báo cáo: ${data.periodLabel}',
+                  AppLocalizations.tr('svc_exp_pdf_period_hdr', params: {'period': data.periodLabel}),
                   style: pw.TextStyle(fontSize: 10, color: secondaryText),
                 ),
               ],
@@ -442,11 +513,11 @@ class FinancialExportService {
               mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
               children: [
                 pw.Text(
-                  'Báo cáo tự động từ dữ liệu lưu trữ local - Không phải tư vấn tài chính chuyên nghiệp.',
+                  AppLocalizations.tr('svc_exp_pdf_disclaimer'),
                   style: pw.TextStyle(fontSize: 8, color: secondaryText),
                 ),
                 pw.Text(
-                  'Trang ${context.pageNumber}/${context.pagesCount}',
+                  AppLocalizations.tr('svc_exp_pdf_page', params: {'page': '${context.pageNumber}', 'total': '${context.pagesCount}'}),
                   style: pw.TextStyle(fontSize: 8, color: secondaryText),
                 ),
               ],
@@ -481,11 +552,16 @@ class FinancialExportService {
                     mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                     children: [
                       pw.Text(
-                        'Kỳ: ${data.periodLabel}',
+                        AppLocalizations.tr('svc_exp_pdf_period', params: {'period': data.periodLabel}),
                         style: const pw.TextStyle(fontSize: 11, color: PdfColors.grey300),
                       ),
                       pw.Text(
-                        'Ngày xuất: ${DateFormat('dd/MM/yyyy HH:mm').format(data.exportDate)}',
+                        AppLocalizations.tr(
+                          'svc_exp_pdf_exported_at',
+                          params: {
+                            'date': DateFormat('dd/MM/yyyy HH:mm').format(data.exportDate),
+                          },
+                        ),
                         style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey400),
                       ),
                     ],
@@ -498,7 +574,7 @@ class FinancialExportService {
 
             // 1. TỔNG QUAN THỰC TẾ
             pw.Text(
-              '1. TỔNG QUAN THỰC TẾ',
+              AppLocalizations.tr('svc_exp_pdf_sec1'),
               style: pw.TextStyle(font: boldFont, fontSize: 13, color: darkNavy),
             ),
             pw.SizedBox(height: 8),
@@ -514,7 +590,7 @@ class FinancialExportService {
                   pw.Row(
                     mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                     children: [
-                      pw.Text('Tổng thu nhập thực tế:'),
+                      pw.Text(AppLocalizations.tr('svc_exp_pdf_inc')),
                       pw.Text(
                         formatMoney(data.totalIncome),
                         style: pw.TextStyle(font: boldFont, color: PdfColors.green700),
@@ -525,7 +601,7 @@ class FinancialExportService {
                   pw.Row(
                     mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                     children: [
-                      pw.Text('Tổng chi tiêu thực tế:'),
+                      pw.Text(AppLocalizations.tr('svc_exp_pdf_exp')),
                       pw.Text(
                         formatMoney(data.totalExpense),
                         style: pw.TextStyle(font: boldFont, color: PdfColors.red700),
@@ -538,7 +614,7 @@ class FinancialExportService {
                   pw.Row(
                     mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                     children: [
-                      pw.Text('Chênh lệch thu - chi:'),
+                      pw.Text(AppLocalizations.tr('svc_exp_pdf_net')),
                       pw.Text(
                         formatMoney(data.netDifference),
                         style: pw.TextStyle(
@@ -553,7 +629,7 @@ class FinancialExportService {
                     pw.Row(
                       mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                       children: [
-                        pw.Text('Tổng số dư ví hiện tại:'),
+                        pw.Text(AppLocalizations.tr('svc_exp_pdf_bal')),
                         pw.Text(
                           formatMoney(data.currentWalletBalance!),
                           style: pw.TextStyle(font: boldFont, color: darkNavy),
@@ -569,16 +645,16 @@ class FinancialExportService {
 
             // 2. CHI TIÊU THEO DANH MỤC
             pw.Text(
-              '2. CHI TIÊU THEO DANH MỤC',
+              AppLocalizations.tr('svc_exp_pdf_sec2'),
               style: pw.TextStyle(font: boldFont, fontSize: 13, color: darkNavy),
             ),
             pw.SizedBox(height: 8),
             if (data.categoryBreakdown.isEmpty)
-              pw.Text('Chưa có chi tiêu trong kỳ báo cáo.',
+              pw.Text(AppLocalizations.tr('svc_exp_pdf_sec2_empty'),
                   style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey600))
             else
               pw.TableHelper.fromTextArray(
-                headers: ['Danh mục', 'Số tiền', 'Tỷ lệ'],
+                headers: [AppLocalizations.tr('svc_exp_csv_h_cat'), AppLocalizations.tr('svc_exp_pdf_tbl_amt'), AppLocalizations.tr('svc_exp_pdf_tbl_pct')],
                 data: data.categoryBreakdown.map((item) {
                   return [
                     item.categoryName,
@@ -600,16 +676,16 @@ class FinancialExportService {
 
             // 3. NGÂN SÁCH
             pw.Text(
-              '3. TÌNH HÌNH NGÂN SÁCH',
+              AppLocalizations.tr('svc_exp_pdf_sec3'),
               style: pw.TextStyle(font: boldFont, fontSize: 13, color: darkNavy),
             ),
             pw.SizedBox(height: 8),
             if (data.budgets.isEmpty)
-              pw.Text('Chưa thiết lập ngân sách cho kỳ báo cáo này.',
+              pw.Text(AppLocalizations.tr('svc_exp_pdf_sec3_empty'),
                   style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey600))
             else
               pw.TableHelper.fromTextArray(
-                headers: ['Danh mục', 'Đã chi', 'Hạn mức', 'Sử dụng', 'Trạng thái'],
+                headers: [AppLocalizations.tr('svc_exp_csv_h_cat'), AppLocalizations.tr('svc_exp_pdf_tbl_spent'), AppLocalizations.tr('svc_exp_pdf_tbl_limit'), AppLocalizations.tr('svc_exp_pdf_tbl_usage'), AppLocalizations.tr('svc_exp_pdf_tbl_status')],
                 data: data.budgets.map((b) {
                   return [
                     b.categoryName,
@@ -635,16 +711,16 @@ class FinancialExportService {
 
             // 4. MỤC TIÊU TIẾT KIỆM
             pw.Text(
-              '4. MỤC TIÊU TIẾT KIỆM',
+              AppLocalizations.tr('svc_exp_pdf_sec4'),
               style: pw.TextStyle(font: boldFont, fontSize: 13, color: darkNavy),
             ),
             pw.SizedBox(height: 8),
             if (data.savingGoals.isEmpty)
-              pw.Text('Chưa có mục tiêu tiết kiệm.',
+              pw.Text(AppLocalizations.tr('svc_exp_pdf_sec4_empty'),
                   style: const pw.TextStyle(fontSize: 10, color: PdfColors.grey600))
             else
               pw.TableHelper.fromTextArray(
-                headers: ['Tên mục tiêu', 'Đã tiết kiệm', 'Mục tiêu', 'Tiến độ'],
+                headers: [AppLocalizations.tr('svc_exp_pdf_tbl_goal'), AppLocalizations.tr('svc_exp_pdf_tbl_saved'), AppLocalizations.tr('svc_exp_pdf_tbl_target'), AppLocalizations.tr('svc_exp_pdf_tbl_prog')],
                 data: data.savingGoals.map((g) {
                   return [
                     g.goalName,
@@ -668,7 +744,7 @@ class FinancialExportService {
 
             // 5. AI FINANCIAL INSIGHTS & SỨC KHỎE
             pw.Text(
-              '5. ĐÁNH GIÁ SỨC KHỎE TÀI CHÍNH',
+              AppLocalizations.tr('svc_exp_pdf_sec5'),
               style: pw.TextStyle(font: boldFont, fontSize: 13, color: darkNavy),
             ),
             pw.SizedBox(height: 8),
@@ -685,7 +761,7 @@ class FinancialExportService {
                   pw.Row(
                     mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                     children: [
-                      pw.Text('Điểm sức khỏe tài chính:', style: pw.TextStyle(font: boldFont)),
+                      pw.Text(AppLocalizations.tr('svc_exp_pdf_score_lbl'), style: pw.TextStyle(font: boldFont)),
                       pw.Container(
                         padding: const pw.EdgeInsets.symmetric(horizontal: 10, vertical: 4),
                         decoration: pw.BoxDecoration(
@@ -742,7 +818,7 @@ class FinancialExportService {
                       mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                       children: [
                         pw.Text(
-                          '6. DỰ BÁO CUỐI THÁNG',
+                          AppLocalizations.tr('svc_exp_pdf_sec6'),
                           style: pw.TextStyle(
                               font: boldFont, fontSize: 12, color: PdfColor.fromHex('#92400E')),
                         ),
@@ -753,7 +829,7 @@ class FinancialExportService {
                             borderRadius: pw.BorderRadius.circular(4),
                           ),
                           child: pw.Text(
-                            'Dự báo, không phải số liệu thực tế',
+                            AppLocalizations.tr('svc_exp_pdf_fc_badge'),
                             style: pw.TextStyle(
                                 font: boldFont, fontSize: 8, color: PdfColors.white),
                           ),
@@ -764,7 +840,7 @@ class FinancialExportService {
                     pw.Row(
                       mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                       children: [
-                        pw.Text('Số dư cuối tháng dự kiến:'),
+                        pw.Text(AppLocalizations.tr('svc_exp_pdf_fc_bal')),
                         pw.Text(
                           formatMoney(data.monthEndForecast!.projectedEndBalance),
                           style: pw.TextStyle(font: boldFont, fontSize: 11),
@@ -775,7 +851,7 @@ class FinancialExportService {
                     pw.Row(
                       mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                       children: [
-                        pw.Text('Thu định kỳ còn lại:'),
+                        pw.Text(AppLocalizations.tr('svc_exp_pdf_fc_inc')),
                         pw.Text(formatMoney(data.monthEndForecast!.plannedRemainingIncome)),
                       ],
                     ),
@@ -783,7 +859,7 @@ class FinancialExportService {
                     pw.Row(
                       mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                       children: [
-                        pw.Text('Chi định kỳ còn lại:'),
+                        pw.Text(AppLocalizations.tr('svc_exp_pdf_fc_exp')),
                         pw.Text(formatMoney(data.monthEndForecast!.plannedRemainingExpense)),
                       ],
                     ),
@@ -791,7 +867,7 @@ class FinancialExportService {
                     pw.Row(
                       mainAxisAlignment: pw.MainAxisAlignment.spaceBetween,
                       children: [
-                        pw.Text('Chi tiêu linh hoạt dự kiến:'),
+                        pw.Text(AppLocalizations.tr('svc_exp_pdf_fc_flex')),
                         pw.Text(formatMoney(
                             data.monthEndForecast!.projectedRemainingDiscretionaryExpense)),
                       ],

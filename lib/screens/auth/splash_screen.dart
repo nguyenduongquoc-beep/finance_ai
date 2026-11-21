@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
+import '../../models/user_model.dart';
 import '../../services/firestore_service.dart';
+import '../../services/local_notification_service.dart';
+import '../../l10n/app_localizations.dart';
 import '../../utils/constants.dart';
 import '../../widgets/main_navigation.dart';
-import '../setup/profile_setup_screen.dart';
 import '../setup/wallet_setup_screen.dart';
 import 'onboarding_screen.dart';
 
@@ -26,6 +28,7 @@ class _SplashScreenState extends State<SplashScreen>
   @override
   void initState() {
     super.initState();
+    LocalNotificationService.isAppReadyForDeepLink = false;
 
     _pulseController = AnimationController(
       vsync: this,
@@ -65,30 +68,46 @@ class _SplashScreenState extends State<SplashScreen>
         MaterialPageRoute(builder: (_) => const OnboardingScreen()),
       );
     } else {
-      final profile = await FirestoreService().getUserProfile(user.uid);
-      if (!mounted) return;
-      if (profile == null) {
+      final firestore = FirestoreService();
+      final profile = await firestore.getUserProfile(user.uid);
+      if (profile != null && profile.isLocked) {
+        if (!mounted) return;
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const ProfileSetupScreen()),
+          MaterialPageRoute(builder: (_) => const MainNavigation()),
+        );
+        return;
+      }
+      if (profile == null) {
+        final fallbackName = (user.displayName?.trim().isNotEmpty == true)
+            ? user.displayName!.trim()
+            : AppLocalizations.tr('common_user');
+        await firestore.createUserProfile(
+          AppUser(
+            uid: user.uid,
+            name: fallbackName,
+            email: user.email ?? '',
+            createdAt: DateTime.now(),
+          ),
+        );
+      }
+      if (!mounted) return;
+      final wallets = await firestore.streamWallets(user.uid).first;
+      if (!mounted) return;
+      if (wallets.isEmpty) {
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const WalletSetupScreen()),
         );
       } else {
-        final wallets = await FirestoreService().streamWallets(user.uid).first;
-        if (!mounted) return;
-        if (wallets.isEmpty) {
-          Navigator.of(context).pushReplacement(
-            MaterialPageRoute(builder: (_) => const WalletSetupScreen()),
-          );
-        } else {
-          try {
-            await FirestoreService().processDueRecurringTransactions(user.uid);
-          } catch (_) {
-            // Implemented silent fallback for offline/network errors
-          }
-          if (!mounted) return;
-          Navigator.of(context).pushReplacement(
-            MaterialPageRoute(builder: (_) => const MainNavigation()),
-          );
+        try {
+          await firestore.processDueRecurringTransactions(user.uid);
+          await firestore.syncRecurringNotifications(user.uid);
+        } catch (_) {
+          // Implemented silent fallback for offline/network errors
         }
+        if (!mounted) return;
+        Navigator.of(context).pushReplacement(
+          MaterialPageRoute(builder: (_) => const MainNavigation()),
+        );
       }
     }
   }
@@ -115,7 +134,7 @@ class _SplashScreenState extends State<SplashScreen>
                     return Container(
                       width: 110,
                       height: 110,
-                      decoration: BoxDecoration(
+                      decoration: const BoxDecoration(
                         shape: BoxShape.circle,
                       ),
                       child: Container(
@@ -148,7 +167,7 @@ class _SplashScreenState extends State<SplashScreen>
                 ),
                 const SizedBox(height: 8),
                 Text(
-                  'Quản lý tài chính cá nhân thông minh',
+                  context.tr('app_tagline'),
                   style: GoogleFonts.inter(
                     color: AppColors.slate400,
                     fontSize: 14,

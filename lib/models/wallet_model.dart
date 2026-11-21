@@ -12,6 +12,7 @@ class Wallet {
   final String? description; // Optional, VD "Chi tiêu sinh hoạt"
   final String currency; // TODO: chưa hỗ trợ đa tiền tệ, mặc định VND — chỉ lưu trữ, không có UI đọc/hiển thị
   final bool isActive; // Mặc định true; false = đã ẩn (soft-delete)
+  final bool isUserNamed; // true nếu do người dùng tự đặt/sửa tên; false cho ví Cash mặc định hệ thống
   final DateTime createdAt;
   final DateTime? updatedAt;
 
@@ -25,6 +26,7 @@ class Wallet {
     this.description,
     this.currency = 'VND',
     this.isActive = true,
+    this.isUserNamed = false,
     required this.createdAt,
     this.updatedAt,
   }) : initialBalance = initialBalance ?? balance;
@@ -40,6 +42,7 @@ class Wallet {
       description: map['description'],
       currency: map['currency'] ?? 'VND',
       isActive: map['isActive'] ?? true, // ví cũ chưa có field này -> mặc định active
+      isUserNamed: map['isUserNamed'] as bool? ?? false,
       createdAt: map['createdAt'] != null
           ? DateTime.parse(map['createdAt'])
           : DateTime.now(),
@@ -57,6 +60,7 @@ class Wallet {
       'description': description,
       'currency': currency,
       'isActive': isActive,
+      if (isUserNamed) 'isUserNamed': true,
       'createdAt': createdAt.toIso8601String(),
       'updatedAt': (updatedAt ?? DateTime.now()).toIso8601String(),
     };
@@ -68,6 +72,7 @@ class Wallet {
     String? type,
     String? description,
     bool? isActive,
+    bool? isUserNamed,
   }) {
     return Wallet(
       walletId: walletId,
@@ -79,6 +84,7 @@ class Wallet {
       description: description ?? this.description,
       currency: currency,
       isActive: isActive ?? this.isActive,
+      isUserNamed: isUserNamed ?? this.isUserNamed,
       createdAt: createdAt,
       updatedAt: DateTime.now(),
     );

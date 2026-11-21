@@ -1,5 +1,3 @@
-import 'dart:convert';
-import 'dart:typed_data';
 import 'budget_model.dart';
 import 'category_model.dart';
 import 'saving_goal_model.dart';
@@ -7,7 +5,7 @@ import 'transaction_model.dart';
 import 'wallet_model.dart';
 
 /// ============================================================================
-/// AI RUNTIME CONFIG, FINANCIAL HEURISTICS, KNOWLEDGE BASE & SANDBOX MODELS
+/// AI RUNTIME CONFIG, FINANCIAL HEURISTICS & KNOWLEDGE BASE MODELS (HARDCODED DEFAULTS)
 /// ============================================================================
 /// LƯU Ý KIẾN TRÚC & BẢO MẬT:
 /// 1. Dự án hiện giữ `package:google_generative_ai` ở tầng thực thi để bảo toàn
@@ -15,8 +13,9 @@ import 'wallet_model.dart';
 ///    đã ngưng phát triển tính năng mới (deprecated) để sẵn sàng lộ trình nâng cấp
 ///    sang `firebase_ai` hoặc Backend Proxy.
 /// 2. Tuyệt đối KHÔNG lưu trữ Gemini API Key hay khóa bí mật (Secret Salt)
-///    trong bất kỳ model cấu hình Firestore hoặc giao diện Admin Web nào.
-/// 3. Mọi cấu hình Draft và Published được tách riêng ở tầng Firestore Collection.
+///    trong bất kỳ model cấu hình nào.
+/// 3. Toàn bộ ứng dụng Mobile sử dụng trực tiếp hằng số cấu hình chuẩn cố định
+///    trong mã nguồn (`defaults()`), không đọc cấu hình động từ Firestore.
 /// ============================================================================
 
 /// Phân loại kênh phát hành của Model theo tài liệu Gemini API chính thức:
@@ -283,152 +282,7 @@ bool containsForbiddenSecretField(Object? value) {
 }
 
 /// ============================================================================
-/// CANONICAL JSON & RFC-6234 SHA-256 IMPLEMENTATION (PURE DART)
-/// Đảm bảo mã băm cấu hình (Config Digest) tính trên Dart (Mobile / Admin Web)
-/// và trên Node.js (`crypto.createHash('sha256')` tại Cloud Functions) khớp nhau 100%.
-/// ============================================================================
-
-/// Chuẩn hóa cấu trúc dữ liệu (sắp xếp key của Map theo thứ tự từ điển đệ quy)
-Object? canonicalizeJsonValue(Object? value) {
-  if (value == null || value is bool || value is String) {
-    return value;
-  }
-  if (value is num) {
-    if (value is double && value == value.roundToDouble()) {
-      return value.toInt();
-    }
-    if (value is double) {
-      return double.parse(value.toStringAsFixed(6));
-    }
-    return value;
-  }
-  if (value is List) {
-    return value.map(canonicalizeJsonValue).toList();
-  }
-  if (value is Map) {
-    final sortedKeys = value.keys.map((k) => k.toString()).toList()..sort();
-    final result = <String, Object?>{};
-    for (final k in sortedKeys) {
-      result[k] = canonicalizeJsonValue(value[k]);
-    }
-    return result;
-  }
-  return value.toString();
-}
-
-/// Sinh chuỗi JSON chuẩn hóa (Canonical JSON String)
-String encodeCanonicalJson(Map<String, dynamic> map) {
-  final canonical = canonicalizeJsonValue(map);
-  return jsonEncode(canonical);
-}
-
-/// Tính mã băm SHA-256 chuẩn RFC 6234 (trả về chuỗi 64 ký tự hex chữ thường)
-String sha256HexFromString(String input) {
-  final data = utf8.encode(input);
-  return _sha256BytesToHex(data);
-}
-
-/// Tính mã băm chuẩn hóa cho một Payload cấu hình
-String computeCanonicalConfigHash(Map<String, dynamic> payload) {
-  return sha256HexFromString(encodeCanonicalJson(payload));
-}
-
-String _sha256BytesToHex(List<int> messageBytes) {
-  const k = <int>[
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-  ];
-
-  int rotr(int n, int x) => ((x & 0xffffffff) >>> n) | ((x << (32 - n)) & 0xffffffff);
-
-  var h0 = 0x6a09e667;
-  var h1 = 0xbb67ae85;
-  var h2 = 0x3c6ef372;
-  var h3 = 0xa54ff53a;
-  var h4 = 0x510e527f;
-  var h5 = 0x9b05688c;
-  var h6 = 0x1f83d9ab;
-  var h7 = 0x5be0cd19;
-
-  final bitLength = messageBytes.length * 8;
-  final paddedLength = ((messageBytes.length + 9 + 63) ~/ 64) * 64;
-  final padded = Uint8List(paddedLength);
-  padded.setRange(0, messageBytes.length, messageBytes);
-  padded[messageBytes.length] = 0x80;
-
-  final bd = ByteData.sublistView(padded);
-  bd.setUint32(paddedLength - 8, (bitLength >>> 32) & 0xffffffff, Endian.big);
-  bd.setUint32(paddedLength - 4, bitLength & 0xffffffff, Endian.big);
-
-  final w = Uint32List(64);
-  for (var chunkStart = 0; chunkStart < paddedLength; chunkStart += 64) {
-    for (var i = 0; i < 16; i++) {
-      w[i] = bd.getUint32(chunkStart + (i * 4), Endian.big);
-    }
-    for (var i = 16; i < 64; i++) {
-      final s0 = rotr(7, w[i - 15]) ^ rotr(18, w[i - 15]) ^ ((w[i - 15] & 0xffffffff) >>> 3);
-      final s1 = rotr(17, w[i - 2]) ^ rotr(19, w[i - 2]) ^ ((w[i - 2] & 0xffffffff) >>> 10);
-      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) & 0xffffffff;
-    }
-
-    var a = h0;
-    var b = h1;
-    var c = h2;
-    var d = h3;
-    var e = h4;
-    var f = h5;
-    var g = h6;
-    var h = h7;
-
-    for (var i = 0; i < 64; i++) {
-      final s1 = rotr(6, e) ^ rotr(11, e) ^ rotr(25, e);
-      final ch = (e & f) ^ ((~e) & g);
-      final temp1 = (h + s1 + ch + k[i] + w[i]) & 0xffffffff;
-      final s0 = rotr(2, a) ^ rotr(13, a) ^ rotr(22, a);
-      final maj = (a & b) ^ (a & c) ^ (b & c);
-      final temp2 = (s0 + maj) & 0xffffffff;
-
-      h = g;
-      g = f;
-      f = e;
-      e = (d + temp1) & 0xffffffff;
-      d = c;
-      c = b;
-      b = a;
-      a = (temp1 + temp2) & 0xffffffff;
-    }
-
-    h0 = (h0 + a) & 0xffffffff;
-    h1 = (h1 + b) & 0xffffffff;
-    h2 = (h2 + c) & 0xffffffff;
-    h3 = (h3 + d) & 0xffffffff;
-    h4 = (h4 + e) & 0xffffffff;
-    h5 = (h5 + f) & 0xffffffff;
-    h6 = (h6 + g) & 0xffffffff;
-    h7 = (h7 + h) & 0xffffffff;
-  }
-
-  String hex32(int v) => (v & 0xffffffff).toRadixString(16).padLeft(8, '0');
-  return '${hex32(h0)}${hex32(h1)}${hex32(h2)}${hex32(h3)}'
-      '${hex32(h4)}${hex32(h5)}${hex32(h6)}${hex32(h7)}';
-}
-
-/// ============================================================================
-/// 1. MODEL CẤU HÌNH RUNTIME & PROMPT TEMPLATES CỦA AI (`ai_runtime`)
+/// 1. MODEL CẤU HÌNH RUNTIME & PROMPT TEMPLATES CỦA AI
 /// ============================================================================
 class AiRuntimeConfig {
   static const int kMinChatHistory = 4;
@@ -667,8 +521,6 @@ LƯU Ý: Tuyệt đối không kết luận gian lận, không tư vấn đầu 
       if (changeNote != null) 'changeNote': changeNote,
     };
   }
-
-  String get canonicalHash => computeCanonicalConfigHash(toPayloadMap());
 
   /// Kiểm tra hợp lệ một Map cấu hình thô trước khi lưu nháp hoặc Publish
   static List<String> validateRawInput(Map<String, dynamic> raw) {
@@ -1041,8 +893,6 @@ class FinancialHeuristicsConfig {
       if (changeNote != null) 'changeNote': changeNote,
     };
   }
-
-  String get canonicalHash => computeCanonicalConfigHash(toPayloadMap());
 
   /// Kiểm tra tính hợp lệ và tính nhất quán của dữ liệu thô do Admin nhập (khớp 1:1 với Server)
   static List<String> validateRawInput(Map<String, dynamic> raw) {
@@ -1644,8 +1494,6 @@ class TransactionIntelligenceConfig {
     };
   }
 
-  String get canonicalHash => computeCanonicalConfigHash(toPayloadMap());
-
   /// Kiểm tra một từ khóa mới trước khi thêm vào một nhóm ngữ nghĩa
   static KeywordConflictCheckResult validateCandidateKeyword({
     required String rawKeyword,
@@ -2165,365 +2013,73 @@ class FinancialKnowledgeArticle {
       ),
     ];
   }
-}
 
-/// ============================================================================
-/// 5. MODEL BẢN NHÁP (`DraftConfigEnvelope`) & LỊCH SỬ PHIÊN BẢN (`ConfigVersionSnapshot`)
-/// Đảm bảo khi nội dung Draft thay đổi dù chỉ 1 ký tự, mã băm `draftHash` sẽ
-/// khác với `verifiedSandboxHash` và bắt buộc Admin phải chạy lại AI Sandbox.
-/// ============================================================================
-class DraftConfigEnvelope {
-  final String configType; // 'ai_runtime' | 'financial_heuristics' | 'transaction_rules'
-  final Map<String, dynamic> draftPayload;
-  final String draftHash;
-  final String? verifiedSandboxHash;
-  final String? serverSandboxSignature;
-  final DateTime? sandboxVerifiedAt;
-  final String? sandboxVerifiedBy;
-  final DateTime? updatedAt;
-  final String? updatedBy;
-
-  const DraftConfigEnvelope({
-    required this.configType,
-    required this.draftPayload,
-    required this.draftHash,
-    this.verifiedSandboxHash,
-    this.serverSandboxSignature,
-    this.sandboxVerifiedAt,
-    this.sandboxVerifiedBy,
-    this.updatedAt,
-    this.updatedBy,
-  });
-
-  /// Kiểm tra kết quả kiểm thử Sandbox có còn hiệu lực với nội dung bản nháp hiện tại hay không.
-  /// Nếu Admin chỉnh sửa bất kỳ trường nào trong `draftPayload`, `currentComputedHash` sẽ thay đổi
-  /// và làm kết quả Sandbox trước đó mất hiệu lực ngay lập tức.
-  bool get isSandboxVerificationValid {
-    final currentComputedHash = computeCanonicalConfigHash(draftPayload);
-    return verifiedSandboxHash != null &&
-        verifiedSandboxHash!.isNotEmpty &&
-        verifiedSandboxHash == draftHash &&
-        verifiedSandboxHash == currentComputedHash;
-  }
-
-  factory DraftConfigEnvelope.fromMap(
-    Map<String, dynamic> map, {
-    required String configType,
-    Map<String, dynamic>? verificationDoc,
+  /// Chọn lọc tối đa 3 đoạn tri thức tài chính (`<= 300` ký tự/đoạn) khớp với
+  /// trạng thái định lượng thực tế của người dùng để tiêm vào Prompt gửi cho Gemini.
+  static List<FinancialKnowledgeArticle> selectMatchingArticles({
+    bool isLowSavingRate = false,
+    bool isEssentialDeficit = false,
+    bool isVariableIncome = false,
+    bool hasBudgetOverrun = false,
+    bool isGoalInfeasible = false,
+    List<FinancialKnowledgeArticle>? overrideArticles,
   }) {
-    final payload = map['draftPayload'] is Map
-        ? Map<String, dynamic>.from(map['draftPayload'] as Map)
-        : <String, dynamic>{};
-    final computedHash = computeCanonicalConfigHash(payload);
+    final source = overrideArticles ?? defaultArticles();
+    final matched = source.where((article) {
+      if (!article.isActive || article.aiGroundingSnippet.trim().isEmpty) {
+        return false;
+      }
+      switch (article.triggerCondition) {
+        case KnowledgeTriggerCondition.always:
+          return true;
+        case KnowledgeTriggerCondition.lowSavingRate:
+          return isLowSavingRate;
+        case KnowledgeTriggerCondition.essentialDeficit:
+          return isEssentialDeficit;
+        case KnowledgeTriggerCondition.variableIncome:
+          return isVariableIncome;
+        case KnowledgeTriggerCondition.budgetOverrun:
+          return hasBudgetOverrun;
+        case KnowledgeTriggerCondition.infeasibleGoal:
+          return isGoalInfeasible;
+      }
+    }).toList();
 
-    final verMap = verificationDoc ?? map;
-    return DraftConfigEnvelope(
-      configType: configType,
-      draftPayload: payload,
-      draftHash: computedHash,
-      verifiedSandboxHash: verMap['verifiedDraftHash'] as String?,
-      serverSandboxSignature: verMap['verificationSignature'] as String?,
-      sandboxVerifiedAt: verMap['verifiedAt'] != null
-          ? DateTime.tryParse(verMap['verifiedAt'].toString())
-          : null,
-      sandboxVerifiedBy: verMap['verifiedBy'] as String?,
-      updatedAt: map['updatedAt'] != null
-          ? DateTime.tryParse(map['updatedAt'].toString())
-          : null,
-      updatedBy: map['updatedBy'] as String?,
-    );
+    matched.sort((a, b) => b.priority.compareTo(a.priority));
+
+    return matched.take(kMaxInjectedSnippetsPerPrompt).toList();
   }
-}
 
-class ConfigVersionSnapshot {
-  final String versionId;
-  final String configType;
-  final int versionNumber;
-  final Map<String, dynamic> payloadSnapshot;
-  final String payloadHash;
-  final String changeNote;
-  final int? rollbackFromVersion;
-  final String publishedBy;
-  final String publishedByEmail;
-  final DateTime publishedAt;
-
-  const ConfigVersionSnapshot({
-    required this.versionId,
-    required this.configType,
-    required this.versionNumber,
-    required this.payloadSnapshot,
-    required this.payloadHash,
-    required this.changeNote,
-    this.rollbackFromVersion,
-    required this.publishedBy,
-    this.publishedByEmail = '',
-    required this.publishedAt,
-  });
-
-  factory ConfigVersionSnapshot.fromMap(
-    Map<String, dynamic> map, {
-    String? docId,
+  /// Trích xuất danh sách chuỗi chỉ dẫn ngắn gọn (đã giới hạn nghiêm ngặt độ dài) để tiêm vào Prompt.
+  static List<String> selectSnippetsForPrompt({
+    bool isLowSavingRate = false,
+    bool isEssentialDeficit = false,
+    bool isVariableIncome = false,
+    bool hasBudgetOverrun = false,
+    bool isGoalInfeasible = false,
+    List<FinancialKnowledgeArticle>? overrideArticles,
   }) {
-    final payload = map['payloadSnapshot'] is Map
-        ? Map<String, dynamic>.from(map['payloadSnapshot'] as Map)
-        : <String, dynamic>{};
-    return ConfigVersionSnapshot(
-      versionId: (map['versionId'] as String?) ?? docId ?? '',
-      configType: (map['configType'] as String?) ?? '',
-      versionNumber: (map['versionNumber'] as num?)?.toInt() ?? 1,
-      payloadSnapshot: payload,
-      payloadHash: (map['payloadHash'] as String?) ??
-          computeCanonicalConfigHash(payload),
-      changeNote: (map['changeNote'] as String?) ?? '',
-      rollbackFromVersion: (map['rollbackFromVersion'] as num?)?.toInt(),
-      publishedBy: (map['publishedBy'] as String?) ?? '',
-      publishedByEmail: (map['publishedByEmail'] as String?) ?? '',
-      publishedAt: map['publishedAt'] != null
-          ? (DateTime.tryParse(map['publishedAt'].toString()) ?? DateTime.now())
-          : DateTime.now(),
+    final articles = selectMatchingArticles(
+      isLowSavingRate: isLowSavingRate,
+      isEssentialDeficit: isEssentialDeficit,
+      isVariableIncome: isVariableIncome,
+      hasBudgetOverrun: hasBudgetOverrun,
+      isGoalInfeasible: isGoalInfeasible,
+      overrideArticles: overrideArticles,
     );
-  }
 
-  Map<String, dynamic> toMap() {
-    return {
-      'versionId': versionId,
-      'configType': configType,
-      'versionNumber': versionNumber,
-      'payloadSnapshot': payloadSnapshot,
-      'payloadHash': payloadHash,
-      'changeNote': changeNote,
-      if (rollbackFromVersion != null)
-        'rollbackFromVersion': rollbackFromVersion,
-      'publishedBy': publishedBy,
-      'publishedByEmail': publishedByEmail,
-      'publishedAt': publishedAt.toIso8601String(),
-    };
+    return articles.map((a) {
+      final snippet = a.aiGroundingSnippet.trim();
+      final bounded = snippet.length <= kMaxSnippetLength
+          ? snippet
+          : snippet.substring(0, kMaxSnippetLength);
+      return '- [${a.title}]: $bounded';
+    }).toList();
   }
 }
 
 /// ============================================================================
-/// 6. MODEL PHẢN HỒI CHẤT LƯỢNG AI TỪ NGƯỜI DÙNG (`ai_feedback_reports`)
-/// Tách biệt rõ chế độ Ẩn danh (`anonymous`) và Giả danh (`pseudonymous`).
-/// Tuyệt đối không chứa số dư ví, số tiền giao dịch hay lịch sử hội thoại.
-/// ============================================================================
-class AiFeedbackReport {
-  static const List<String> allowedTargetFeatures = [
-    'ai_chat',
-    'monthly_plan',
-    'ocr_suggestion',
-    'anomaly_alert',
-  ];
-
-  static const List<String> allowedRatings = ['positive', 'negative'];
-  static const List<String> allowedModes = ['anonymous', 'pseudonymous'];
-  static const List<String> allowedStatuses = ['open', 'resolved', 'ignored'];
-
-  static const List<String> requiredCreateKeys = [
-    'reportId',
-    'targetFeature',
-    'rating',
-    'reasonCode',
-    'aiConfigVersion',
-    'heuristicsVersion',
-    'modelUsed',
-    'dataTier',
-    'feedbackMode',
-    'status',
-    'createdAt',
-  ];
-
-  static const List<String> allowedCreateKeys = [
-    ...requiredCreateKeys,
-    'userNote',
-    'suggestedKeywordOrMerchant',
-    'reporterHash',
-  ];
-
-  static const List<String> allowedAdminUpdateKeys = [
-    'status',
-    'adminResolutionNote',
-    'resolvedAt',
-    'resolvedBy',
-    'appliedAction',
-  ];
-
-  final String reportId;
-  final String targetFeature;
-  final String rating; // 'positive' | 'negative'
-  final String reasonCode;
-  final String? userNote;
-  final String? suggestedKeywordOrMerchant;
-  final int aiConfigVersion;
-  final int heuristicsVersion;
-  final String modelUsed;
-  final String dataTier;
-  final String feedbackMode; // 'anonymous' | 'pseudonymous'
-  final String? reporterHash;
-  final String status; // 'open' | 'resolved' | 'ignored'
-  final String? adminResolutionNote;
-  final String? appliedAction;
-  final String? resolvedBy;
-  final DateTime? resolvedAt;
-  final DateTime createdAt;
-
-  const AiFeedbackReport({
-    required this.reportId,
-    required this.targetFeature,
-    required this.rating,
-    required this.reasonCode,
-    this.userNote,
-    this.suggestedKeywordOrMerchant,
-    this.aiConfigVersion = 1,
-    this.heuristicsVersion = 1,
-    this.modelUsed = 'gemini-3.5-flash',
-    this.dataTier = 'unknown',
-    this.feedbackMode = 'anonymous',
-    this.reporterHash,
-    this.status = 'open',
-    this.adminResolutionNote,
-    this.appliedAction,
-    this.resolvedBy,
-    this.resolvedAt,
-    required this.createdAt,
-  });
-
-  /// Làm sạch ghi chú của người dùng: cắt tối đa 250 ký tự và che các chuỗi số dài (>= 6 chữ số)
-  /// để ngăn người dùng vô tình nhập số tài khoản ngân hàng, số điện thoại hoặc số tiền cụ thể.
-  static String? sanitizeUserNote(String? raw) {
-    if (raw == null) return null;
-    var cleaned = raw.trim();
-    if (cleaned.isEmpty) return null;
-    cleaned = cleaned.replaceAll(RegExp(r'\d[\d\.,\s]{5,}\d'), '[SỐ_ẨN_DANH]');
-    if (cleaned.length > 250) {
-      cleaned = cleaned.substring(0, 250);
-    }
-    return cleaned;
-  }
-
-  static String? sanitizeSuggestedKeyword(String? raw) {
-    if (raw == null) return null;
-    final cleaned = raw.trim();
-    if (cleaned.isEmpty) return null;
-    return cleaned.length <= 80 ? cleaned : cleaned.substring(0, 80);
-  }
-
-  /// Sinh mã băm giả danh một chiều (One-way Pseudonymous Hash) cho chế độ `pseudonymous`.
-  /// Đảm bảo không thể dịch ngược về UID gốc và không bao giờ xuất hiện ở chế độ `anonymous`.
-  static String computePseudonymousReporterHash(
-    String uid, {
-    String salt = 'finance_ai_feedback_pseudonym_v1',
-  }) {
-    final cleanUid = uid.trim();
-    if (cleanUid.isEmpty) return '';
-    return sha256HexFromString('$salt:reporter:$cleanUid');
-  }
-
-  /// Khởi tạo đối tượng báo cáo chuẩn bị gửi qua Cloud Function `submitAiFeedback`,
-  /// bảo đảm tính nhất quán tuyệt đối giữa chế độ `anonymous` và `pseudonymous`.
-  factory AiFeedbackReport.createForSubmission({
-    required String reportId,
-    required String targetFeature,
-    required String rating,
-    required String reasonCode,
-    required String feedbackMode,
-    String? callerUid,
-    String? userNote,
-    String? suggestedKeywordOrMerchant,
-    int aiConfigVersion = 1,
-    int heuristicsVersion = 1,
-    String modelUsed = 'gemini-3.5-flash',
-    String dataTier = 'unknown',
-    DateTime? createdAt,
-  }) {
-    final safeMode =
-        allowedModes.contains(feedbackMode) ? feedbackMode : 'anonymous';
-    final String? hash = (safeMode == 'pseudonymous' &&
-            callerUid != null &&
-            callerUid.trim().isNotEmpty)
-        ? computePseudonymousReporterHash(callerUid)
-        : null;
-
-    return AiFeedbackReport(
-      reportId: reportId,
-      targetFeature: allowedTargetFeatures.contains(targetFeature)
-          ? targetFeature
-          : 'ai_chat',
-      rating: allowedRatings.contains(rating) ? rating : 'positive',
-      reasonCode: reasonCode.trim().isEmpty ? 'general' : reasonCode.trim(),
-      userNote: sanitizeUserNote(userNote),
-      suggestedKeywordOrMerchant:
-          sanitizeSuggestedKeyword(suggestedKeywordOrMerchant),
-      aiConfigVersion: aiConfigVersion,
-      heuristicsVersion: heuristicsVersion,
-      modelUsed: modelUsed,
-      dataTier: dataTier,
-      feedbackMode: safeMode,
-      reporterHash: hash,
-      status: 'open',
-      createdAt: createdAt ?? DateTime.now(),
-    );
-  }
-
-  /// Tạo Map đúng chuẩn Schema để lưu trữ/kiểm thử
-  Map<String, dynamic> toCreateMap() {
-    final cleanNote = sanitizeUserNote(userNote);
-    final cleanKeyword = sanitizeSuggestedKeyword(suggestedKeywordOrMerchant);
-    final safeMode =
-        allowedModes.contains(feedbackMode) ? feedbackMode : 'anonymous';
-    final includeHash = safeMode == 'pseudonymous' &&
-        reporterHash != null &&
-        reporterHash!.isNotEmpty;
-
-    return {
-      'reportId': reportId,
-      'targetFeature': allowedTargetFeatures.contains(targetFeature)
-          ? targetFeature
-          : 'ai_chat',
-      'rating': allowedRatings.contains(rating) ? rating : 'positive',
-      'reasonCode': reasonCode.trim().isEmpty ? 'general' : reasonCode.trim(),
-      if (cleanNote != null) 'userNote': cleanNote,
-      if (cleanKeyword != null) 'suggestedKeywordOrMerchant': cleanKeyword,
-      'aiConfigVersion': aiConfigVersion,
-      'heuristicsVersion': heuristicsVersion,
-      'modelUsed': modelUsed,
-      'dataTier': dataTier,
-      'feedbackMode': safeMode,
-      if (includeHash) 'reporterHash': reporterHash,
-      'status': 'open',
-      'createdAt': createdAt.toIso8601String(),
-    };
-  }
-
-  factory AiFeedbackReport.fromMap(Map<String, dynamic> map, {String? docId}) {
-    return AiFeedbackReport(
-      reportId: (map['reportId'] as String?) ?? docId ?? '',
-      targetFeature: (map['targetFeature'] as String?) ?? 'ai_chat',
-      rating: (map['rating'] as String?) ?? 'positive',
-      reasonCode: (map['reasonCode'] as String?) ?? 'general',
-      userNote: map['userNote'] as String?,
-      suggestedKeywordOrMerchant: map['suggestedKeywordOrMerchant'] as String?,
-      aiConfigVersion: (map['aiConfigVersion'] as num?)?.toInt() ?? 1,
-      heuristicsVersion: (map['heuristicsVersion'] as num?)?.toInt() ?? 1,
-      modelUsed: (map['modelUsed'] as String?) ?? 'gemini-3.5-flash',
-      dataTier: (map['dataTier'] as String?) ?? 'unknown',
-      feedbackMode: (map['feedbackMode'] as String?) ?? 'anonymous',
-      reporterHash: map['reporterHash'] as String?,
-      status: (map['status'] as String?) ?? 'open',
-      adminResolutionNote: map['adminResolutionNote'] as String?,
-      appliedAction: map['appliedAction'] as String?,
-      resolvedBy: map['resolvedBy'] as String?,
-      resolvedAt: map['resolvedAt'] != null
-          ? DateTime.tryParse(map['resolvedAt'].toString())
-          : null,
-      createdAt: map['createdAt'] != null
-          ? (DateTime.tryParse(map['createdAt'].toString()) ?? DateTime.now())
-          : DateTime.now(),
-    );
-  }
-}
-
-/// ============================================================================
-/// 7. DỮ LIỆU PERSONA GIẢ LẬP CHO AI SANDBOX (`SyntheticPersona`)
+/// 5. DỮ LIỆU PERSONA GIẢ LẬP CHO KIỂM THỬ (`SyntheticPersona`)
 /// Chạy 100% trên RAM, hoàn toàn không chạm tới dữ liệu thật của User.
 /// ============================================================================
 class SyntheticPersona {

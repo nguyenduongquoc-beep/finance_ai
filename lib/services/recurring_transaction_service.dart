@@ -22,10 +22,130 @@ class PlannedRemainingAmounts {
   });
 }
 
+/// Kết quả đánh giá thời hạn chờ xác nhận 3 ngày (grace period) cho lịch manualConfirmation
+class ManualGraceEvaluation {
+  final RecurringTransactionSchedule schedule;
+  final List<DateTime> skippedDates;
+  final DateTime newNextDueDate;
+  final int daysOverdueOnCurrentCycle;
+  final int remainingGraceDays;
+  final bool isCurrentlyDueWithinGrace;
+
+  const ManualGraceEvaluation({
+    required this.schedule,
+    required this.skippedDates,
+    required this.newNextDueDate,
+    required this.daysOverdueOnCurrentCycle,
+    required this.remainingGraceDays,
+    required this.isCurrentlyDueWithinGrace,
+  });
+
+  bool get wasAutoSkipped => skippedDates.isNotEmpty;
+}
+
 /// ============================================================
 /// RECURRING TRANSACTION SERVICE (DART THUẦN — KHÔNG IMPORT FIREBASE)
 /// ============================================================
 class RecurringTransactionService {
+  /// Số ngày chờ xử lý (grace period) đối với lịch cần người dùng xác nhận,
+  /// được tính từ ngày đến hạn thực tế (nextDueDate).
+  static const int manualConfirmationGraceDays = 3;
+
+  static DateTime dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
+
+  /// Chênh lệch số ngày theo lịch (dùng UTC date-only để tránh sai lệch DST).
+  static int calendarDaysBetween(DateTime fromDate, DateTime toDate) {
+    final fromUtc = DateTime.utc(fromDate.year, fromDate.month, fromDate.day);
+    final toUtc = DateTime.utc(toDate.year, toDate.month, toDate.day);
+    return toUtc.difference(fromUtc).inDays;
+  }
+
+  /// Đánh giá chu kỳ chờ xác nhận 3 ngày cho lịch `manualConfirmation`.
+  /// - Chỉ áp dụng cho `isActive && postingMode == postingModeManual`.
+  /// - Tuyệt đối KHÔNG áp dụng cho `postingModeAuto`.
+  /// - Mốc 3 ngày luôn tính từ `schedule.nextDueDate` thực tế, KHÔNG tính từ `reminderDaysBefore`.
+  ManualGraceEvaluation evaluateManualGracePeriod({
+    required RecurringTransactionSchedule schedule,
+    DateTime? referenceDate,
+    int graceDays = manualConfirmationGraceDays,
+    int catchUpCap = 120,
+  }) {
+    final ref = dateOnly(referenceDate ?? DateTime.now());
+    var cursor = dateOnly(schedule.nextDueDate);
+
+    if (!schedule.isActive ||
+        schedule.postingMode != RecurringTransactionSchedule.postingModeManual) {
+      final diff = calendarDaysBetween(cursor, ref);
+      return ManualGraceEvaluation(
+        schedule: schedule,
+        skippedDates: const [],
+        newNextDueDate: schedule.nextDueDate,
+        daysOverdueOnCurrentCycle: diff,
+        remainingGraceDays: 0,
+        isCurrentlyDueWithinGrace: false,
+      );
+    }
+
+    final skipped = <DateTime>[];
+    var guard = 0;
+    while (calendarDaysBetween(cursor, ref) >= graceDays &&
+        guard < catchUpCap) {
+      skipped.add(cursor);
+      final nextCursor = nextOccurrenceAfter(
+        DateTime(
+          cursor.year,
+          cursor.month,
+          cursor.day,
+          schedule.startDate.hour,
+          schedule.startDate.minute,
+          schedule.startDate.second,
+        ),
+        schedule.frequency,
+        schedule.startDate,
+      );
+      cursor = dateOnly(nextCursor);
+      guard++;
+    }
+
+    final newNextDueDate = skipped.isEmpty
+        ? schedule.nextDueDate
+        : DateTime(
+            cursor.year,
+            cursor.month,
+            cursor.day,
+            schedule.nextDueDate.hour,
+            schedule.nextDueDate.minute,
+            schedule.nextDueDate.second,
+          );
+
+    final daysOverdue = calendarDaysBetween(cursor, ref);
+    final isWithinGrace = daysOverdue >= 0 && daysOverdue < graceDays;
+    final remaining = isWithinGrace
+        ? (graceDays - daysOverdue).clamp(0, graceDays)
+        : 0;
+
+    return ManualGraceEvaluation(
+      schedule: schedule,
+      skippedDates: skipped,
+      newNextDueDate: newNextDueDate,
+      daysOverdueOnCurrentCycle: daysOverdue,
+      remainingGraceDays: remaining,
+      isCurrentlyDueWithinGrace: isWithinGrace,
+    );
+  }
+
+  /// Số ngày còn lại trong cửa sổ xác nhận 3 ngày (0..3) cho kỳ hiện tại.
+  int manualConfirmationRemainingGraceDays(
+    RecurringTransactionSchedule schedule, {
+    DateTime? referenceDate,
+  }) {
+    final eval = evaluateManualGracePeriod(
+      schedule: schedule,
+      referenceDate: referenceDate,
+    );
+    return eval.remainingGraceDays;
+  }
+
   /// Sinh khóa kỳ hạn từ DateTime (VD: "2026-09-30")
   static String getOccurrenceKey(DateTime date) {
     final y = date.year.toString().padLeft(4, '0');

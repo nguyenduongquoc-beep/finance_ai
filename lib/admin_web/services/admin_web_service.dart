@@ -2,10 +2,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
 import '../../models/admin_audit_log_model.dart';
-import '../../models/ai_runtime_config_model.dart';
 import '../../models/monthly_financial_plan.dart';
 import '../../models/user_model.dart';
-import '../../services/ai_config_sync_service.dart';
 import '../../services/firestore_service.dart';
 import '../../utils/constants.dart';
 import 'admin_http_helper.dart';
@@ -37,110 +35,6 @@ class AdminAuthCheckResult {
     this.userProfile,
     this.errorMessage,
   });
-}
-
-/// Kết quả gọi thử nghiệm Gemini AI Sandbox từ phía Server Cloud Function
-class AdminSandboxRunResult {
-  final String modelUsed;
-  final List<String> triedModels;
-  final String responseText;
-  final bool? jsonValid;
-  final List<String> jsonValidationErrors;
-  final int latencyMs;
-  final String? logId;
-  final String draftVerificationNote;
-
-  const AdminSandboxRunResult({
-    required this.modelUsed,
-    required this.triedModels,
-    required this.responseText,
-    this.jsonValid,
-    this.jsonValidationErrors = const [],
-    this.latencyMs = 0,
-    this.logId,
-    this.draftVerificationNote = '',
-  });
-
-  factory AdminSandboxRunResult.fromMap(Map<String, dynamic> map) {
-    return AdminSandboxRunResult(
-      modelUsed: (map['modelUsed'] ?? '').toString(),
-      triedModels: (map['triedModels'] as List<dynamic>?)
-              ?.map((e) => e.toString())
-              .toList() ??
-          const [],
-      responseText: (map['responseText'] ?? '').toString(),
-      jsonValid: map['jsonValid'] is bool ? map['jsonValid'] as bool : null,
-      jsonValidationErrors: (map['jsonValidationErrors'] as List<dynamic>?)
-              ?.map((e) => e.toString())
-              .toList() ??
-          const [],
-      latencyMs: (map['latencyMs'] as num?)?.toInt() ?? 0,
-      logId: map['logId']?.toString(),
-      draftVerificationNote:
-          (map['draftVerificationNote'] ?? '').toString(),
-    );
-  }
-}
-
-/// Bản ghi nháp Kho tri thức Tài chính (`financial_knowledge_drafts`) kèm metadata xuất bản gần nhất.
-class AdminKnowledgeDraftRecord {
-  final FinancialKnowledgeArticle article;
-  final int? lastPublishedVersion;
-  final DateTime? lastPublishedAt;
-  final String? lastPublishedBy;
-
-  const AdminKnowledgeDraftRecord({
-    required this.article,
-    this.lastPublishedVersion,
-    this.lastPublishedAt,
-    this.lastPublishedBy,
-  });
-
-  factory AdminKnowledgeDraftRecord.fromMap(
-    Map<String, dynamic> map, {
-    String? docId,
-  }) {
-    return AdminKnowledgeDraftRecord(
-      article: FinancialKnowledgeArticle.fromMap(map, docId: docId),
-      lastPublishedVersion: (map['lastPublishedVersion'] as num?)?.toInt(),
-      lastPublishedAt: map['lastPublishedAt'] != null
-          ? DateTime.tryParse(map['lastPublishedAt'].toString())
-          : null,
-      lastPublishedBy: map['lastPublishedBy'] as String?,
-    );
-  }
-}
-
-/// Bản ghi đã xuất bản Kho tri thức Tài chính (`financial_knowledge_published`).
-class AdminKnowledgePublishedRecord {
-  final FinancialKnowledgeArticle article;
-  final int publishedVersion;
-  final DateTime? publishedAt;
-  final String? publishedByEmail;
-  final String changeNote;
-
-  const AdminKnowledgePublishedRecord({
-    required this.article,
-    required this.publishedVersion,
-    this.publishedAt,
-    this.publishedByEmail,
-    this.changeNote = '',
-  });
-
-  factory AdminKnowledgePublishedRecord.fromMap(
-    Map<String, dynamic> map, {
-    String? docId,
-  }) {
-    return AdminKnowledgePublishedRecord(
-      article: FinancialKnowledgeArticle.fromMap(map, docId: docId),
-      publishedVersion: (map['publishedVersion'] as num?)?.toInt() ?? 1,
-      publishedAt: map['publishedAt'] != null
-          ? DateTime.tryParse(map['publishedAt'].toString())
-          : null,
-      publishedByEmail: map['publishedByEmail'] as String?,
-      changeNote: (map['changeNote'] ?? '').toString(),
-    );
-  }
 }
 
 /// Dữ liệu một cột trên biểu đồ tăng trưởng người dùng theo tháng
@@ -362,6 +256,36 @@ class AdminWebService {
         userProfile: profile,
       );
     } on AdminCloudCallException catch (e) {
+      if (e.kind == AdminCloudErrorKind.network && !verifyWithBackend) {
+        final String? uid = uidOverride ?? currentUser?.uid;
+        if (uid != null && uid.isNotEmpty) {
+          final profile = await _firestoreService.getUserProfile(uid);
+          if (profile != null && profile.isLocked) {
+            return AdminAuthCheckResult(
+              isAuthorized: false,
+              isLocked: true,
+              hasAdminFirestoreRole: profile.isAdmin,
+              userProfile: profile,
+              errorMessage:
+                  'Tài khoản quản trị viên này hiện đang bị khóa. Không thể truy cập hệ thống.',
+            );
+          }
+          final bool hasRole = profile?.isAdmin == true;
+          if (hasRole) {
+            return AdminAuthCheckResult(
+              isAuthorized: true,
+              hasAdminFirestoreRole: true,
+              userProfile: profile,
+            );
+          }
+          return AdminAuthCheckResult(
+            isAuthorized: false,
+            userProfile: profile,
+            errorMessage:
+                'Truy cập bị từ chối: Tài khoản này là tài khoản Người dùng (User), không có quyền Quản trị viên (Admin).',
+          );
+        }
+      }
       final lower = e.message.toLowerCase();
       return AdminAuthCheckResult(
         isAuthorized: false,
@@ -580,6 +504,35 @@ class AdminWebService {
     );
   }
 
+  /// Xóa vĩnh viễn tài khoản người dùng qua Cloud Function `adminDeleteUser`
+  /// (Xóa đồng thời trên Firebase Authentication và dọn dẹp sạch sẽ hồ sơ Firestore + dữ liệu liên quan + Audit Log)
+  Future<void> deleteUserAccount({
+    required String adminUid,
+    required String adminEmail,
+    required AppUser targetUser,
+    String? reason,
+    Map<String, dynamic>? tokenClaimsOverride,
+  }) async {
+    if (adminUid == targetUser.uid) {
+      throw const AdminPermissionException(
+        'Quản trị viên không thể tự xóa tài khoản của chính mình.',
+      );
+    }
+
+    await _requireActiveAdmin(
+      adminUid,
+      tokenClaimsOverride: tokenClaimsOverride,
+    );
+
+    await _invokeAdminCloudFunction(
+      'adminDeleteUser',
+      {
+        'targetUid': targetUser.uid,
+        if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
+      },
+    );
+  }
+
   /// Thêm mới hoặc chỉnh sửa danh mục mặc định hệ thống qua Cloud Function `adminManageSystemCategory`
   Future<String> saveSystemCategory({
     required String adminUid,
@@ -757,286 +710,6 @@ class AdminWebService {
         'announcementId': announcement.id,
         'title': announcement.title,
       },
-    );
-  }
-
-  /// Xác minh bản nháp cấu hình AI Sandbox phía Server (`adminVerifyDraftInSandbox`)
-  Future<Map<String, dynamic>> verifyDraftInSandbox({
-    required String adminUid,
-    required String configType,
-    Map<String, dynamic>? simulationSummary,
-    Map<String, dynamic>? tokenClaimsOverride,
-  }) async {
-    await _requireActiveAdmin(
-      adminUid,
-      tokenClaimsOverride: tokenClaimsOverride,
-    );
-    return _invokeAdminCloudFunction(
-      'adminVerifyDraftInSandbox',
-      {
-        'configType': configType,
-        if (simulationSummary != null) 'simulationSummary': simulationSummary,
-      },
-    );
-  }
-
-  /// Xuất bản cấu hình động nguyên tử (`adminPublishConfig`)
-  Future<Map<String, dynamic>> publishConfig({
-    required String adminUid,
-    required String configType,
-    String? changeNote,
-    Map<String, dynamic>? tokenClaimsOverride,
-  }) async {
-    await _requireActiveAdmin(
-      adminUid,
-      tokenClaimsOverride: tokenClaimsOverride,
-    );
-    return _invokeAdminCloudFunction(
-      'adminPublishConfig',
-      {
-        'configType': configType,
-        if (changeNote != null && changeNote.trim().isNotEmpty)
-          'changeNote': changeNote.trim(),
-      },
-    );
-  }
-
-  /// Khôi phục phiên bản cấu hình cũ (`adminRollbackConfig` - tạo version mới)
-  Future<Map<String, dynamic>> rollbackConfig({
-    required String adminUid,
-    required String configType,
-    required int targetVersionNumber,
-    String? reason,
-    Map<String, dynamic>? tokenClaimsOverride,
-  }) async {
-    await _requireActiveAdmin(
-      adminUid,
-      tokenClaimsOverride: tokenClaimsOverride,
-    );
-    return _invokeAdminCloudFunction(
-      'adminRollbackConfig',
-      {
-        'configType': configType,
-        'targetVersionNumber': targetVersionNumber,
-        if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
-      },
-    );
-  }
-
-  /// Xuất bản hoặc bật/tắt bài viết Tri thức Tài chính (`adminPublishKnowledgeBase`)
-  Future<Map<String, dynamic>> publishKnowledgeArticle({
-    required String adminUid,
-    required String articleId,
-    String action = 'publish',
-    bool? isActive,
-    String? changeNote,
-    Map<String, dynamic>? tokenClaimsOverride,
-  }) async {
-    await _requireActiveAdmin(
-      adminUid,
-      tokenClaimsOverride: tokenClaimsOverride,
-    );
-    return _invokeAdminCloudFunction(
-      'adminPublishKnowledgeBase',
-      {
-        'articleId': articleId,
-        'action': action,
-        if (isActive != null) 'isActive': isActive,
-        if (changeNote != null && changeNote.trim().isNotEmpty)
-          'changeNote': changeNote.trim(),
-      },
-    );
-  }
-
-  /// Xử lý phản hồi chất lượng AI từ người dùng (`adminResolveAiFeedback`)
-  Future<Map<String, dynamic>> resolveAiFeedback({
-    required String adminUid,
-    required String reportId,
-    required String status, // 'resolved' | 'ignored'
-    String? adminResolutionNote,
-    String? appliedAction,
-    Map<String, dynamic>? tokenClaimsOverride,
-  }) async {
-    await _requireActiveAdmin(
-      adminUid,
-      tokenClaimsOverride: tokenClaimsOverride,
-    );
-    return _invokeAdminCloudFunction(
-      'adminResolveAiFeedback',
-      {
-        'reportId': reportId,
-        'status': status,
-        if (adminResolutionNote != null)
-          'adminResolutionNote': adminResolutionNote,
-        if (appliedAction != null) 'appliedAction': appliedAction,
-      },
-    );
-  }
-
-  /// Gọi thử nghiệm Gemini AI Sandbox qua Cloud Function `adminRunSandbox`.
-  /// Tuyệt đối KHÔNG gửi API Key từ Web; Server đọc GEMINI_API_KEY từ Secret Manager.
-  Future<AdminSandboxRunResult> runLiveGeminiSandbox({
-    required String adminUid,
-    required String prompt,
-    String? systemInstruction,
-    String mode = 'chat_prompt',
-    String primaryModel = AiRuntimeConfig.kDefaultPrimaryModel,
-    List<String> fallbackModels = AiRuntimeConfig.kDefaultFallbackModels,
-    double temperature = 0.35,
-    bool expectStructuredPlanJson = false,
-    SyntheticPersona? persona,
-    Map<String, dynamic>? tokenClaimsOverride,
-  }) async {
-    await _requireActiveAdmin(
-      adminUid,
-      tokenClaimsOverride: tokenClaimsOverride,
-    );
-    final res = await _invokeAdminCloudFunction(
-      'adminRunSandbox',
-      {
-        'mode': mode,
-        'prompt': prompt,
-        if (systemInstruction != null && systemInstruction.isNotEmpty)
-          'systemInstruction': systemInstruction,
-        'primaryModel': primaryModel,
-        'fallbackModels': fallbackModels,
-        'temperature': temperature,
-        'expectStructuredPlanJson': expectStructuredPlanJson,
-        if (persona != null) 'persona': {'id': persona.id, 'label': persona.title},
-      },
-      timeout: const Duration(seconds: 32),
-    );
-    return AdminSandboxRunResult.fromMap(res);
-  }
-
-  // ===========================================================================
-  // QUẢN TRỊ BẢN NHÁP, XUẤT BẢN, KHO TRI THỨC & PHẢN HỒI AI
-  // ===========================================================================
-
-  Stream<Map<String, dynamic>?> streamPublishedConfigMap(String configType) {
-    return _firestoreService.streamPublishedConfigMap(configType);
-  }
-
-  Stream<DraftConfigEnvelope?> streamDraftConfigEnvelope(String configType) {
-    return _firestoreService.streamDraftConfigEnvelope(configType);
-  }
-
-  Stream<List<ConfigVersionSnapshot>> streamConfigVersions(String configType) {
-    return _firestoreService.streamConfigVersions(configType);
-  }
-
-  Stream<List<AdminKnowledgeDraftRecord>> streamKnowledgeDrafts() {
-    return _firestoreService.streamKnowledgeDraftDocs().map((docs) {
-      final list = docs
-          .map((d) => AdminKnowledgeDraftRecord.fromMap(
-                d,
-                docId: d['articleId']?.toString(),
-              ))
-          .toList();
-      list.sort((a, b) {
-        final byPriority = b.article.priority.compareTo(a.article.priority);
-        if (byPriority != 0) return byPriority;
-        return a.article.title.compareTo(b.article.title);
-      });
-      return list;
-    });
-  }
-
-  Stream<List<AdminKnowledgePublishedRecord>> streamKnowledgePublished() {
-    return _firestoreService.streamKnowledgePublishedDocs().map((docs) {
-      final list = docs
-          .map((d) => AdminKnowledgePublishedRecord.fromMap(
-                d,
-                docId: d['articleId']?.toString(),
-              ))
-          .toList();
-      list.sort((a, b) {
-        final byPriority = b.article.priority.compareTo(a.article.priority);
-        if (byPriority != 0) return byPriority;
-        return a.article.title.compareTo(b.article.title);
-      });
-      return list;
-    });
-  }
-
-  Stream<List<AiFeedbackReport>> streamAiFeedbackReports({int limit = 200}) {
-    return _firestoreService.streamAiFeedbackReports(limit: limit);
-  }
-
-  /// Kiểm tra hợp lệ client-side khớp 1:1 với Server rồi lưu bản nháp (`draft_configs/{configType}`).
-  /// Tự động tính Canonical SHA-256 `draftHash`. Nếu payload đổi so với hash đã xác minh Sandbox,
-  /// Admin bắt buộc phải xác minh lại trên AI Sandbox trước khi Publish.
-  Future<String> saveConfigDraft({
-    required String adminUid,
-    required String configType,
-    required Map<String, dynamic> payload,
-    String? changeNote,
-    Map<String, dynamic>? tokenClaimsOverride,
-  }) async {
-    await _requireActiveAdmin(
-      adminUid,
-      tokenClaimsOverride: tokenClaimsOverride,
-    );
-
-    final List<String> errors;
-    switch (configType) {
-      case AiConfigSyncService.kDocAiRuntime:
-        errors = AiRuntimeConfig.validateRawInput(payload);
-        break;
-      case AiConfigSyncService.kDocFinancialHeuristics:
-        errors = FinancialHeuristicsConfig.validateRawInput(payload);
-        break;
-      case AiConfigSyncService.kDocTransactionRules:
-        errors = TransactionIntelligenceConfig.validateRawInput(payload);
-        break;
-      default:
-        errors = ['Loại cấu hình "$configType" không được hỗ trợ.'];
-    }
-
-    if (errors.isNotEmpty) {
-      throw AdminCloudCallException(
-        statusCode: 400,
-        kind: AdminCloudErrorKind.validation,
-        message: 'Dữ liệu bản nháp chưa hợp lệ.',
-        validationErrors: errors,
-      );
-    }
-
-    final draftHash = computeCanonicalConfigHash(payload);
-    await _firestoreService.saveDraftConfigDoc(
-      configType: configType,
-      draftPayload: payload,
-      draftHash: draftHash,
-      updatedBy: adminUid,
-      changeNote: changeNote,
-    );
-    return draftHash;
-  }
-
-  /// Kiểm tra schema và lưu bản nháp bài viết Tri thức Tài chính (`financial_knowledge_drafts`).
-  Future<void> saveKnowledgeDraft({
-    required String adminUid,
-    required FinancialKnowledgeArticle article,
-    Map<String, dynamic>? tokenClaimsOverride,
-  }) async {
-    await _requireActiveAdmin(
-      adminUid,
-      tokenClaimsOverride: tokenClaimsOverride,
-    );
-
-    final errors = FinancialKnowledgeArticle.validateRawInput(article.toMap());
-    if (errors.isNotEmpty) {
-      throw AdminCloudCallException(
-        statusCode: 400,
-        kind: AdminCloudErrorKind.validation,
-        message: 'Nội dung bài viết Tri thức Tài chính chưa đạt chuẩn schema.',
-        validationErrors: errors,
-      );
-    }
-
-    await _firestoreService.saveKnowledgeDraftDoc(
-      article: article,
-      updatedBy: adminUid,
     );
   }
 

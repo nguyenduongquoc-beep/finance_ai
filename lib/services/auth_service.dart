@@ -1,5 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_sign_in/google_sign_in.dart';
+import '../l10n/app_localizations.dart';
 
 /// ============================================================
 /// AUTH SERVICE
@@ -33,8 +34,12 @@ class AuthService {
   /// Nhãn hiển thị phương thức đăng nhập chính
   String get authProviderLabel {
     if (isGoogleUser && !isEmailPasswordUser) return 'Google';
-    if (isEmailPasswordUser && !isGoogleUser) return 'Email & Mật khẩu';
-    if (isGoogleUser && isEmailPasswordUser) return 'Google + Email/Mật khẩu';
+    if (isEmailPasswordUser && !isGoogleUser) {
+      return AppLocalizations.tr('auth_provider_email_pw');
+    }
+    if (isGoogleUser && isEmailPasswordUser) {
+      return AppLocalizations.tr('auth_provider_google_email');
+    }
     return 'Email';
   }
 
@@ -86,7 +91,7 @@ class AuthService {
   }) async {
     final user = _auth.currentUser;
     if (user == null || user.email == null) {
-      throw Exception('Người dùng chưa đăng nhập hoặc không có email');
+      throw Exception(AppLocalizations.tr('auth_err_not_signed_in'));
     }
     final credential = EmailAuthProvider.credential(
       email: user.email!,
@@ -100,5 +105,35 @@ class AuthService {
   Future<void> signOut() async {
     await _getGoogleSignIn.signOut();
     await _auth.signOut();
+  }
+
+  /// Xóa vĩnh viễn tài khoản hiện tại khỏi Firebase Authentication.
+  /// Lưu ý: Khi tài khoản bị xóa trên Firebase Auth, Cloud Function trigger
+  /// `cleanupUserDataOnAuthDelete` ở Backend sẽ tự động kích hoạt để dọn dẹp
+  /// toàn bộ hồ sơ Firestore và mọi dữ liệu tài chính liên quan.
+  Future<void> deleteCurrentUser({String? currentPassword}) async {
+    final user = _auth.currentUser;
+    if (user == null) {
+      throw Exception(AppLocalizations.tr('auth_err_not_signed_in'));
+    }
+
+    // Nếu người dùng đăng nhập bằng Email/Password và có nhập mật khẩu,
+    // tiến hành re-authenticate theo khuyến cáo bảo mật của Firebase.
+    if (isEmailPasswordUser &&
+        currentPassword != null &&
+        currentPassword.isNotEmpty &&
+        user.email != null) {
+      final credential = EmailAuthProvider.credential(
+        email: user.email!,
+        password: currentPassword,
+      );
+      await user.reauthenticateWithCredential(credential);
+    }
+
+    // Xóa user khỏi Firebase Authentication (trigger onDelete sẽ tự động dọn Firestore)
+    await user.delete();
+    try {
+      await _getGoogleSignIn.signOut();
+    } catch (_) {}
   }
 }

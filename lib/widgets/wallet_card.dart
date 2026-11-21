@@ -1,15 +1,17 @@
 import 'package:flutter/material.dart';
+import '../l10n/app_localizations.dart';
 import '../models/wallet_model.dart';
 import '../utils/constants.dart';
 import '../utils/formatters.dart';
+import '../utils/wallet_localization_helper.dart';
 import 'app_card.dart';
 
 /// Nhóm loại ví dùng chung cho màn hình Ví và thẻ ví.
 /// Loại không xác định sẽ được gom vào [other].
 class WalletTypeStyle {
   final String key;
-  final String label;
-  final String pluralLabel;
+  final String _labelKey;
+  final String _pluralKey;
   final IconData icon;
 
   /// Màu dùng trên nền sáng/tối thông thường (icon, thanh tỷ trọng).
@@ -20,41 +22,44 @@ class WalletTypeStyle {
 
   const WalletTypeStyle._(
     this.key,
-    this.label,
-    this.pluralLabel,
+    this._labelKey,
+    this._pluralKey,
     this.icon,
     this.color,
     this.onDarkColor,
   );
 
+  String get label => AppLocalizations.tr(_labelKey);
+  String get pluralLabel => AppLocalizations.tr(_pluralKey);
+
   static const bank = WalletTypeStyle._(
     'bank',
-    'Ngân hàng',
-    'Tài khoản ngân hàng',
+    'setup_wallet_opt_bank',
+    'wallet_type_bank',
     Icons.account_balance_rounded,
     Color(0xFF2F7FB5),
     Color(0xFF8FD3EA),
   );
   static const eWallet = WalletTypeStyle._(
     'eWallet',
-    'Ví điện tử',
-    'Ví điện tử',
+    'wallet_type_ewallet',
+    'wallet_type_ewallet',
     Icons.phone_iphone_rounded,
     Color(0xFF7A5FC9),
     Color(0xFFC3B5F2),
   );
   static const cash = WalletTypeStyle._(
     'cash',
-    'Tiền mặt',
-    'Tiền mặt',
+    'wallet_type_cash',
+    'wallet_type_cash',
     Icons.payments_rounded,
     Color(0xFF2E8B57),
     Color(0xFF86DBA9),
   );
   static const other = WalletTypeStyle._(
     'other',
-    'Khác',
-    'Khác',
+    'wallet_type_other',
+    'wallet_type_other',
     Icons.account_balance_wallet_rounded,
     Color(0xFF6D6E69),
     Color(0xFFD3D3CE),
@@ -128,7 +133,10 @@ class WalletCard extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        wallet.walletName,
+                        WalletLocalizationHelper.localizeWalletWithContext(
+                          context,
+                          wallet,
+                        ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -171,7 +179,7 @@ class WalletCard extends StatelessWidget {
                   IconButton(
                     onPressed: onMore,
                     visualDensity: VisualDensity.compact,
-                    tooltip: 'Tùy chọn',
+                    tooltip: context.tr('wallet_options_tooltip'),
                     icon: Icon(Icons.more_vert_rounded, size: 20, color: context.appTextSecondary),
                   )
                 else
@@ -195,12 +203,23 @@ class WalletCard extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 10),
-                  Text(
-                    '${(share * 100).round()}% tổng tài sản',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w500,
-                      color: context.appTextSecondary,
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 150),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerRight,
+                      child: Text(
+                        context.tr(
+                          'wallet_share_of_total',
+                          params: {'percent': '${(share * 100).round()}'},
+                        ),
+                        maxLines: 1,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w500,
+                          color: context.appTextSecondary,
+                        ),
+                      ),
                     ),
                   ),
                 ],

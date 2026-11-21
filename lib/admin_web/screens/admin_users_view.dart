@@ -231,6 +231,97 @@ class _AdminUsersManagementViewState extends State<AdminUsersManagementView> {
     }
   }
 
+  Future<void> _confirmAndDeleteUser(AppUser user) async {
+    final reasonCtrl = TextEditingController();
+
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(
+              Icons.warning_amber_rounded,
+              color: AppColors.expense,
+              size: 24,
+            ),
+            SizedBox(width: 8),
+            Expanded(child: Text('Xác nhận XÓA VĨNH VIỄN Tài khoản')),
+          ],
+        ),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'CẢNH BÁO NGUY HIỂM: Bạn đang chuẩn bị xóa vĩnh viễn tài khoản "${user.email}" (UID: ${user.uid}).\n\n'
+                '• Tài khoản sẽ bị xóa hoàn toàn khỏi Firebase Authentication.\n'
+                '• Toàn bộ hồ sơ người dùng trong Firestore và các dữ liệu tài chính liên quan (ví, giao dịch, ngân sách, mục tiêu) sẽ được dọn dẹp sạch sẽ.\n'
+                '• Hành động này KHÔNG THỂ HOÀN TÁC!',
+                style: GoogleFonts.inter(
+                  fontSize: 13,
+                  height: 1.45,
+                  color: AppColors.expense,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(height: 14),
+              TextField(
+                key: const ValueKey('admin_delete_reason_input'),
+                controller: reasonCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Lý do xóa tài khoản (ghi vào Nhật ký quản trị)',
+                  hintText: 'VD: Yêu cầu xóa dữ liệu cá nhân theo GDPR / Vi phạm',
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Hủy'),
+          ),
+          FilledButton.icon(
+            key: const ValueKey('admin_confirm_delete_btn'),
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.expense,
+            ),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            icon: const Icon(Icons.delete_forever_rounded, size: 16),
+            label: const Text('Xác nhận Xóa Vĩnh Viễn'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    try {
+      await widget.adminService.deleteUserAccount(
+        adminUid: widget.currentAdminUid,
+        adminEmail: widget.currentAdminEmail,
+        targetUser: user,
+        reason: reasonCtrl.text.trim(),
+        tokenClaimsOverride: widget.tokenClaimsOverride,
+      );
+
+      if (!mounted) return;
+      AppSnackbar.show(
+        context,
+        'Đã xóa vĩnh viễn tài khoản ${user.email} (Auth + Firestore).',
+      );
+    } catch (e) {
+      if (!mounted) return;
+      AppSnackbar.show(
+        context,
+        'Không thể xóa tài khoản: ${formatAdminErrorMessage(e)}',
+        isError: true,
+      );
+    }
+  }
+
   Future<void> _confirmAndToggleRole(AppUser user) async {
     final nextRole = user.isAdmin ? 'user' : 'admin';
     final confirm = await showAdminConfirmDialog(
@@ -532,6 +623,26 @@ class _AdminUsersManagementViewState extends State<AdminUsersManagementView> {
                                   label: Text(
                                     u.isLocked ? 'Mở khóa' : 'Khóa',
                                   ),
+                                ),
+                                OutlinedButton.icon(
+                                  key: ValueKey('delete_user_${u.uid}'),
+                                  style: OutlinedButton.styleFrom(
+                                    minimumSize: const Size(0, 38),
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 14,
+                                      vertical: 8,
+                                    ),
+                                    foregroundColor: AppColors.expense,
+                                    side: const BorderSide(
+                                      color: AppColors.expense,
+                                    ),
+                                  ),
+                                  onPressed: () => _confirmAndDeleteUser(u),
+                                  icon: const Icon(
+                                    Icons.delete_forever_rounded,
+                                    size: 16,
+                                  ),
+                                  label: const Text('Xóa'),
                                 ),
                               ],
                               if (isSelf)

@@ -1,14 +1,21 @@
 import 'package:flutter/material.dart';
-import '../models/transaction_model.dart';
+import '../l10n/app_localizations.dart';
 import '../models/category_model.dart';
+import '../models/saving_goal_model.dart';
+import '../models/transaction_model.dart';
+import '../models/wallet_model.dart';
+import '../utils/category_localization_helper.dart';
 import '../utils/constants.dart';
 import '../utils/formatters.dart';
+import '../utils/transaction_note_localization_helper.dart';
 import 'app_card.dart';
 
 /// Widget hiển thị một dòng giao dịch trong danh sách chuẩn Fintech
 class TransactionCard extends StatelessWidget {
   final AppTransaction transaction;
   final Category? category;
+  final Wallet? wallet;
+  final SavingGoal? goal;
   final VoidCallback? onTap;
   final EdgeInsetsGeometry margin;
 
@@ -16,6 +23,8 @@ class TransactionCard extends StatelessWidget {
     super.key,
     required this.transaction,
     this.category,
+    this.wallet,
+    this.goal,
     this.onTap,
     this.margin = const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
   });
@@ -57,15 +66,24 @@ class TransactionCard extends StatelessWidget {
         ? context.appTextPrimary
         : (isIncome ? AppColors.income : AppColors.expense);
 
-    final hasNote = transaction.note != null && transaction.note!.trim().isNotEmpty;
+    final localizedNote = TransactionNoteLocalizationHelper.localizeNoteWithContext(
+      context,
+      transaction,
+      wallet: wallet,
+      goal: goal,
+    );
+    final hasNote = localizedNote.trim().isNotEmpty;
     final categoryLabel = isGoalDeposit
-        ? 'Nạp mục tiêu tiết kiệm'
+        ? context.tr('tx_card_goal_deposit')
         : isGoalWithdraw
-            ? 'Rút mục tiêu tiết kiệm'
+            ? context.tr('tx_card_goal_withdraw')
             : isTransfer
-                ? 'Chuyển tiền'
-                : (category?.name ?? 'Không rõ danh mục');
-    final titleText = hasNote ? transaction.note! : categoryLabel;
+                ? context.tr('common_transfer')
+                : (category != null
+                    ? CategoryLocalizationHelper.localizeNameWithContext(
+                        context, category!.name)
+                    : context.tr('tx_card_unknown_category'));
+    final titleText = hasNote ? localizedNote : categoryLabel;
     final subtitleText = hasNote ? categoryLabel : null;
 
     final iconColor = isTransfer

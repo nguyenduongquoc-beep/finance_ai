@@ -3,31 +3,30 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../models/user_model.dart';
 import '../../services/auth_service.dart';
+import '../../services/support_service.dart';
 import '../../utils/constants.dart';
-import '../services/admin_ai_sandbox_service.dart';
 import '../services/admin_web_service.dart';
-import 'admin_ai_feedback_view.dart';
-import 'admin_ai_studio_view.dart';
+import 'admin_announcements_and_logs_view.dart';
+import 'admin_categories_view.dart';
 import 'admin_login_screen.dart';
-import 'admin_ocr_dictionary_view.dart';
 import 'admin_overview_view.dart';
-import 'admin_platform_ops_view.dart';
-import 'admin_rules_knowledge_view.dart';
+import 'admin_support_center_view.dart';
+import 'admin_users_view.dart';
 
 /// Khung giao diện chính của Cổng Quản trị Web (Admin Web Portal Shell).
 /// Bao gồm:
 /// - Lớp bảo vệ quyền Admin theo thời gian thực (Realtime Admin Route Guard).
 /// - Thanh điều hướng bên trái (Sidebar) chuẩn Web Desktop / Drawer trên màn hình hẹp.
-/// - Đúng 6 khu vực quản trị AI & Tri thức Tài chính:
-///   0. AI & Ops Dashboard
-///   1. AI Studio & Sandbox
-///   2. Financial Rules & Knowledge
-///   3. OCR Dictionary
-///   4. AI Feedback
-///   5. Platform Ops
+/// - 6 khu vực quản trị vận hành & hỗ trợ:
+///   0. Dashboard Tổng quan
+///   1. Quản lý Người dùng
+///   2. Danh mục Hệ thống
+///   3. Thông báo Hệ thống
+///   4. Nhật ký Quản trị
+///   5. Tư vấn & Hỗ trợ
 class AdminWebShellScreen extends StatefulWidget {
   final AdminWebService? adminService;
-  final AdminAiSandboxService sandboxService;
+  final SupportService? supportService;
   final String? adminUidOverride;
   final Map<String, dynamic>? tokenClaimsOverride;
   final Future<void> Function()? customSignOutHandler;
@@ -36,7 +35,7 @@ class AdminWebShellScreen extends StatefulWidget {
   const AdminWebShellScreen({
     super.key,
     this.adminService,
-    this.sandboxService = const AdminAiSandboxService(),
+    this.supportService,
     this.adminUidOverride,
     this.tokenClaimsOverride,
     this.customSignOutHandler,
@@ -49,43 +48,48 @@ class AdminWebShellScreen extends StatefulWidget {
 
 class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
   late final AdminWebService _adminService;
+  late final SupportService _supportService;
+  late final Stream<int> _supportUnreadCountStream;
   late int _selectedIndex;
-  int _rulesKnowledgeSubTabIndex = 0;
-  int _platformOpsSubTabIndex = 0;
-  String? _ocrPrefillKeyword;
+  bool _isSidebarCollapsed = false;
   bool _isCheckingInitialAuth = true;
   AdminAuthCheckResult? _initialAuthCheck;
 
+  static const int _supportTabIndex = 5;
+  static const double _sidebarExpandedWidth = 264.0;
+  static const double _sidebarCollapsedWidth = 76.0;
+  static const Duration _sidebarAnimDuration = Duration(milliseconds: 200);
+
   static const List<Map<String, dynamic>> _navItems = [
     {
-      'title': 'AI & Ops Dashboard',
+      'title': 'Dashboard Tổng quan',
       'icon': Icons.dashboard_outlined,
       'activeIcon': Icons.dashboard_rounded,
     },
     {
-      'title': 'AI Studio & Sandbox',
-      'icon': Icons.psychology_outlined,
-      'activeIcon': Icons.psychology_rounded,
+      'title': 'Quản lý Người dùng',
+      'icon': Icons.people_outline_rounded,
+      'activeIcon': Icons.people_rounded,
     },
     {
-      'title': 'Financial Rules & Knowledge',
-      'icon': Icons.rule_folder_outlined,
-      'activeIcon': Icons.rule_folder_rounded,
+      'title': 'Danh mục Hệ thống',
+      'icon': Icons.category_outlined,
+      'activeIcon': Icons.category_rounded,
     },
     {
-      'title': 'OCR Dictionary',
-      'icon': Icons.spellcheck_outlined,
-      'activeIcon': Icons.spellcheck_rounded,
+      'title': 'Thông báo Hệ thống',
+      'icon': Icons.campaign_outlined,
+      'activeIcon': Icons.campaign_rounded,
     },
     {
-      'title': 'AI Feedback',
-      'icon': Icons.feedback_outlined,
-      'activeIcon': Icons.feedback_rounded,
+      'title': 'Nhật ký Quản trị',
+      'icon': Icons.history_edu_outlined,
+      'activeIcon': Icons.history_edu_rounded,
     },
     {
-      'title': 'Platform Ops',
-      'icon': Icons.admin_panel_settings_outlined,
-      'activeIcon': Icons.admin_panel_settings_rounded,
+      'title': 'Tư vấn & Hỗ trợ',
+      'icon': Icons.support_agent_outlined,
+      'activeIcon': Icons.support_agent_rounded,
     },
   ];
 
@@ -93,6 +97,11 @@ class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
   void initState() {
     super.initState();
     _adminService = widget.adminService ?? AdminWebService();
+    _supportService = widget.supportService ??
+        SupportService(
+          firestore: _adminService.firestoreService.firestoreInstance,
+        );
+    _supportUnreadCountStream = _supportService.streamAdminUnreadCount();
     _selectedIndex = widget.initialIndex.clamp(0, _navItems.length - 1);
     _verifyInitialAccess();
   }
@@ -245,17 +254,28 @@ class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
                         adminName: adminName,
                         adminEmail: adminEmail,
                         closeDrawerOnTap: true,
+                        isCollapsed: false,
+                        allowCollapseToggle: false,
                       ),
                     ),
               body: Row(
                 children: [
                   if (isDesktop)
-                    SizedBox(
-                      width: 265,
-                      child: _buildSidebarContent(
-                        adminName: adminName,
-                        adminEmail: adminEmail,
-                        closeDrawerOnTap: false,
+                    AnimatedContainer(
+                      key: const ValueKey('admin_sidebar_container'),
+                      duration: _sidebarAnimDuration,
+                      curve: Curves.fastOutSlowIn,
+                      width: _isSidebarCollapsed
+                          ? _sidebarCollapsedWidth
+                          : _sidebarExpandedWidth,
+                      child: ClipRect(
+                        child: _buildSidebarContent(
+                          adminName: adminName,
+                          adminEmail: adminEmail,
+                          closeDrawerOnTap: false,
+                          isCollapsed: _isSidebarCollapsed,
+                          allowCollapseToggle: true,
+                        ),
                       ),
                     ),
                   Expanded(
@@ -270,6 +290,7 @@ class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
                           child: _buildActiveView(
                             adminUid: uid,
                             adminEmail: adminEmail,
+                            adminName: adminName,
                           ),
                         ),
                       ],
@@ -284,172 +305,416 @@ class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
     );
   }
 
+  Widget _buildSidebarBrandLogoIcon({bool showExpandCue = false}) {
+    final logoBox = Container(
+      width: 40,
+      height: 40,
+      decoration: BoxDecoration(
+        color: AppColors.primary,
+        borderRadius: BorderRadius.circular(11),
+      ),
+      child: const Icon(
+        Icons.account_balance_wallet_rounded,
+        color: Colors.white,
+        size: 22,
+      ),
+    );
+
+    if (!showExpandCue) return logoBox;
+
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        logoBox,
+        Positioned(
+          right: -6,
+          bottom: -4,
+          child: Container(
+            width: 18,
+            height: 18,
+            decoration: BoxDecoration(
+              color: AppColors.slate800,
+              shape: BoxShape.circle,
+              border: Border.all(color: AppColors.slate600, width: 1.2),
+            ),
+            child: const Icon(
+              Icons.chevron_right_rounded,
+              key: ValueKey('admin_sidebar_chevron_expand'),
+              size: 13,
+              color: Colors.white,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildSidebarContent({
     required String adminName,
     required String adminEmail,
     required bool closeDrawerOnTap,
+    required bool isCollapsed,
+    required bool allowCollapseToggle,
   }) {
     return Container(
       color: AppColors.slate900,
       child: SafeArea(
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(20, 22, 20, 18),
-              child: Row(
-                children: [
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      color: AppColors.primary,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: const Icon(
-                      Icons.admin_panel_settings_rounded,
-                      color: Colors.white,
-                      size: 22,
-                    ),
+        child: LayoutBuilder(
+          builder: (context, sideConstraints) {
+            // Neo cố định tọa độ trục dọc của Logo (x = 18px) và các Icon điều hướng (x = 28px)
+            // trong suốt quá trình thu phóng 76px <-> 264px để hoàn toàn không bị giật hay nhảy vị trí.
+            final showExpandedLabels =
+                !isCollapsed && (!allowCollapseToggle || sideConstraints.maxWidth >= 145);
+            final textAreaWidth =
+                (sideConstraints.maxWidth - 78).clamp(0.0, 186.0);
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 12,
                   ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Finance AI',
-                          style: GoogleFonts.inter(
-                            fontSize: 16,
-                            fontWeight: FontWeight.w700,
-                            color: Colors.white,
-                          ),
-                        ),
-                        Text(
-                          'Admin Web Portal',
-                          style: GoogleFonts.inter(
-                            fontSize: 11.5,
-                            color: AppColors.slate400,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            const Divider(color: AppColors.slate700, height: 1),
-            const SizedBox(height: 12),
-            Expanded(
-              child: ListView.builder(
-                padding: const EdgeInsets.symmetric(horizontal: 12),
-                itemCount: _navItems.length,
-                itemBuilder: (context, index) {
-                  final item = _navItems[index];
-                  final isSelected = _selectedIndex == index;
-                  return Padding(
-                    padding: const EdgeInsets.only(bottom: 4),
+                  child: Tooltip(
+                    message: allowCollapseToggle
+                        ? (isCollapsed
+                            ? 'Mở rộng thanh điều hướng'
+                            : 'Thu gọn thanh điều hướng')
+                        : 'Finance AI Admin Web Portal',
+                    waitDuration: const Duration(milliseconds: 220),
                     child: Material(
-                      color: isSelected
-                          ? AppColors.primary
-                          : Colors.transparent,
-                      borderRadius: BorderRadius.circular(10),
+                      color: Colors.transparent,
+                      borderRadius: BorderRadius.circular(12),
                       child: InkWell(
-                        key: ValueKey('admin_nav_tab_$index'),
-                        borderRadius: BorderRadius.circular(10),
-                        onTap: () {
-                          setState(() => _selectedIndex = index);
-                          if (closeDrawerOnTap && Navigator.canPop(context)) {
-                            Navigator.pop(context);
-                          }
-                        },
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 14,
-                            vertical: 12,
+                        key: const ValueKey('admin_sidebar_logo_toggle'),
+                        borderRadius: BorderRadius.circular(12),
+                        mouseCursor: allowCollapseToggle
+                            ? SystemMouseCursors.click
+                            : SystemMouseCursors.basic,
+                        hoverColor: AppColors.slate800,
+                        highlightColor:
+                            AppColors.slate800.withValues(alpha: 0.85),
+                        splashColor: AppColors.primary.withValues(alpha: 0.18),
+                        onTap: allowCollapseToggle
+                            ? () {
+                                setState(() {
+                                  _isSidebarCollapsed = !_isSidebarCollapsed;
+                                });
+                              }
+                            : null,
+                        child: SizedBox(
+                          height: 48,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(horizontal: 8),
+                            child: Row(
+                              children: [
+                                _buildSidebarBrandLogoIcon(
+                                  showExpandCue:
+                                      allowCollapseToggle && !showExpandedLabels,
+                                ),
+                                if (showExpandedLabels &&
+                                    textAreaWidth > 20) ...[
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: ClipRect(
+                                      child: Row(
+                                        children: [
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment:
+                                                  CrossAxisAlignment.start,
+                                              mainAxisAlignment:
+                                                  MainAxisAlignment.center,
+                                              mainAxisSize: MainAxisSize.min,
+                                              children: [
+                                                Text(
+                                                  'Finance AI',
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: GoogleFonts.inter(
+                                                    fontSize: 16,
+                                                    fontWeight: FontWeight.w700,
+                                                    color: Colors.white,
+                                                  ),
+                                                ),
+                                                Text(
+                                                  'Admin Web Portal',
+                                                  maxLines: 1,
+                                                  overflow:
+                                                      TextOverflow.ellipsis,
+                                                  style: GoogleFonts.inter(
+                                                    fontSize: 11.5,
+                                                    color: AppColors.slate400,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          if (allowCollapseToggle &&
+                                              sideConstraints.maxWidth >=
+                                                  210) ...[
+                                            const SizedBox(width: 6),
+                                            Container(
+                                              width: 26,
+                                              height: 26,
+                                              decoration: BoxDecoration(
+                                                color: AppColors.slate800,
+                                                borderRadius:
+                                                    BorderRadius.circular(7),
+                                                border: Border.all(
+                                                  color: AppColors.slate700,
+                                                ),
+                                              ),
+                                              child: const Icon(
+                                                Icons.chevron_left_rounded,
+                                                key: ValueKey(
+                                                  'admin_sidebar_chevron_collapse',
+                                                ),
+                                                size: 18,
+                                                color: AppColors.slate300,
+                                              ),
+                                            ),
+                                          ],
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ],
+                            ),
                           ),
-                          child: Row(
-                            children: [
-                              Icon(
-                                isSelected
-                                    ? item['activeIcon'] as IconData
-                                    : item['icon'] as IconData,
-                                size: 20,
-                                color: isSelected
-                                    ? Colors.white
-                                    : AppColors.slate400,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                const Divider(color: AppColors.slate700, height: 1),
+                const SizedBox(height: 12),
+                Expanded(
+                  child: ListView.builder(
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                    itemCount: _navItems.length,
+                    itemBuilder: (context, index) {
+                      final item = _navItems[index];
+                      final title = item['title'] as String;
+                      final isSelected = _selectedIndex == index;
+                      final iconData = isSelected
+                          ? item['activeIcon'] as IconData
+                          : item['icon'] as IconData;
+
+                      Widget navButton = Material(
+                        color: isSelected
+                            ? AppColors.primary
+                            : Colors.transparent,
+                        borderRadius: BorderRadius.circular(10),
+                        child: InkWell(
+                          key: ValueKey('admin_nav_tab_$index'),
+                          borderRadius: BorderRadius.circular(10),
+                          hoverColor: isSelected
+                              ? AppColors.primary.withValues(alpha: 0.9)
+                              : AppColors.slate800,
+                          onTap: () {
+                            setState(() => _selectedIndex = index);
+                            if (closeDrawerOnTap &&
+                                Navigator.canPop(context)) {
+                              Navigator.pop(context);
+                            }
+                          },
+                          child: SizedBox(
+                            height: 46,
+                            child: Padding(
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 14),
+                              child: Row(
+                                children: [
+                                  index == _supportTabIndex &&
+                                          !showExpandedLabels
+                                      ? StreamBuilder<int>(
+                                          stream: _supportUnreadCountStream,
+                                          builder: (context, snap) {
+                                            final unread = snap.data ?? 0;
+                                            return Stack(
+                                              clipBehavior: Clip.none,
+                                              children: [
+                                                Icon(
+                                                  iconData,
+                                                  size: 20,
+                                                  color: isSelected
+                                                      ? Colors.white
+                                                      : AppColors.slate400,
+                                                ),
+                                                if (unread > 0)
+                                                  Positioned(
+                                                    right: -8,
+                                                    top: -6,
+                                                    child: Container(
+                                                      key: const ValueKey(
+                                                        'admin_support_sidebar_badge',
+                                                      ),
+                                                      padding: const EdgeInsets
+                                                          .symmetric(
+                                                        horizontal: 5,
+                                                        vertical: 1.5,
+                                                      ),
+                                                      decoration: BoxDecoration(
+                                                        color:
+                                                            AppColors.expense,
+                                                        borderRadius:
+                                                            BorderRadius
+                                                                .circular(999),
+                                                      ),
+                                                      child: Text(
+                                                        unread > 49
+                                                            ? '49+'
+                                                            : '$unread',
+                                                        style: const TextStyle(
+                                                          color: Colors.white,
+                                                          fontSize: 9.5,
+                                                          fontWeight:
+                                                              FontWeight.w700,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                              ],
+                                            );
+                                          },
+                                        )
+                                      : Icon(
+                                          iconData,
+                                          size: 20,
+                                          color: isSelected
+                                              ? Colors.white
+                                              : AppColors.slate400,
+                                        ),
+                                  if (showExpandedLabels) ...[
+                                    const SizedBox(width: 12),
+                                    Expanded(
+                                      child: Text(
+                                        title,
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: GoogleFonts.inter(
+                                          fontSize: 13.5,
+                                          fontWeight: isSelected
+                                              ? FontWeight.w600
+                                              : FontWeight.w500,
+                                          color: isSelected
+                                              ? Colors.white
+                                              : AppColors.slate300,
+                                        ),
+                                      ),
+                                    ),
+                                    if (index == _supportTabIndex &&
+                                        sideConstraints.maxWidth >= 210)
+                                      StreamBuilder<int>(
+                                        stream: _supportUnreadCountStream,
+                                        builder: (context, snap) {
+                                          final unread = snap.data ?? 0;
+                                          if (unread <= 0) {
+                                            return const SizedBox.shrink();
+                                          }
+                                          return Container(
+                                            key: const ValueKey(
+                                              'admin_support_sidebar_badge',
+                                            ),
+                                            padding: const EdgeInsets.symmetric(
+                                              horizontal: 7,
+                                              vertical: 2,
+                                            ),
+                                            decoration: BoxDecoration(
+                                              color: AppColors.expense,
+                                              borderRadius:
+                                                  BorderRadius.circular(999),
+                                            ),
+                                            child: Text(
+                                              unread > 49 ? '49+' : '$unread',
+                                              style: const TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 10.5,
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                                  ],
+                                ],
                               ),
-                              const SizedBox(width: 12),
+                            ),
+                          ),
+                        ),
+                      );
+
+                      if (!showExpandedLabels) {
+                        navButton = Tooltip(
+                          message: title,
+                          preferBelow: false,
+                          waitDuration: const Duration(milliseconds: 120),
+                          child: navButton,
+                        );
+                      }
+
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: navButton,
+                      );
+                    },
+                  ),
+                ),
+                if (showExpandedLabels && sideConstraints.maxWidth >= 220)
+                  Padding(
+                    key: const ValueKey('admin_sidebar_privacy_card'),
+                    padding: const EdgeInsets.all(14),
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: AppColors.slate800,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: AppColors.slate700),
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.privacy_tip_outlined,
+                                size: 16,
+                                color: AppColors.secondary,
+                              ),
+                              const SizedBox(width: 6),
                               Expanded(
                                 child: Text(
-                                  item['title'] as String,
+                                  'Bảo mật Dữ liệu Riêng tư',
                                   style: GoogleFonts.inter(
-                                    fontSize: 13.5,
-                                    fontWeight: isSelected
-                                        ? FontWeight.w600
-                                        : FontWeight.w500,
-                                    color: isSelected
-                                        ? Colors.white
-                                        : AppColors.slate300,
+                                    fontSize: 11.5,
+                                    fontWeight: FontWeight.w700,
+                                    color: Colors.white,
                                   ),
+                                  overflow: TextOverflow.ellipsis,
                                 ),
                               ),
                             ],
                           ),
-                        ),
-                      ),
-                    ),
-                  );
-                },
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.all(14),
-              child: Container(
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: AppColors.slate800,
-                  borderRadius: BorderRadius.circular(10),
-                  border: Border.all(color: AppColors.slate700),
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        const Icon(
-                          Icons.privacy_tip_outlined,
-                          size: 16,
-                          color: AppColors.secondary,
-                        ),
-                        const SizedBox(width: 6),
-                        Expanded(
-                          child: Text(
-                            'Bảo mật Dữ liệu Riêng tư',
+                          const SizedBox(height: 4),
+                          Text(
+                            'Admin không truy cập ví, giao dịch, ngân sách, mục tiêu tiết kiệm hay nội dung chat AI của User.',
                             style: GoogleFonts.inter(
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w700,
-                              color: Colors.white,
+                              fontSize: 11,
+                              color: AppColors.slate400,
+                              height: 1.35,
                             ),
-                            overflow: TextOverflow.ellipsis,
                           ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      'Admin không truy cập ví, giao dịch, ngân sách, mục tiêu tiết kiệm hay nội dung chat AI của User.',
-                      style: GoogleFonts.inter(
-                        fontSize: 11,
-                        color: AppColors.slate400,
-                        height: 1.35,
+                        ],
                       ),
                     ),
-                  ],
-                ),
-              ),
-            ),
-          ],
+                  ),
+              ],
+            );
+          },
         ),
       ),
     );
@@ -547,69 +812,44 @@ class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
   Widget _buildActiveView({
     required String adminUid,
     required String adminEmail,
+    required String adminName,
   }) {
     switch (_selectedIndex) {
       case 0:
         return AdminOverviewView(
           adminService: _adminService,
           onNavigateTab: (idx) => setState(() => _selectedIndex = idx),
-          onOpenKnowledgeBase: () => setState(() {
-            _rulesKnowledgeSubTabIndex = 1;
-            _selectedIndex = 2;
-          }),
-          onOpenPlatformOpsSubTab: (subIdx) => setState(() {
-            _platformOpsSubTabIndex = subIdx;
-            _selectedIndex = 5;
-          }),
         );
       case 1:
-        return AdminAiStudioView(
-          adminWebService: _adminService,
-          currentAdminUid: adminUid,
-          currentAdminEmail: adminEmail,
-          sandboxService: widget.sandboxService,
-          tokenClaimsOverride: widget.tokenClaimsOverride,
-        );
-      case 2:
-        return AdminRulesKnowledgeView(
-          adminWebService: _adminService,
-          currentAdminUid: adminUid,
-          currentAdminEmail: adminEmail,
-          sandboxService: widget.sandboxService,
-          tokenClaimsOverride: widget.tokenClaimsOverride,
-          initialSubTabIndex: _rulesKnowledgeSubTabIndex,
-        );
-      case 3:
-        return AdminOcrDictionaryView(
-          adminWebService: _adminService,
-          currentAdminUid: adminUid,
-          currentAdminEmail: adminEmail,
-          tokenClaimsOverride: widget.tokenClaimsOverride,
-          initialCandidateKeyword: _ocrPrefillKeyword,
-        );
-      case 4:
-        return AdminAiFeedbackView(
-          adminWebService: _adminService,
-          currentAdminUid: adminUid,
-          currentAdminEmail: adminEmail,
-          tokenClaimsOverride: widget.tokenClaimsOverride,
-          onOpenOcrDictionary: (kw) => setState(() {
-            _ocrPrefillKeyword = kw;
-            _selectedIndex = 3;
-          }),
-          onOpenAiStudio: () => setState(() => _selectedIndex = 1),
-          onOpenHeuristics: () => setState(() {
-            _rulesKnowledgeSubTabIndex = 0;
-            _selectedIndex = 2;
-          }),
-        );
-      case 5:
-        return AdminPlatformOpsView(
+        return AdminUsersManagementView(
           adminService: _adminService,
           currentAdminUid: adminUid,
           currentAdminEmail: adminEmail,
           tokenClaimsOverride: widget.tokenClaimsOverride,
-          initialSubTabIndex: _platformOpsSubTabIndex,
+        );
+      case 2:
+        return AdminCategoriesManagementView(
+          adminService: _adminService,
+          currentAdminUid: adminUid,
+          currentAdminEmail: adminEmail,
+          tokenClaimsOverride: widget.tokenClaimsOverride,
+        );
+      case 3:
+        return AdminAnnouncementsView(
+          adminService: _adminService,
+          currentAdminUid: adminUid,
+          currentAdminEmail: adminEmail,
+          tokenClaimsOverride: widget.tokenClaimsOverride,
+        );
+      case 4:
+        return AdminAuditLogsView(
+          adminService: _adminService,
+        );
+      case _supportTabIndex:
+        return AdminSupportCenterView(
+          supportService: _supportService,
+          currentAdminUid: adminUid,
+          currentAdminName: adminName,
         );
       default:
         return AdminOverviewView(
