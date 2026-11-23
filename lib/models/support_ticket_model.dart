@@ -171,6 +171,7 @@ enum SupportTicketStatus {
   /// Admin gửi phản hồi / yêu cầu bổ sung / đánh dấu giải quyết trên các yêu cầu đang xử lý
   bool get canAdminReply => isActiveWork;
   bool get canAdminMarkResolved => isActiveWork;
+  bool get canAdminReopenResolved => this == SupportTicketStatus.resolved;
   bool get canAdminCloseResolved => this == SupportTicketStatus.resolved;
   bool get canAdminCloseUnresolved => isActiveWork;
 

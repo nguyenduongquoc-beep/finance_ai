@@ -258,7 +258,8 @@ Future<AdminCloudResponse> sendAdminCloudRequest({
   } on http.ClientException catch (e) {
     return AdminCloudResponse(
       statusCode: 0,
-      error: 'Lỗi kết nối mạng tới Cloud Functions: ${e.message}',
+      error:
+          'Không thể kết nối Cloud Functions (${e.message}). Kiểm tra xem Cloud Functions đã được deploy lên Firebase hay đã bật Functions Emulator (--dart-define=USE_FIREBASE_EMULATOR=true).',
       errorKind: AdminCloudErrorKind.network,
     );
   } catch (e) {

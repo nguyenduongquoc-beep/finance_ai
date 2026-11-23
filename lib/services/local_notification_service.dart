@@ -897,6 +897,54 @@ class LocalNotificationService {
     }
   }
 
+  static const int maxTotalNotifications = 50;
+
+  /// Logic thuần Dart: Gom toàn bộ thông báo ứng viên trong [maxDaysAhead] ngày tới
+  /// của TẤT CẢ các lịch đang hoạt động, sắp xếp tăng dần theo `scheduledTime`
+  /// rồi mới cắt lấy tối đa [maxTotal] (mặc định 50) thông báo gần nhất.
+  /// Nhờ đó lịch hàng tuần sẽ không chiếm hết slot của các lịch đứng sau.
+  static List<ScheduledNotificationItem> selectFairScheduledNotifications({
+    required List<RecurringTransactionSchedule> schedules,
+    required Map<String, String> walletNamesMap,
+    DateTime? referenceDate,
+    int maxDaysAhead = 90,
+    int maxTotal = maxTotalNotifications,
+  }) {
+    if (maxTotal <= 0) return const [];
+    final now = referenceDate ?? DateTime.now();
+    final allCandidates = <ScheduledNotificationItem>[];
+
+    for (final schedule in schedules) {
+      if (!schedule.isActive) continue;
+      final walletName = walletNamesMap[schedule.walletId];
+      allCandidates.addAll(
+        calculateScheduledNotifications(
+          schedule: schedule,
+          walletName: walletName,
+          referenceDate: now,
+          maxDaysAhead: maxDaysAhead,
+        ),
+      );
+    }
+
+    allCandidates.sort((a, b) {
+      final timeCmp = a.scheduledTime.compareTo(b.scheduledTime);
+      if (timeCmp != 0) return timeCmp;
+      // Ưu tiên nhắc đúng hạn trước nhắc sớm nếu trùng đúng mốc thời gian
+      if (a.isOnDueDate != b.isOnDueDate) {
+        return a.isOnDueDate ? -1 : 1;
+      }
+      final schedCmp = a.scheduleId.compareTo(b.scheduleId);
+      if (schedCmp != 0) return schedCmp;
+      return a.notificationId.compareTo(b.notificationId);
+    });
+
+    if (allCandidates.length <= maxTotal) {
+      return allCandidates;
+    }
+    return allCandidates.sublist(0, maxTotal);
+  }
+
   String _buildSyncFingerprint({
     required List<RecurringTransactionSchedule> schedules,
     required Map<String, String> walletNamesMap,
@@ -905,13 +953,14 @@ class LocalNotificationService {
       ..sort((a, b) => a.scheduleId.compareTo(b.scheduleId));
     final parts = sorted.map((s) {
       final wName = walletNamesMap[s.walletId] ?? '';
-      return '${s.scheduleId}|${s.isActive}|${s.postingMode}|${s.nextDueDate.toIso8601String()}|${s.reminderDaysBefore}|${s.amount}|${s.note ?? ''}|$wName';
+      return '${s.scheduleId}|${s.isActive}|${s.postingMode}|${s.frequency}|${s.walletId}|${s.nextDueDate.toIso8601String()}|${s.reminderDaysBefore}|${s.amount}|${s.note ?? ''}|$wName';
     }).join(';');
     final todayKey = RecurringTransactionService.getOccurrenceKey(DateTime.now());
     return '${LanguageController.currentLanguageCode}|$todayKey|$parts';
   }
 
-  /// Đồng bộ toàn bộ thông báo cho danh sách tất cả các lịch lặp của user (tối đa 50)
+  /// Đồng bộ toàn bộ thông báo cho danh sách tất cả các lịch lặp của user (tối đa 50,
+  /// phân bổ công bằng theo thời gian gần nhất trên toàn bộ lịch đang bật).
   Future<void> syncAllReminders({
     required List<RecurringTransactionSchedule> schedules,
     required Map<String, String> walletNamesMap,
@@ -971,37 +1020,32 @@ class LocalNotificationService {
       } catch (_) {}
 
       final scheduleMode = await _resolveAndroidScheduleMode();
-      int scheduledCount = 0;
-      const int maxTotalNotifications = 50; // Giới hạn tổng số thông báo
 
+      // 1. Kiểm tra & phát bù thông báo trong ngày / trong cửa sổ ân hạn cho mọi lịch bật
       for (final schedule in schedules) {
         if (!schedule.isActive) continue;
-
-        final walletName = walletNamesMap[schedule.walletId];
-
         await _notifySameDayOrActiveGraceOnceIfNeeded(
           schedule: schedule,
-          walletName: walletName,
+          walletName: walletNamesMap[schedule.walletId],
           now: now,
         );
+      }
 
-        if (scheduledCount >= maxTotalNotifications) continue;
+      // 2. Gom tất cả ứng viên trong 90 ngày tới, sắp xếp tăng dần theo scheduledTime
+      // rồi cắt lấy tối đa 50 thông báo gần nhất để lập lịch công bằng lên OS.
+      final fairItems = selectFairScheduledNotifications(
+        schedules: schedules,
+        walletNamesMap: walletNamesMap,
+        referenceDate: now,
+        maxDaysAhead: 90,
+        maxTotal: maxTotalNotifications,
+      );
 
-        final items = calculateScheduledNotifications(
-          schedule: schedule,
-          walletName: walletName,
-          referenceDate: now,
+      for (final item in fairItems) {
+        await _zonedScheduleWithFallback(
+          item: item,
+          preferredMode: scheduleMode,
         );
-
-        for (final item in items) {
-          if (scheduledCount >= maxTotalNotifications) break;
-
-          await _zonedScheduleWithFallback(
-            item: item,
-            preferredMode: scheduleMode,
-          );
-          scheduledCount++;
-        }
       }
       if (referenceDate == null) {
         _lastSyncedFingerprint = fingerprint;

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../l10n/app_localizations.dart';
 import '../../models/user_model.dart';
 import '../../services/auth_service.dart';
@@ -8,6 +9,7 @@ import '../../services/firestore_service.dart';
 import '../../utils/constants.dart';
 import '../../widgets/app_button.dart';
 import '../../widgets/app_text_field.dart';
+import '../../widgets/locked_account_view.dart';
 import '../../widgets/main_navigation.dart';
 import '../setup/wallet_setup_screen.dart';
 import 'register_screen.dart';
@@ -15,7 +17,20 @@ import 'forgot_password_screen.dart';
 
 /// Login Screen - Đăng nhập bằng Email hoặc Google
 class LoginScreen extends StatefulWidget {
-  const LoginScreen({super.key});
+  static const String rememberedEmailKey = 'remembered_login_email';
+
+  final AuthService? authService;
+  final FirestoreService? firestoreService;
+  final WidgetBuilder? homeRouteBuilder;
+  final WidgetBuilder? walletSetupRouteBuilder;
+
+  const LoginScreen({
+    super.key,
+    this.authService,
+    this.firestoreService,
+    this.homeRouteBuilder,
+    this.walletSetupRouteBuilder,
+  });
 
   @override
   State<LoginScreen> createState() => _LoginScreenState();
@@ -25,12 +40,62 @@ class _LoginScreenState extends State<LoginScreen> {
   final _formKey = GlobalKey<FormState>();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
-  final _authService = AuthService();
+  late final AuthService _authService;
 
   bool _isLoading = false;
   bool _obscurePassword = true;
   bool _rememberMe = false;
   String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _authService = widget.authService ?? AuthService();
+    _loadRememberedEmail();
+  }
+
+  @override
+  void dispose() {
+    _emailController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _loadRememberedEmail() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedEmail = prefs.getString(LoginScreen.rememberedEmailKey);
+      if (!mounted) return;
+      if (savedEmail != null && savedEmail.trim().isNotEmpty) {
+        setState(() {
+          _emailController.text = savedEmail.trim();
+          _rememberMe = true;
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _persistRememberMePreference(String email) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (_rememberMe && email.isNotEmpty) {
+        // Chỉ lưu địa chỉ email, tuyệt đối không lưu mật khẩu.
+        await prefs.setString(LoginScreen.rememberedEmailKey, email);
+      } else {
+        await prefs.remove(LoginScreen.rememberedEmailKey);
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _toggleRememberMe(bool value) async {
+    setState(() => _rememberMe = value);
+    if (!value) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove(LoginScreen.rememberedEmailKey);
+      } catch (_) {}
+    }
+  }
 
   Future<void> _handleLogin() async {
     if (!_formKey.currentState!.validate()) return;
@@ -39,26 +104,71 @@ class _LoginScreenState extends State<LoginScreen> {
       _errorMessage = null;
     });
     try {
+      final trimmedEmail = _emailController.text.trim();
       final credential = await _authService.loginWithEmail(
-        email: _emailController.text.trim(),
+        email: trimmedEmail,
         password: _passwordController.text,
       );
       final user = credential.user;
       if (user != null) {
-        final firestore = FirestoreService();
-        final profile = await firestore.getUserProfile(user.uid);
+        final firestore = widget.firestoreService ?? FirestoreService();
+        final profile = await firestore.getUserProfile(
+          user.uid,
+          includePrivateFinancial: false,
+        );
         if (profile != null && profile.isLocked) {
           await _authService.signOut();
           if (!mounted) return;
           setState(() {
-            _errorMessage = AppLocalizations.tr('auth_err_locked');
+            _errorMessage = formatLockedAccountLoginError(profile);
           });
+          return;
+        }
+        if (profile == null) {
+          final displayName = (user.displayName?.trim().isNotEmpty == true)
+              ? user.displayName!.trim()
+              : AppLocalizations.tr('common_user');
+          final now = DateTime.now();
+          await firestore.createUserProfile(
+            AppUser(
+              uid: user.uid,
+              name: displayName,
+              email: user.email ?? trimmedEmail,
+              role: 'user',
+              status: 'active',
+              authProvider: 'password',
+              createdAt: now,
+              lastActiveAt: now,
+            ),
+          );
+        } else {
+          await firestore.touchUserPresenceAndProvider(
+            uid: user.uid,
+            authProvider: _authService.authProviderCode,
+          );
+        }
+
+        await _persistRememberMePreference(trimmedEmail);
+
+        final wallets = await firestore.getWalletsSafely(user.uid);
+        if (!mounted) return;
+        if (wallets.isEmpty) {
+          Navigator.of(context).pushAndRemoveUntil(
+            MaterialPageRoute(
+              builder: widget.walletSetupRouteBuilder ??
+                  (_) => const WalletSetupScreen(),
+            ),
+            (route) => false,
+          );
           return;
         }
       }
       if (!mounted) return;
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const MainNavigation()),
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(
+          builder: widget.homeRouteBuilder ?? (_) => const MainNavigation(),
+        ),
+        (route) => false,
       );
     } on FirebaseAuthException catch (e) {
       if (e.code == 'user-disabled') {
@@ -85,13 +195,16 @@ class _LoginScreenState extends State<LoginScreen> {
       if (credential == null || !mounted) return;
 
       final user = credential.user!;
-      final firestore = FirestoreService();
-      final profile = await firestore.getUserProfile(user.uid);
+      final firestore = widget.firestoreService ?? FirestoreService();
+      final profile = await firestore.getUserProfile(
+        user.uid,
+        includePrivateFinancial: false,
+      );
       if (profile != null && profile.isLocked) {
         await _authService.signOut();
         if (!mounted) return;
         setState(() {
-          _errorMessage = AppLocalizations.tr('auth_err_locked');
+          _errorMessage = formatLockedAccountLoginError(profile);
         });
         return;
       }
@@ -100,25 +213,40 @@ class _LoginScreenState extends State<LoginScreen> {
         final displayName = (user.displayName?.trim().isNotEmpty == true)
             ? user.displayName!.trim()
             : AppLocalizations.tr('common_user');
+        final now = DateTime.now();
         await firestore.createUserProfile(
           AppUser(
             uid: user.uid,
             name: displayName,
             email: user.email ?? '',
-            createdAt: DateTime.now(),
+            authProvider: 'google',
+            createdAt: now,
+            lastActiveAt: now,
           ),
+        );
+      } else {
+        await firestore.touchUserPresenceAndProvider(
+          uid: user.uid,
+          authProvider: _authService.authProviderCode,
         );
       }
 
       final wallets = await firestore.getWalletsSafely(user.uid);
       if (!mounted) return;
       if (wallets.isEmpty) {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const WalletSetupScreen()),
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(
+            builder: widget.walletSetupRouteBuilder ??
+                (_) => const WalletSetupScreen(),
+          ),
+          (route) => false,
         );
       } else {
-        Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const MainNavigation()),
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(
+            builder: widget.homeRouteBuilder ?? (_) => const MainNavigation(),
+          ),
+          (route) => false,
         );
       }
     } on FirebaseAuthException catch (e) {
@@ -230,37 +358,42 @@ class _LoginScreenState extends State<LoginScreen> {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Expanded(
-                        child: Row(
-                          children: [
-                            SizedBox(
-                              width: 24,
-                              height: 24,
-                              child: Checkbox(
-                                value: _rememberMe,
-                                activeColor: AppColors.primary,
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(4),
-                                ),
-                                side: BorderSide(
-                                    color: context.appBorder, width: 1.5),
-                                onChanged: (v) =>
-                                    setState(() => _rememberMe = v ?? false),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            Flexible(
-                              child: Text(
-                                context.tr('auth_remember_me'),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: GoogleFonts.inter(
-                                  fontSize: 13,
-                                  color: context.appTextSecondary,
-                                  fontWeight: FontWeight.w500,
+                        child: InkWell(
+                          onTap: () => _toggleRememberMe(!_rememberMe),
+                          borderRadius: BorderRadius.circular(6),
+                          child: Row(
+                            children: [
+                              SizedBox(
+                                width: 24,
+                                height: 24,
+                                child: Checkbox(
+                                  key: const ValueKey('login_remember_me_checkbox'),
+                                  value: _rememberMe,
+                                  activeColor: AppColors.primary,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(4),
+                                  ),
+                                  side: BorderSide(
+                                      color: context.appBorder, width: 1.5),
+                                  onChanged: (v) =>
+                                      _toggleRememberMe(v ?? false),
                                 ),
                               ),
-                            ),
-                          ],
+                              const SizedBox(width: 8),
+                              Flexible(
+                                child: Text(
+                                  context.tr('auth_remember_me'),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: GoogleFonts.inter(
+                                    fontSize: 13,
+                                    color: context.appTextSecondary,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                       const SizedBox(width: 8),

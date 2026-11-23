@@ -618,7 +618,7 @@ void main() {
 
   group('6. updateUserProfile kích hoạt FinancialContextRevisionTracker', () {
     test(
-      'Cập nhật monthlyIncome qua FirestoreService.updateUserProfile tăng localMutationVersion',
+      'Cập nhật monthlyIncome qua FirestoreService.updateUserProfile di trú sang users/{uid}/private/financial_profile, xóa trường cũ trên root và tăng localMutationVersion',
       () async {
         final fakeFirestore = FakeFirebaseFirestore();
         final firestoreService = FirestoreService(firestore: fakeFirestore);
@@ -628,6 +628,10 @@ void main() {
           'email': 'tester@example.com',
           'monthlyIncome': 12000000,
         });
+
+        // Tương thích ngược: đọc được giá trị cũ trước khi di trú
+        final legacyProfile = await firestoreService.getUserProfile('u1');
+        expect(legacyProfile?.monthlyIncome, equals(12000000.0));
 
         final beforeVersion =
             FinancialContextRevisionTracker.localMutationVersion;
@@ -641,9 +645,20 @@ void main() {
           equals(beforeVersion + 1),
         );
 
-        final updatedDoc =
-            await fakeFirestore.collection('users').doc('u1').get();
-        expect(updatedDoc.data()?['monthlyIncome'], equals(25000000.0));
+        // Trường tài chính lưu riêng ở subcollection private và đã bị xóa khỏi root users/{uid}
+        final rootDoc = await fakeFirestore.collection('users').doc('u1').get();
+        expect(rootDoc.data()?.containsKey('monthlyIncome'), isFalse);
+
+        final privateDoc = await fakeFirestore
+            .collection('users')
+            .doc('u1')
+            .collection('private')
+            .doc('financial_profile')
+            .get();
+        expect(privateDoc.data()?['monthlyIncome'], equals(25000000.0));
+
+        final migratedProfile = await firestoreService.getUserProfile('u1');
+        expect(migratedProfile?.monthlyIncome, equals(25000000.0));
       },
     );
   });

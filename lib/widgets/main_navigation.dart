@@ -12,10 +12,22 @@ import '../screens/home/transaction_list_screen.dart';
 import '../screens/home/add_transaction_screen.dart';
 import '../screens/ai/ai_insight_screen.dart';
 import '../screens/profile_screen.dart';
+import 'locked_account_view.dart';
 
 /// Main Navigation 5 tab chuẩn Fintech
 class MainNavigation extends StatefulWidget {
-  const MainNavigation({super.key});
+  final FirestoreService? firestoreService;
+  final AuthService? authService;
+  final String? userIdOverride;
+  final Future<void> Function()? customSignOutHandler;
+
+  const MainNavigation({
+    super.key,
+    this.firestoreService,
+    this.authService,
+    this.userIdOverride,
+    this.customSignOutHandler,
+  });
 
   @override
   State<MainNavigation> createState() => _MainNavigationState();
@@ -23,16 +35,30 @@ class MainNavigation extends StatefulWidget {
 
 class _MainNavigationState extends State<MainNavigation> {
   int _currentIndex = 0;
-  final FirestoreService _firestoreService = FirestoreService();
-  final AuthService _authService = AuthService();
+  late final FirestoreService _firestoreService;
+  late final AuthService _authService;
+  late final String _uid;
+  late final Stream<AppUser?>? _userProfileStream;
 
   @override
   void initState() {
     super.initState();
+    _firestoreService = widget.firestoreService ?? FirestoreService();
+    _authService = widget.authService ?? AuthService();
+    _uid = widget.userIdOverride ?? FirebaseAuth.instance.currentUser?.uid ?? '';
+    _userProfileStream =
+        _uid.isNotEmpty ? _firestoreService.streamUserProfile(_uid) : null;
+
     LocalNotificationService.isAppReadyForDeepLink = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
       LocalNotificationService().consumePendingPayloadIfAny();
+      if (_uid.isNotEmpty && widget.userIdOverride == null) {
+        _firestoreService.touchUserPresenceAndProvider(
+          uid: _uid,
+          authProvider: _authService.authProviderCode,
+        );
+      }
     });
   }
 
@@ -120,66 +146,35 @@ class _MainNavigationState extends State<MainNavigation> {
 
   @override
   Widget build(BuildContext context) {
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
     final isKeyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
     final hideBottomNav = isKeyboardOpen && _currentIndex == 3;
 
     return StreamBuilder<AppUser?>(
-      stream: uid.isNotEmpty ? _firestoreService.streamUserProfile(uid) : null,
+      stream: _userProfileStream,
       builder: (context, snapshot) {
+        if (_userProfileStream != null &&
+            snapshot.connectionState == ConnectionState.waiting &&
+            !snapshot.hasData) {
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        }
         final appUser = snapshot.data;
         if (appUser != null && appUser.isLocked) {
-          return Scaffold(
-            body: Center(
-              child: Padding(
-                padding: const EdgeInsets.all(32),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(
-                      Icons.lock_person_rounded,
-                      size: 64,
-                      color: AppColors.expense,
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      context.tr('nav_locked_title'),
-                      style: const TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
-                      ),
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 8),
-                    Text(
-                      context.tr(
-                        'nav_locked_body',
-                        params: {'email': appUser.email},
-                      ),
-                      textAlign: TextAlign.center,
-                      style: TextStyle(
-                        fontSize: 13.5,
-                        color: context.appTextSecondary,
-                      ),
-                    ),
-                    const SizedBox(height: 24),
-                    FilledButton.icon(
-                      onPressed: () async {
-                        await _authService.signOut();
-                        if (!context.mounted) return;
-                        Navigator.of(context).pushAndRemoveUntil(
-                          MaterialPageRoute(
-                              builder: (_) => const LoginScreen()),
-                          (route) => false,
-                        );
-                      },
-                      icon: const Icon(Icons.logout_rounded),
-                      label: Text(context.tr('nav_locked_logout')),
-                    ),
-                  ],
-                ),
-              ),
-            ),
+          return LockedAccountView(
+            user: appUser,
+            onSignOut: () async {
+              if (widget.customSignOutHandler != null) {
+                await widget.customSignOutHandler!();
+              } else {
+                await _authService.signOut();
+              }
+              if (!context.mounted) return;
+              Navigator.of(context).pushAndRemoveUntil(
+                MaterialPageRoute(builder: (_) => const LoginScreen()),
+                (route) => false,
+              );
+            },
           );
         }
 

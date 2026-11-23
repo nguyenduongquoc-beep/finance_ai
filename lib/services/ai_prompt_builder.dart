@@ -22,7 +22,7 @@ class AiPromptBuilder {
   static final RegExp _unformattedCurrencyRegex = RegExp(
     r'(?<![\d.,])([1-9]\d{3,})(\s*(?:đồng|vnđ|vnd|đ|₫))(?=$|[\s.,;:!?()\[\]/"'
     "'"
-    r'…\-])',
+    r'…\-*_])',
     caseSensitive: false,
   );
 
@@ -1264,16 +1264,17 @@ LƯU Ý: Tuyệt đối không kết luận gian lận, không tư vấn đầu 
             contextData.contains('còn thiếu') ||
             contextData.contains('short '));
 
+    final isEn = LanguageController.isEnglish;
     final knowledgeSnippets = FinancialKnowledgeArticle.selectSnippetsForPrompt(
       isLowSavingRate: detectedLowSaving,
       isEssentialDeficit: detectedDeficit,
       isVariableIncome: detectedVariableIncome,
       hasBudgetOverrun: detectedOverrun,
       isGoalInfeasible: detectedGoalInfeasible,
+      isEnglish: isEn,
       overrideArticles: overrideArticles,
     );
 
-    final isEn = LanguageController.isEnglish;
     final knowledgeBlock = knowledgeSnippets.isNotEmpty
         ? (isEn
             ? '''
@@ -1288,18 +1289,28 @@ ${knowledgeSnippets.join('\n')}
 ''')
         : '';
 
-    final adminChatInstruction = runtimeConfig.chatSystemInstruction.trim();
-    final adminInstructionBlock = adminChatInstruction.isNotEmpty
+    final rawAdminInstruction = runtimeConfig.chatSystemInstruction.trim();
+    final isDefaultInstruction = rawAdminInstruction ==
+            AiRuntimeConfig.defaultChatSystemInstruction.trim() ||
+        rawAdminInstruction ==
+            AiRuntimeConfig.defaultChatSystemInstructionEn.trim();
+    final effectiveAdminInstruction = isDefaultInstruction
+        ? (isEn
+            ? AiRuntimeConfig.defaultChatSystemInstructionEn
+            : AiRuntimeConfig.defaultChatSystemInstruction)
+        : rawAdminInstruction;
+
+    final adminInstructionBlock = effectiveAdminInstruction.isNotEmpty
         ? (isEn
             ? '''
 
 STYLE & ADVISORY FOCUS DIRECTIVES (Apply to tone only; NEVER override principles 1 and 2):
-$adminChatInstruction
+$effectiveAdminInstruction
 '''
             : '''
 
 CHỈ DẪN PHONG CÁCH & TRỌNG TÂM TƯ VẤN (Chỉ áp dụng cho cách diễn đạt, TUYỆT ĐỐI KHÔNG ghi đè nguyên tắc 1 và 2):
-$adminChatInstruction
+$effectiveAdminInstruction
 ''')
         : '';
 

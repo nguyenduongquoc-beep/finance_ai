@@ -251,6 +251,9 @@ class AppLocalizations {
     'app_tagline': 'Quản lý tài chính cá nhân thông minh',
     'nav_locked_title': 'Tài khoản đã bị khóa tạm thời',
     'nav_locked_body': 'Tài khoản {email} hiện đang bị khóa bởi Quản trị viên hệ thống. Vui lòng liên hệ bộ phận hỗ trợ.',
+    'nav_locked_reason_label': 'Lý do khóa',
+    'nav_locked_default_reason': 'Tài khoản tạm thời bị hạn chế theo chính sách vận hành của hệ thống.',
+    'nav_locked_time_label': 'Thời điểm khóa',
     'nav_locked_logout': 'Đăng xuất',
     'forgot_pw_title': 'Quên mật khẩu',
     'forgot_pw_heading': 'Đặt lại mật khẩu',
@@ -269,11 +272,13 @@ class AppLocalizations {
     'rec_perm_notif_btn': 'Bật ngay',
     'rec_perm_exact_off': 'Bật quyền nhắc đúng giờ để thông báo không bị trễ khi app chạy nền.',
     'rec_perm_exact_btn': 'Cho phép',
-    'rec_hero_planned_period': 'Tổng chi định kỳ (đang bật)',
+    'rec_hero_planned_period': 'Ước tính chi định kỳ / tháng',
     'rec_hero_pending_badge': '{count} cần xử lý',
     'rec_hero_active_badge': '{count} lịch bật',
-    'rec_hero_income_sub': 'Dự thu: {amount}',
+    'rec_hero_income_sub': 'Dự thu/tháng: {amount}',
     'rec_hero_active_ratio': 'Đang bật: {active}/{total}',
+    'rec_hero_weekly_converted_note':
+        'Gồm {count} lịch hàng tuần (quy đổi ×4/tháng)',
     'rec_sec_action_title': 'Cần xử lý',
     'rec_sec_action_sub': 'Các kỳ đã đến hạn chờ xác nhận',
     'rec_sec_action_empty': 'Không có khoản đến hạn nào cần xác nhận',
@@ -351,6 +356,8 @@ class AppLocalizations {
     'auth_no_account': 'Chưa có tài khoản? ',
     'auth_register_now': 'Đăng ký ngay',
     'auth_err_locked': 'Tài khoản của bạn đã bị khóa bởi Quản trị viên hệ thống.',
+    'auth_err_locked_with_reason': 'Tài khoản của bạn đã bị khóa. Lý do: {reason}',
+    'auth_err_locked_time_suffix': ' (lúc {time})',
     'auth_err_invalid_creds': 'Email hoặc mật khẩu không đúng.',
     'auth_err_google_failed': 'Đăng nhập Google thất bại.',
     'auth_create_title': 'Tạo tài khoản ✨',
@@ -570,6 +577,8 @@ class AppLocalizations {
     'tx_list_export_text': 'Xuất danh sách {count} giao dịch',
     'tx_list_export_subject': 'Dữ liệu giao dịch',
     'tx_list_export_err': 'Không thể xuất file: {error}',
+    'tx_list_export_empty':
+        'Không có giao dịch nào trong danh sách đang lọc để xuất.',
     'tx_list_title': 'Lịch sử giao dịch',
     'tx_list_export_csv': 'Xuất CSV',
     'tx_list_adv_filter': 'Bộ lọc nâng cao',
@@ -781,7 +790,7 @@ class AppLocalizations {
     'ai_rep_insights_tooltip': 'Phân tích AI chuyên sâu',
     'ai_rep_loading': 'Đang tổng hợp báo cáo AI...',
     'ai_rep_banner_title': 'BÁO CÁO THÁNG {month}/{year}',
-    'ai_rep_ai_generated': 'Tổng hợp bởi AI',
+    'ai_rep_ai_generated': 'Phân tích tự động',
     'ai_rep_total_expense_month': 'Tổng chi tiêu tháng này',
     'ai_rep_net_savings': 'Tiết kiệm ròng',
     'ai_rep_vs_last_month': 'So với tháng trước',
@@ -1077,6 +1086,8 @@ class AppLocalizations {
     'ai_chat_understood': 'Đã hiểu',
     'ai_chat_appbar_title': 'Trợ lý AI Tài chính',
     'ai_chat_status_syncing': 'Đang đồng bộ...',
+    'ai_chat_status_empty': 'Chưa có dữ liệu giao dịch',
+    'ai_chat_status_limited': 'Dữ liệu sơ khởi (hạn chế)',
     'ai_chat_status_starter': 'Dữ liệu mới bắt đầu',
     'ai_chat_status_90d': 'Hiểu dữ liệu 90 ngày',
     'ai_chat_quick_tip': 'Phân tích nhanh',
@@ -1561,6 +1572,8 @@ class AppLocalizations {
         'Kỳ giao dịch này đã được xử lý trước đó.',
     'svc_fs_rec_skipped_note': 'Đã bỏ qua kỳ giao dịch {date}.',
     'svc_fs_rec_deferred_note': 'Đã dời kỳ thanh toán sang ngày {date}.',
+    'svc_fs_rec_defer_invalid_date':
+        'Ngày dời mới phải lớn hơn ngày hôm nay và ngày đến hạn hiện tại.',
     'svc_fs_query_index_err':
         'Truy vấn giao dịch theo khoảng thời gian cần Composite Index (userId ASC, date DESC) trên Firestore. Vui lòng đồng bộ firestore.indexes.json.',
     'svc_fs_plan_conflict':
@@ -1630,6 +1643,7 @@ class AppLocalizations {
     'sec_provider_google': 'Tài khoản Google',
     'sec_provider_email': 'Email & Mật khẩu',
     'sec_verified': 'Đã xác minh',
+    'sec_unverified': 'Chưa xác minh email',
     'sec_google_title': 'Quản lý mật khẩu qua Google',
     'sec_google_desc':
         'Tài khoản này được đăng nhập thông qua xác thực Google ({email}). Ứng dụng không lưu trữ mật khẩu riêng của bạn nhằm tuân thủ quy chuẩn bảo mật OAuth 2.0.',
@@ -1649,6 +1663,25 @@ class AppLocalizations {
     'sec_notice_title': 'Bảo mật dữ liệu',
     'sec_notice_desc':
         'Mọi thao tác thay đổi mật khẩu đều yêu cầu xác thực chính thức với máy chủ. Dữ liệu tài chính của bạn được mã hóa an toàn trên hệ thống đám mây.',
+    'sec_del_title': 'Xóa tài khoản',
+    'sec_del_desc':
+        'Sau khi xóa, tài khoản và toàn bộ dữ liệu tài chính của bạn (ví, giao dịch, ngân sách, mục tiêu) sẽ bị xóa vĩnh viễn và không thể khôi phục.',
+    'sec_del_btn': 'Xóa vĩnh viễn tài khoản',
+    'sec_del_dlg_title': 'Xác nhận xóa tài khoản',
+    'sec_del_dlg_warning':
+        'CẢNH BÁO NGUY HIỂM:\n\n• Tài khoản của bạn sẽ bị xóa vĩnh viễn khỏi hệ thống.\n• Toàn bộ dữ liệu hồ sơ, ví, giao dịch, ngân sách, mục tiêu sẽ được dọn dẹp sạch sẽ.\n• Thao tác này KHÔNG THỂ HOÀN TÁC.',
+    'sec_del_dlg_pwd_prompt': 'Vui lòng nhập mật khẩu hiện tại để xác thực:',
+    'sec_del_dlg_confirm': 'Xóa vĩnh viễn',
+    'sec_del_success': 'Tài khoản của bạn đã được xóa thành công.',
+    'sec_del_cancelled':
+        'Đã hủy xác thực xóa tài khoản. Dữ liệu của bạn vẫn an toàn.',
+    'sec_del_err_failed': 'Không thể xóa tài khoản.',
+    'sec_del_err_wrong_pwd': 'Mật khẩu hiện tại không chính xác.',
+    'sec_del_err_pwd_required':
+        'Vui lòng nhập mật khẩu hiện tại để xác thực trước khi xóa tài khoản.',
+    'sec_del_err_recent_login':
+        'Yêu cầu bảo mật: Vui lòng đăng nhập lại trước khi thực hiện xóa tài khoản.',
+    'sec_del_err_retry': 'Không thể xóa tài khoản. Vui lòng thử lại sau.',
     // Management: Budgets
     'bud_mgmt_title': 'Ngân sách',
     'bud_mgmt_pick_month_title': 'Chọn tháng/năm',
@@ -1929,15 +1962,17 @@ class AppLocalizations {
     'rec_dlg_due_amt': 'Cần thanh toán:',
     'rec_dlg_shortfall': 'Số tiền còn thiếu:',
     'rec_dlg_insuff_hint_alt':
-        'Bạn có thể đổi sang ví khác có đủ số dư hoặc nạp thêm tiền vào ví để xử lý khoản này.',
+        'Bạn có thể trả riêng kỳ này bằng ví khác có đủ số dư (ví mặc định của lịch giữ nguyên) hoặc nạp thêm tiền vào ví.',
     'rec_dlg_insuff_hint_topup':
         'Vui lòng nạp thêm tiền vào ví để thực hiện thanh toán cho kỳ này.',
     'rec_dlg_later_btn': 'Xử lý sau',
-    'rec_dlg_switch_wallet_btn': 'Đổi ví khác',
+    'rec_dlg_switch_wallet_btn': 'Trả kỳ này bằng ví khác',
     'rec_dlg_manage_wallets_btn': 'Quản lý ví',
-    'rec_dlg_alt_title': 'Chọn ví thanh toán thay thế',
-    'rec_dlg_alt_sub': 'Các ví sau có đủ số dư ({amount}):',
-    'rec_dlg_alt_ok': 'Đã chuyển sang ví "{wallet}" và hạch toán thành công!',
+    'rec_dlg_alt_title': 'Trả kỳ này bằng ví khác',
+    'rec_dlg_alt_sub':
+        'Chỉ áp dụng cho kỳ này (không đổi ví mặc định của lịch). Các ví đủ số dư ({amount}):',
+    'rec_dlg_alt_ok':
+        'Đã thanh toán kỳ này bằng ví "{wallet}" (giữ nguyên ví mặc định của lịch)!',
     'rec_dlg_alt_err': 'Lỗi hạch toán với ví mới: {err}',
     'rec_dlg_confirm_inc_title': 'Xác nhận thu tiền',
     'rec_dlg_confirm_exp_title': 'Xác nhận thanh toán',
@@ -1959,7 +1994,7 @@ class AppLocalizations {
     'rec_dlg_defer_title': 'Xác nhận dời ngày',
     'rec_dlg_defer_desc': 'Dời ngày đến hạn từ {oldDate} sang ngày {newDate}.',
     'rec_dlg_defer_note':
-        'Lưu ý: Các chu kỳ tiếp theo sẽ được tính dựa trên ngày mới này.',
+        'Lưu ý: Thao tác này chỉ dời riêng kỳ hiện tại sang ngày mới. Các chu kỳ tiếp theo vẫn giữ nguyên theo lịch lặp gốc.',
     'rec_dlg_defer_ok': 'Đã dời "{name}" sang ngày {date}.',
     'rec_dlg_defer_err': 'Lỗi dời ngày: {err}',
     'rec_dlg_defer_btn': 'Đồng ý dời',
@@ -2412,6 +2447,9 @@ class AppLocalizations {
     'app_tagline': 'Smart personal finance management',
     'nav_locked_title': 'Account Temporarily Locked',
     'nav_locked_body': 'Account {email} is currently locked by the System Administrator. Please contact support.',
+    'nav_locked_reason_label': 'Lock reason',
+    'nav_locked_default_reason': 'This account is temporarily restricted under system operational policies.',
+    'nav_locked_time_label': 'Locked at',
     'nav_locked_logout': 'Log out',
     'forgot_pw_title': 'Forgot Password',
     'forgot_pw_heading': 'Reset Password',
@@ -2430,11 +2468,13 @@ class AppLocalizations {
     'rec_perm_notif_btn': 'Enable',
     'rec_perm_exact_off': 'Allow exact alarms so bill reminders arrive on time even in background.',
     'rec_perm_exact_btn': 'Allow',
-    'rec_hero_planned_period': 'Active recurring expenses / cycle',
+    'rec_hero_planned_period': 'Est. monthly recurring',
     'rec_hero_pending_badge': '{count} action needed',
     'rec_hero_active_badge': '{count} active',
-    'rec_hero_income_sub': 'Expected income: {amount}',
+    'rec_hero_income_sub': 'Est. income/mo: {amount}',
     'rec_hero_active_ratio': 'Active: {active}/{total}',
+    'rec_hero_weekly_converted_note':
+        'Includes {count} weekly schedule(s) (converted ×4/mo)',
     'rec_sec_action_title': 'Action Required',
     'rec_sec_action_sub': 'Due periods waiting for your confirmation',
     'rec_sec_action_empty': 'All due bills have been handled',
@@ -2512,6 +2552,8 @@ class AppLocalizations {
     'auth_no_account': 'Don\'t have an account? ',
     'auth_register_now': 'Sign Up',
     'auth_err_locked': 'Your account has been locked by a system administrator.',
+    'auth_err_locked_with_reason': 'Your account has been locked. Reason: {reason}',
+    'auth_err_locked_time_suffix': ' (at {time})',
     'auth_err_invalid_creds': 'Incorrect email or password.',
     'auth_err_google_failed': 'Google Sign-In failed.',
     'auth_create_title': 'Create Account ✨',
@@ -2731,6 +2773,8 @@ class AppLocalizations {
     'tx_list_export_text': 'Exported {count} transactions',
     'tx_list_export_subject': 'Transaction Data',
     'tx_list_export_err': 'Unable to export file: {error}',
+    'tx_list_export_empty':
+        'No transactions in the current filtered list to export.',
     'tx_list_title': 'Transaction History',
     'tx_list_export_csv': 'Export CSV',
     'tx_list_adv_filter': 'Advanced Filters',
@@ -2941,7 +2985,7 @@ class AppLocalizations {
     'ai_rep_insights_tooltip': 'AI Financial Insights',
     'ai_rep_loading': 'Generating AI report...',
     'ai_rep_banner_title': 'REPORT FOR {month}/{year}',
-    'ai_rep_ai_generated': 'AI Generated',
+    'ai_rep_ai_generated': 'Auto Analytics',
     'ai_rep_total_expense_month': 'Total spending this month',
     'ai_rep_net_savings': 'Net savings',
     'ai_rep_vs_last_month': 'Vs. last month',
@@ -3228,6 +3272,8 @@ class AppLocalizations {
     'ai_chat_understood': 'Got it',
     'ai_chat_appbar_title': 'Finance AI Assistant',
     'ai_chat_status_syncing': 'Syncing...',
+    'ai_chat_status_empty': 'No transaction data yet',
+    'ai_chat_status_limited': 'Preliminary data (limited)',
     'ai_chat_status_starter': 'Starter data',
     'ai_chat_status_90d': '90-day data synced',
     'ai_chat_quick_tip': 'Quick analysis',
@@ -3711,6 +3757,8 @@ class AppLocalizations {
         'This occurrence has already been processed.',
     'svc_fs_rec_skipped_note': 'Skipped occurrence for {date}.',
     'svc_fs_rec_deferred_note': 'Deferred due date to {date}.',
+    'svc_fs_rec_defer_invalid_date':
+        'The new due date must be after both today and the current due date.',
     'svc_fs_query_index_err':
         'Date-range transaction queries require a Firestore Composite Index (userId ASC, date DESC). Please sync firestore.indexes.json.',
     'svc_fs_plan_conflict':
@@ -3781,6 +3829,7 @@ class AppLocalizations {
     'sec_provider_google': 'Google Account',
     'sec_provider_email': 'Email & Password',
     'sec_verified': 'Verified',
+    'sec_unverified': 'Email not verified',
     'sec_google_title': 'Password managed via Google',
     'sec_google_desc':
         'This account is signed in with Google ({email}). The app does not store a separate password in compliance with OAuth 2.0 security standards.',
@@ -3800,6 +3849,25 @@ class AppLocalizations {
     'sec_notice_title': 'Data security',
     'sec_notice_desc':
         'Every password change requires official server authentication. Your financial data is securely encrypted in the cloud.',
+    'sec_del_title': 'Delete account',
+    'sec_del_desc':
+        'Once deleted, your account and all financial data (wallets, transactions, budgets, saving goals) will be permanently removed and cannot be recovered.',
+    'sec_del_btn': 'Permanently delete account',
+    'sec_del_dlg_title': 'Confirm account deletion',
+    'sec_del_dlg_warning':
+        'CRITICAL WARNING:\n\n• Your account will be permanently deleted from the system.\n• All profile, wallet, transaction, budget, and saving goal data will be wiped.\n• This action CANNOT BE UNDONE.',
+    'sec_del_dlg_pwd_prompt': 'Please enter your current password to verify:',
+    'sec_del_dlg_confirm': 'Delete permanently',
+    'sec_del_success': 'Your account has been permanently deleted.',
+    'sec_del_cancelled':
+        'Account deletion verification cancelled. Your data remains safe.',
+    'sec_del_err_failed': 'Unable to delete account.',
+    'sec_del_err_wrong_pwd': 'Current password is incorrect.',
+    'sec_del_err_pwd_required':
+        'Please enter your current password to verify before deleting your account.',
+    'sec_del_err_recent_login':
+        'Security requirement: Please sign in again before deleting your account.',
+    'sec_del_err_retry': 'Unable to delete account. Please try again later.',
     // Management: Budgets
     'bud_mgmt_title': 'Budgets',
     'bud_mgmt_pick_month_title': 'Select Month/Year',
@@ -4079,15 +4147,17 @@ class AppLocalizations {
     'rec_dlg_due_amt': 'Amount due:',
     'rec_dlg_shortfall': 'Shortfall:',
     'rec_dlg_insuff_hint_alt':
-        'You can switch to another wallet with enough balance or top up this wallet.',
+        'You can pay this cycle only using another wallet with enough balance (default schedule wallet stays unchanged), or top up this wallet.',
     'rec_dlg_insuff_hint_topup':
         'Please add funds to your wallet to pay this occurrence.',
     'rec_dlg_later_btn': 'Later',
-    'rec_dlg_switch_wallet_btn': 'Switch wallet',
+    'rec_dlg_switch_wallet_btn': 'Pay this cycle with another wallet',
     'rec_dlg_manage_wallets_btn': 'Manage wallets',
-    'rec_dlg_alt_title': 'Select Alternative Wallet',
-    'rec_dlg_alt_sub': 'Wallets with sufficient balance ({amount}):',
-    'rec_dlg_alt_ok': 'Switched to "{wallet}" and posted transaction!',
+    'rec_dlg_alt_title': 'Pay This Cycle With Another Wallet',
+    'rec_dlg_alt_sub':
+        'Applies to this cycle only (schedule default wallet unchanged). Wallets with enough balance ({amount}):',
+    'rec_dlg_alt_ok':
+        'Paid this cycle with "{wallet}" (default schedule wallet unchanged)!',
     'rec_dlg_alt_err': 'Error posting with new wallet: {err}',
     'rec_dlg_confirm_inc_title': 'Confirm Income',
     'rec_dlg_confirm_exp_title': 'Confirm Payment',
@@ -4109,7 +4179,7 @@ class AppLocalizations {
     'rec_dlg_defer_title': 'Confirm Reschedule',
     'rec_dlg_defer_desc': 'Move due date from {oldDate} to {newDate}.',
     'rec_dlg_defer_note':
-        'Note: Subsequent cycles will be calculated based on this new date.',
+        'Note: This only reschedules the current occurrence. Subsequent cycles still follow the original schedule.',
     'rec_dlg_defer_ok': 'Rescheduled "{name}" to {date}.',
     'rec_dlg_defer_err': 'Error rescheduling: {err}',
     'rec_dlg_defer_btn': 'Reschedule',

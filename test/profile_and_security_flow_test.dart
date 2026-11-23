@@ -103,7 +103,7 @@ void main() {
     // 4. AppUser Model Serialization & Integrity
     // -------------------------------------------------------------
     test(
-        '4.1. AppUser toMap và fromMap bảo toàn chính xác monthlyIncome và occupation',
+        '4.1. AppUser toMap (Zero-Knowledge) tách biệt monthlyIncome/savingGoal sang toPrivateFinancialMap và fromMap khôi phục đầy đủ',
         () {
       final user = AppUser(
         uid: 'user_123',
@@ -111,17 +111,31 @@ void main() {
         email: 'tranvanb@gmail.com',
         avatar: 'path/to/avatar.jpg',
         monthlyIncome: 18000000.0,
+        savingGoal: 'Mua nhà',
         occupation: 'Kỹ sư phần mềm',
+        authProvider: 'password',
         createdAt: DateTime(2026, 1, 1),
       );
 
-      final map = user.toMap();
-      expect(map['monthlyIncome'], equals(18000000.0));
-      expect(map['occupation'], equals('Kỹ sư phần mềm'));
-      expect(map['name'], equals('Trần Văn B'));
+      final publicMap = user.toMap();
+      // Root users/{uid} KHÔNG chứa trường tài chính nhạy cảm
+      expect(publicMap.containsKey('monthlyIncome'), isFalse);
+      expect(publicMap.containsKey('savingGoal'), isFalse);
+      expect(publicMap['occupation'], equals('Kỹ sư phần mềm'));
+      expect(publicMap['name'], equals('Trần Văn B'));
+      expect(publicMap['authProvider'], equals('password'));
 
-      final restored = AppUser.fromMap(map, 'user_123');
+      final privateMap = user.toPrivateFinancialMap();
+      expect(privateMap['monthlyIncome'], equals(18000000.0));
+      expect(privateMap['savingGoal'], equals('Mua nhà'));
+
+      final restored = AppUser.fromMap(
+        publicMap,
+        'user_123',
+        privateFinancialMap: privateMap,
+      );
       expect(restored.monthlyIncome, equals(18000000.0));
+      expect(restored.savingGoal, equals('Mua nhà'));
       expect(restored.occupation, equals('Kỹ sư phần mềm'));
       expect(restored.name, equals('Trần Văn B'));
       expect(restored.email, equals('tranvanb@gmail.com'));

@@ -4,6 +4,8 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:uuid/uuid.dart';
 import '../../l10n/app_localizations.dart';
 import '../../models/category_model.dart';
+import '../../models/monthly_financial_plan.dart';
+import '../../services/ai_prompt_builder.dart';
 import '../../services/firestore_service.dart';
 import '../../services/ai_service.dart';
 import '../../services/financial_chat_context_service.dart';
@@ -78,19 +80,30 @@ class _ChatMessage {
 /// - Hiểu ngữ cảnh dữ liệu 90 ngày (Ví, Giao dịch, Ngân sách, Mục tiêu)
 /// - Phản hồi đa cấp độ: Trả lời nhanh, Phân tích thu-chi, Tư vấn cắt giảm, Phản biện mục tiêu
 /// - Actionable Insight Cards tương tác điều hướng trực tiếp
-/// - Phân nhóm câu hỏi gợi ý thông minh (Nổi bật, Tổng quan, Chi tiêu, Ngân sách, Tiết kiệm)
+/// - Thanh 1 hàng gọn gồm 4-5 câu hỏi gợi ý động ưu tiên cảnh báo theo ngữ cảnh
 /// ============================================================
 class AiChatScreen extends StatefulWidget {
-  const AiChatScreen({super.key});
+  final AiService? aiService;
+  final FirestoreService? firestoreService;
+  final FinancialChatContextService? contextService;
+  final String? userIdOverride;
+
+  const AiChatScreen({
+    super.key,
+    this.aiService,
+    this.firestoreService,
+    this.contextService,
+    this.userIdOverride,
+  });
 
   @override
   State<AiChatScreen> createState() => _AiChatScreenState();
 }
 
 class _AiChatScreenState extends State<AiChatScreen> {
-  final _aiService = AiService();
-  final _firestoreService = FirestoreService();
-  final _contextService = FinancialChatContextService();
+  late final AiService _aiService;
+  late final FirestoreService _firestoreService;
+  late final FinancialChatContextService _contextService;
 
   final _inputController = TextEditingController();
   final _scrollController = ScrollController();
@@ -101,7 +114,6 @@ class _AiChatScreenState extends State<AiChatScreen> {
   List<Category> _categories = [];
   bool _isLoadingContext = true;
   bool _isSending = false;
-  String _selectedPromptCategory = 'all';
 
   // Quản lý Conversation Session
   String _currentSessionId = const Uuid().v4();
@@ -112,6 +124,15 @@ class _AiChatScreenState extends State<AiChatScreen> {
   // Trạng thái cuộn mượt mà & vị trí đọc tin nhắn
   bool _showScrollToBottom = false;
 
+  String? get _currentUid {
+    if (widget.userIdOverride != null) return widget.userIdOverride;
+    try {
+      return FirebaseAuth.instance.currentUser?.uid;
+    } catch (_) {
+      return null;
+    }
+  }
+
   bool _isDefaultSessionTitle(String title) =>
       title == 'Cuộc trò chuyện mới' ||
       title == 'New conversation' ||
@@ -121,6 +142,10 @@ class _AiChatScreenState extends State<AiChatScreen> {
   @override
   void initState() {
     super.initState();
+    _aiService = widget.aiService ?? AiService();
+    _firestoreService = widget.firestoreService ?? FirestoreService();
+    _contextService = widget.contextService ??
+        FinancialChatContextService(firestoreService: _firestoreService);
     LanguageController.currentLocale.addListener(_onLocaleChanged);
     _scrollController.addListener(_onScroll);
     _initChatData();
@@ -134,7 +159,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
   }
 
   Future<void> _refreshChatLocalization() async {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = _currentUid;
     if (!mounted) return;
     if (_isDefaultSessionTitle(_currentSessionTitle)) {
       _currentSessionTitle = AppLocalizations.tr('ai_chat_new_session_title');
@@ -191,7 +216,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
 
   /// Khởi tạo dữ liệu: Tải ngữ cảnh tài chính và phiên trò chuyện gần nhất
   Future<void> _initChatData() async {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = _currentUid;
     if (uid == null || uid.isEmpty) {
       if (mounted) {
         setState(() {
@@ -248,8 +273,10 @@ class _AiChatScreenState extends State<AiChatScreen> {
 
     for (final item in rawMessages) {
       if (item is Map) {
-        loadedMessages
-            .add(_ChatMessage.fromMap(Map<String, dynamic>.from(item)));
+        final msg = _ChatMessage.fromMap(Map<String, dynamic>.from(item));
+        if (!msg.isError) {
+          loadedMessages.add(msg);
+        }
       }
     }
 
@@ -367,17 +394,19 @@ class _AiChatScreenState extends State<AiChatScreen> {
     ));
   }
 
-  /// Tự động lưu phiên trò chuyện hiện tại vào Firestore (chỉ khi có ít nhất 1 tin nhắn từ user)
+  /// Tự động lưu phiên trò chuyện hiện tại vào Firestore
+  /// (chỉ khi có ít nhất 1 tin nhắn từ user và luôn lọc bỏ các bubble lỗi tạm thời `isError == true`)
   Future<void> _saveCurrentSession() async {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = _currentUid;
     if (uid == null || uid.isEmpty || _messages.isEmpty) return;
 
+    final persistableMessages = _messages.where((m) => !m.isError).toList();
     // Không lưu phiên rỗng nếu người dùng chưa tương tác gửi câu hỏi nào
-    final hasUserMessage = _messages.any((m) => m.isUser);
+    final hasUserMessage = persistableMessages.any((m) => m.isUser);
     if (!hasUserMessage) return;
 
     if (_isDefaultSessionTitle(_currentSessionTitle)) {
-      final firstUserMsg = _messages.firstWhere(
+      final firstUserMsg = persistableMessages.firstWhere(
         (m) => m.isUser,
         orElse: () => _ChatMessage(text: '', isUser: false),
       );
@@ -388,7 +417,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
       }
     }
 
-    final messageMaps = _messages.map((m) => m.toMap()).toList();
+    final messageMaps = persistableMessages.map((m) => m.toMap()).toList();
     await _firestoreService.saveChatSession(
       userId: uid,
       sessionId: _currentSessionId,
@@ -428,23 +457,47 @@ class _AiChatScreenState extends State<AiChatScreen> {
   }
 
   /// Gửi tin nhắn và nhận phản hồi dòng (Streaming) từ Trợ lý AI
-  Future<void> _sendMessage(String text) async {
+  Future<void> _sendMessage(
+    String text, {
+    String? retryErrorMessageId,
+  }) async {
     final trimmedText = text.trim();
     if (trimmedText.isEmpty || _isSending) return;
 
-    final uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+    final uid = _currentUid ?? '';
 
     // Ghi nhận vị trí cuối cùng trước khi thêm tin nhắn
     final double anchorBeforeSend = _scrollController.hasClients
         ? _scrollController.position.maxScrollExtent
         : 0.0;
 
+    // Khi bấm "Thử lại", nếu bubble ngay trước bubble lỗi đã là câu hỏi của user cùng nội dung,
+    // giữ nguyên bubble user đó để không nhân đôi câu hỏi trên giao diện.
+    bool shouldAddUserBubble = true;
+    if (retryErrorMessageId != null) {
+      final errIdx = _messages.indexWhere((m) => m.id == retryErrorMessageId);
+      if (errIdx > 0 &&
+          _messages[errIdx - 1].isUser &&
+          _messages[errIdx - 1].text.trim() == trimmedText) {
+        shouldAddUserBubble = false;
+      }
+    }
+
     setState(() {
-      _messages.add(_ChatMessage(text: trimmedText, isUser: true));
+      if (shouldAddUserBubble) {
+        _messages.add(_ChatMessage(text: trimmedText, isUser: true));
+      }
       _isSending = true;
     });
     _inputController.clear();
     _scrollToBottom();
+
+    final aiMessage = _ChatMessage(
+      text: '',
+      isUser: false,
+    );
+    bool messageAdded = false;
+    final responseBuffer = StringBuffer();
 
     try {
       // Đảm bảo dữ liệu tài chính luôn được đồng bộ mới nhất khi có thay đổi
@@ -471,18 +524,19 @@ class _AiChatScreenState extends State<AiChatScreen> {
       final contextData = _financialContext?.rawPromptContext ??
           AppLocalizations.tr('ai_chat_no_fin_data_ctx');
 
-      final aiMessage = _ChatMessage(
-        text: '',
-        isUser: false,
-      );
-
-      bool messageAdded = false;
-      final responseBuffer = StringBuffer();
-
       // Sử dụng streaming để người dùng nhìn thấy phản hồi tức thì
       await for (final chunk in _aiService.chatWithFinancialDataStream(
         userQuestion: trimmedText,
         contextData: contextData,
+        onStreamReset: () {
+          // Reset sạch buffer nếu model trước đứt giữa chừng và chuyển sang fallback
+          responseBuffer.clear();
+          if (mounted && messageAdded) {
+            setState(() {
+              aiMessage.text = '';
+            });
+          }
+        },
       )) {
         if (!mounted) return;
         responseBuffer.write(chunk);
@@ -494,6 +548,9 @@ class _AiChatScreenState extends State<AiChatScreen> {
 
           setState(() {
             _isSending = false; // Tắt typing indicator
+            if (retryErrorMessageId != null) {
+              _messages.removeWhere((m) => m.id == retryErrorMessageId);
+            }
             _messages.add(aiMessage);
             messageAdded = true;
           });
@@ -507,7 +564,10 @@ class _AiChatScreenState extends State<AiChatScreen> {
         });
       }
 
-      final fullReply = responseBuffer.toString();
+      // Chuẩn hóa số tiền sau khi nhận đủ toàn bộ nội dung stream (VD: 5000000đ -> 5.000.000đ)
+      final fullReply = AiPromptBuilder.formatCurrencyNumbersInText(
+        responseBuffer.toString(),
+      );
 
       // Nhận diện Action Card dựa trên toàn bộ ngữ cảnh hỏi & đáp
       ChatInsightCardData? card;
@@ -522,6 +582,13 @@ class _AiChatScreenState extends State<AiChatScreen> {
 
       if (mounted) {
         setState(() {
+          if (retryErrorMessageId != null) {
+            _messages.removeWhere((m) => m.id == retryErrorMessageId);
+          }
+          if (!messageAdded && fullReply.isNotEmpty) {
+            _messages.add(aiMessage);
+            messageAdded = true;
+          }
           aiMessage.text = fullReply;
           aiMessage.insightCard = card;
         });
@@ -538,6 +605,14 @@ class _AiChatScreenState extends State<AiChatScreen> {
             ? AppLocalizations.tr('ai_chat_err_no_net')
             : AppLocalizations.tr('ai_chat_err_generic');
         setState(() {
+          // Gỡ bỏ bubble AI nửa vời nếu stream đứt giữa chừng rồi fallback cũng lỗi
+          if (messageAdded) {
+            _messages.remove(aiMessage);
+          }
+          // Thay thế bubble lỗi cũ (nếu đang bấm Thử lại) để tránh trùng lặp
+          if (retryErrorMessageId != null) {
+            _messages.removeWhere((m) => m.id == retryErrorMessageId);
+          }
           _messages.add(_ChatMessage(
             text: errorMessage,
             isUser: false,
@@ -573,7 +648,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
 
   /// Xem và chuyển đổi các phiên trò chuyện đã lưu trong lịch sử
   void _showChatHistoryModal() async {
-    final uid = FirebaseAuth.instance.currentUser?.uid;
+    final uid = _currentUid;
     if (uid == null || uid.isEmpty) return;
 
     final sessions = await _firestoreService.getUserChatSessions(uid);
@@ -875,7 +950,7 @@ class _AiChatScreenState extends State<AiChatScreen> {
             style: ElevatedButton.styleFrom(backgroundColor: AppColors.expense),
             onPressed: () async {
               Navigator.pop(ctx);
-              final uid = FirebaseAuth.instance.currentUser?.uid;
+              final uid = _currentUid;
               if (uid != null && uid.isNotEmpty) {
                 await _firestoreService.deleteChatSession(
                     uid, _currentSessionId);
@@ -1152,13 +1227,43 @@ class _AiChatScreenState extends State<AiChatScreen> {
     }
 
     // Làm mới ngữ cảnh nếu người dùng vừa thao tác dữ liệu
-    final uid = FirebaseAuth.instance.currentUser?.uid;
-    if (uid != null && mounted) {
+    final uid = _currentUid;
+    if (uid != null && uid.isNotEmpty && mounted) {
       final updatedContext = await _contextService.buildContext(uid);
       if (mounted) {
         setState(() => _financialContext = updatedContext);
       }
     }
+  }
+
+  String _resolveAppBarStatusLabel(BuildContext context) {
+    if (_isLoadingContext) {
+      return context.tr('ai_chat_status_syncing');
+    }
+    final ctx = _financialContext;
+    if (ctx == null || ctx.isEmptyData) {
+      return context.tr('ai_chat_status_empty');
+    }
+    if (!ctx.hasSufficientData ||
+        ctx.dataTier == DataSufficiencyTier.preliminary) {
+      return context.tr('ai_chat_status_limited');
+    }
+    return context.tr('ai_chat_status_90d');
+  }
+
+  Color _resolveAppBarStatusColor(BuildContext context) {
+    if (_isLoadingContext) {
+      return AppColors.warning;
+    }
+    final ctx = _financialContext;
+    if (ctx == null || ctx.isEmptyData) {
+      return context.appTextSecondary;
+    }
+    if (!ctx.hasSufficientData ||
+        ctx.dataTier == DataSufficiencyTier.preliminary) {
+      return AppColors.warning;
+    }
+    return const Color(0xFF10B981);
   }
 
   @override
@@ -1186,7 +1291,10 @@ class _AiChatScreenState extends State<AiChatScreen> {
                       message: msg,
                       onCopy: () => _copyToClipboard(msg.text),
                       onRetry: msg.retryPrompt != null
-                          ? () => _sendMessage(msg.retryPrompt!)
+                          ? () => _sendMessage(
+                                msg.retryPrompt!,
+                                retryErrorMessageId: msg.id,
+                              )
                           : null,
                       onCardAction: msg.insightCard != null
                           ? () => _handleInsightCardAction(msg.insightCard!)
@@ -1195,14 +1303,13 @@ class _AiChatScreenState extends State<AiChatScreen> {
                   },
                 ),
               ),
-              _buildPromptFilterBar(),
               _buildDynamicPromptsList(),
               _buildInputBar(),
             ],
           ),
           if (_showScrollToBottom)
             Positioned(
-              bottom: 125,
+              bottom: 112,
               right: 16,
               child: _buildScrollToBottomButton(),
             ),
@@ -1213,6 +1320,8 @@ class _AiChatScreenState extends State<AiChatScreen> {
 
   PreferredSizeWidget _buildAppBar() {
     final canPop = Navigator.canPop(context);
+    final statusColor = _resolveAppBarStatusColor(context);
+    final statusLabel = _resolveAppBarStatusLabel(context);
 
     return AppBar(
       elevation: 0,
@@ -1257,23 +1366,19 @@ class _AiChatScreenState extends State<AiChatScreen> {
                 Row(
                   children: [
                     Container(
+                      key: const ValueKey('ai_chat_status_dot'),
                       width: 7,
                       height: 7,
                       decoration: BoxDecoration(
-                        color: _isLoadingContext
-                            ? AppColors.warning
-                            : const Color(0xFF10B981),
+                        color: statusColor,
                         shape: BoxShape.circle,
                       ),
                     ),
                     const SizedBox(width: 5),
                     Expanded(
                       child: Text(
-                        _isLoadingContext
-                            ? context.tr('ai_chat_status_syncing')
-                            : (_financialContext?.isEmptyData ?? false)
-                                ? context.tr('ai_chat_status_starter')
-                                : context.tr('ai_chat_status_90d'),
+                        statusLabel,
+                        key: const ValueKey('ai_chat_status_label'),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -1422,64 +1527,8 @@ class _AiChatScreenState extends State<AiChatScreen> {
     );
   }
 
-  /// Thanh chọn danh mục câu hỏi gợi ý
-  Widget _buildPromptFilterBar() {
-    final tabs = [
-      {'id': 'all', 'label': context.tr('ai_chat_tab_all')},
-      {'id': 'featured', 'label': context.tr('ai_chat_tab_featured')},
-      {'id': 'overview', 'label': context.tr('ai_chat_tab_overview')},
-      {'id': 'expense', 'label': context.tr('ai_chat_tab_expense')},
-      {'id': 'budget', 'label': context.tr('ai_chat_tab_budget')},
-      {'id': 'saving', 'label': context.tr('ai_chat_tab_saving')},
-    ];
-
-    return Container(
-      height: 36,
-      margin: const EdgeInsets.only(top: 6, bottom: 4),
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        itemCount: tabs.length,
-        separatorBuilder: (_, __) => const SizedBox(width: 6),
-        itemBuilder: (context, index) {
-          final tab = tabs[index];
-          final isSelected = _selectedPromptCategory == tab['id'];
-
-          return InkWell(
-            borderRadius: BorderRadius.circular(18),
-            onTap: () {
-              setState(() {
-                _selectedPromptCategory = tab['id']!;
-              });
-            },
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              decoration: BoxDecoration(
-                color: isSelected ? AppColors.primary : context.appCard,
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(
-                  color: isSelected ? AppColors.primary : context.appBorder,
-                ),
-              ),
-              child: Center(
-                child: Text(
-                  tab['label']!,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
-                    color: isSelected ? Colors.white : context.appTextSecondary,
-                  ),
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  /// Danh sách câu hỏi gợi ý động dựa trên ngữ cảnh thực tế
+  /// Thanh 1 hàng gọn gồm 4-5 câu hỏi gợi ý động thông minh nhất theo ngữ cảnh
+  /// (ưu tiên chip cảnh báo đỏ khi vượt ngân sách / dòng tiền âm / chi đột biến).
   Widget _buildDynamicPromptsList() {
     final allPrompts = _financialContext?.dynamicPrompts ??
         [
@@ -1488,52 +1537,41 @@ class _AiChatScreenState extends State<AiChatScreen> {
               category: 'featured',
               icon: '🔥'),
           DynamicPromptChip(
-              label: context.tr('ai_chat_chip_2'),
-              category: 'featured',
-              icon: '💡'),
-          DynamicPromptChip(
-              label: context.tr('ai_chat_chip_3'),
-              category: 'featured',
-              icon: '💎'),
-          DynamicPromptChip(
               label: context.tr('ai_chat_chip_4'),
-              category: 'overview'),
-          DynamicPromptChip(
-              label: context.tr('ai_chat_chip_5'),
               category: 'overview'),
           DynamicPromptChip(
               label: context.tr('ai_chat_chip_6'),
               category: 'expense'),
           DynamicPromptChip(
-              label: context.tr('ai_chat_chip_7'),
-              category: 'expense'),
-          DynamicPromptChip(
-              label: context.tr('ai_chat_chip_8'), category: 'budget'),
+              label: context.tr('ai_chat_chip_8'),
+              category: 'budget'),
           DynamicPromptChip(
               label: context.tr('ai_chat_chip_9'),
               category: 'saving'),
         ];
 
-    final filteredPrompts = _selectedPromptCategory == 'all'
-        ? allPrompts
-        : allPrompts
-            .where((p) => p.category == _selectedPromptCategory)
-            .toList();
+    final compactPrompts = FinancialChatContextService.selectCompactPrompts(
+      allPrompts,
+      maxCount: 5,
+      hasNearLimitBudgets:
+          _financialContext?.nearLimitBudgets.isNotEmpty ?? false,
+    );
 
-    if (filteredPrompts.isEmpty) {
+    if (compactPrompts.isEmpty) {
       return const SizedBox.shrink();
     }
 
     return Container(
+      key: const ValueKey('ai_chat_compact_prompts_bar'),
       height: 40,
-      margin: const EdgeInsets.only(bottom: 6),
+      margin: const EdgeInsets.only(top: 6, bottom: 6),
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 16),
-        itemCount: filteredPrompts.length,
+        itemCount: compactPrompts.length,
         separatorBuilder: (_, __) => const SizedBox(width: 8),
         itemBuilder: (context, i) {
-          final prompt = filteredPrompts[i];
+          final prompt = compactPrompts[i];
           final isAlert = prompt.isAlert;
 
           return ActionChip(
@@ -1865,9 +1903,15 @@ class _ActionableInsightCard extends StatelessWidget {
 
     switch (card.type) {
       case ChatInsightCardType.budgetOverrun:
-        themeColor = AppColors.expense;
-        bgColor = AppColors.expenseBackground;
-        icon = Icons.warning_amber_rounded;
+        if (card.isAlert) {
+          themeColor = AppColors.expense;
+          bgColor = AppColors.expenseBackground;
+          icon = Icons.warning_amber_rounded;
+        } else {
+          themeColor = AppColors.income;
+          bgColor = AppColors.incomeBackground;
+          icon = Icons.check_circle_outline_rounded;
+        }
         break;
       case ChatInsightCardType.savingGoalProgress:
         themeColor = AppColors.income;

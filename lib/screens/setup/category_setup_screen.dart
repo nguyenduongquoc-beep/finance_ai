@@ -3,6 +3,7 @@ import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../l10n/app_localizations.dart';
 import '../../models/category_model.dart';
+import '../../models/wallet_model.dart';
 import '../../services/firestore_service.dart';
 import '../../utils/category_icons.dart';
 import '../../utils/category_localization_helper.dart';
@@ -15,14 +16,19 @@ import '../../widgets/main_navigation.dart';
 /// Chọn danh mục thu chi khởi tạo (Bước 2/2) — Hiện đại, thân thiện & logic
 /// Kết nối trực tiếp với collection `system_categories` do Admin quản lý.
 /// Chỉ fallback về constants.dart khi không thể truy cập nguồn dữ liệu từ Firestore.
+/// Nhận `pendingWallets` từ Bước 1 và ghi đồng thời Ví + Danh mục nguyên tử khi bấm Hoàn tất.
 class CategorySetupScreen extends StatefulWidget {
+  final List<Wallet> pendingWallets;
   final FirestoreService? firestoreService;
   final String? userIdOverride;
+  final VoidCallback? onSetupCompleted;
 
   const CategorySetupScreen({
     super.key,
+    this.pendingWallets = const [],
     this.firestoreService,
     this.userIdOverride,
+    this.onSetupCompleted,
   });
 
   @override
@@ -147,9 +153,6 @@ class _CategorySetupScreenState extends State<CategorySetupScreen> {
   }
 
   void _showAddCustomCategorySheet() {
-    final nameCtrl = TextEditingController();
-    String selectedType = _showExpenses ? 'expense' : 'income';
-
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -157,199 +160,46 @@ class _CategorySetupScreenState extends State<CategorySetupScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setSheetState) {
-            return Padding(
-              padding: EdgeInsets.fromLTRB(
-                20,
-                20,
-                20,
-                MediaQuery.of(ctx).viewInsets.bottom + 20,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Expanded(
-                        child: Text(
-                          context.tr('setup_cat_add_custom'),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: GoogleFonts.inter(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w700,
-                            color: context.appTextPrimary,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      IconButton(
-                        icon: const Icon(Icons.close_rounded, size: 20),
-                        onPressed: () => Navigator.pop(ctx),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  AppTextField(
-                    controller: nameCtrl,
-                    labelText: context.tr('setup_cat_name_label'),
-                    hintText: context.tr('setup_cat_name_hint'),
-                    prefixIcon: Icons.category_outlined,
-                  ),
-                  const SizedBox(height: 14),
-                  Text(
-                    context.tr('setup_cat_type_label'),
-                    style: GoogleFonts.inter(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: context.appTextSecondary,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: GestureDetector(
-                          onTap: () =>
-                              setSheetState(() => selectedType = 'expense'),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(vertical: 10),
-                            decoration: BoxDecoration(
-                              color: selectedType == 'expense'
-                                  ? AppColors.primary.withAlpha(24)
-                                  : context.appBackground,
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(
-                                color: selectedType == 'expense'
-                                    ? AppColors.primary
-                                    : context.appBorder,
-                              ),
-                            ),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                const Icon(
-                                  Icons.arrow_downward_rounded,
-                                  size: 16,
-                                  color: AppColors.expense,
-                                ),
-                                const SizedBox(width: 6),
-                                Flexible(
-                                  child: FittedBox(
-                                    fit: BoxFit.scaleDown,
-                                    child: Text(
-                                      context.tr('setup_cat_expense'),
-                                      maxLines: 1,
-                                      style: GoogleFonts.inter(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w600,
-                                        color: selectedType == 'expense'
-                                            ? AppColors.primary
-                                            : context.appTextSecondary,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: GestureDetector(
-                          onTap: () =>
-                              setSheetState(() => selectedType = 'income'),
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(vertical: 10),
-                            decoration: BoxDecoration(
-                              color: selectedType == 'income'
-                                  ? AppColors.primary.withAlpha(24)
-                                  : context.appBackground,
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(
-                                color: selectedType == 'income'
-                                    ? AppColors.primary
-                                    : context.appBorder,
-                              ),
-                            ),
-                            child: Row(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                const Icon(
-                                  Icons.arrow_upward_rounded,
-                                  size: 16,
-                                  color: AppColors.income,
-                                ),
-                                const SizedBox(width: 6),
-                                Flexible(
-                                  child: FittedBox(
-                                    fit: BoxFit.scaleDown,
-                                    child: Text(
-                                      context.tr('setup_cat_income'),
-                                      maxLines: 1,
-                                      style: GoogleFonts.inter(
-                                        fontSize: 13,
-                                        fontWeight: FontWeight.w600,
-                                        color: selectedType == 'income'
-                                            ? AppColors.primary
-                                            : context.appTextSecondary,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 20),
-                  AppButton(
-                    text: context.tr('setup_cat_add_btn'),
-                    onPressed: () {
-                      final name = nameCtrl.text.trim();
-                      if (name.isEmpty) return;
+      builder: (_) => _AddCustomCategorySheet(
+        initialType: _showExpenses ? 'expense' : 'income',
+        onSubmit: ({required String name, required String selectedType}) {
+          final targetList =
+              selectedType == 'expense' ? _expenseItems : _incomeItems;
+          final existingIndex = targetList.indexWhere(
+            (item) => item.name.trim().toLowerCase() == name.toLowerCase(),
+          );
+          if (existingIndex != -1) {
+            setState(() {
+              targetList[existingIndex].selected = true;
+              _showExpenses = selectedType == 'expense';
+            });
+            return;
+          }
 
-                      final newItem = _SetupCategoryItem(
-                        name: name,
-                        type: selectedType,
-                        icon: selectedType == 'expense'
-                            ? 'shopping_bag'
-                            : 'work',
-                        color: selectedType == 'expense'
-                            ? 0xFFF59E0B
-                            : 0xFF10B981,
-                        selected: true,
-                      );
+          final newItem = _SetupCategoryItem(
+            name: name,
+            type: selectedType,
+            icon: selectedType == 'expense' ? 'shopping_bag' : 'work',
+            color: selectedType == 'expense' ? 0xFFF59E0B : 0xFF10B981,
+            selected: true,
+          );
 
-                      setState(() {
-                        if (selectedType == 'expense') {
-                          _expenseItems.add(newItem);
-                          _showExpenses = true;
-                        } else {
-                          _incomeItems.add(newItem);
-                          _showExpenses = false;
-                        }
-                      });
-                      Navigator.pop(ctx);
-                    },
-                  ),
-                ],
-              ),
-            );
-          },
-        );
-      },
+          setState(() {
+            if (selectedType == 'expense') {
+              _expenseItems.add(newItem);
+              _showExpenses = true;
+            } else {
+              _incomeItems.add(newItem);
+              _showExpenses = false;
+            }
+          });
+        },
+      ),
     );
   }
 
   Future<void> _handleFinish() async {
+    if (_isLoading) return;
     if (_selectedExpenseCount == 0 || _selectedIncomeCount == 0) {
       AppSnackbar.show(
         context,
@@ -364,36 +214,50 @@ class _CategorySetupScreenState extends State<CategorySetupScreen> {
       final uid =
           widget.userIdOverride ?? FirebaseAuth.instance.currentUser!.uid;
 
-      for (final c in _incomeItems) {
-        if (!c.selected) continue;
-        await _firestoreService.createCategory(Category(
-          categoryId: '',
-          userId: uid,
-          name: c.name,
-          type: 'income',
-          icon: c.icon,
-          color: c.color,
-        ));
-      }
+      final categoriesToSave = <Category>[
+        for (final c in _incomeItems)
+          if (c.selected)
+            Category(
+              categoryId: '',
+              userId: uid,
+              name: c.name,
+              type: 'income',
+              icon: c.icon,
+              color: c.color,
+            ),
+        for (final c in _expenseItems)
+          if (c.selected)
+            Category(
+              categoryId: '',
+              userId: uid,
+              name: c.name,
+              type: 'expense',
+              icon: c.icon,
+              color: c.color,
+              isEssential: c.isEssential,
+            ),
+      ];
 
-      for (final c in _expenseItems) {
-        if (!c.selected) continue;
-        await _firestoreService.createCategory(Category(
-          categoryId: '',
-          userId: uid,
-          name: c.name,
-          type: 'expense',
-          icon: c.icon,
-          color: c.color,
-          isEssential: c.isEssential,
-        ));
-      }
+      await _firestoreService.completeInitialSetup(
+        userId: uid,
+        wallets: widget.pendingWallets,
+        categories: categoriesToSave,
+      );
 
       if (!mounted) return;
-      Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const MainNavigation()),
-        (route) => false,
-      );
+      if (widget.onSetupCompleted != null) {
+        widget.onSetupCompleted!();
+      } else {
+        Navigator.of(context).pushAndRemoveUntil(
+          MaterialPageRoute(builder: (_) => const MainNavigation()),
+          (route) => false,
+        );
+      }
+    } catch (e) {
+      debugPrint('❌ Lỗi khi hoàn tất thiết lập tài khoản: $e');
+      if (mounted) {
+        AppSnackbar.show(context, context.tr('common_error'), isError: true);
+      }
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -405,7 +269,9 @@ class _CategorySetupScreenState extends State<CategorySetupScreen> {
   Widget build(BuildContext context) {
     final currentList = _showExpenses ? _expenseItems : _incomeItems;
 
-    return Scaffold(
+    return PopScope(
+      canPop: !_isLoading,
+      child: Scaffold(
       backgroundColor: context.appBackground,
       appBar: AppBar(
         backgroundColor: context.appBackground,
@@ -416,7 +282,7 @@ class _CategorySetupScreenState extends State<CategorySetupScreen> {
             size: 18,
             color: context.appTextPrimary,
           ),
-          onPressed: () => Navigator.of(context).pop(),
+          onPressed: _isLoading ? null : () => Navigator.of(context).pop(),
         ),
         title: _buildStepperHeader(currentStep: 2),
         centerTitle: true,
@@ -896,6 +762,7 @@ class _CategorySetupScreenState extends State<CategorySetupScreen> {
           ],
         ),
       ),
+      ),
     );
   }
 
@@ -981,6 +848,202 @@ class _CategorySetupScreenState extends State<CategorySetupScreen> {
             ],
           );
         }),
+      ),
+    );
+  }
+}
+
+class _AddCustomCategorySheet extends StatefulWidget {
+  final String initialType;
+  final void Function({required String name, required String selectedType})
+      onSubmit;
+
+  const _AddCustomCategorySheet({
+    required this.initialType,
+    required this.onSubmit,
+  });
+
+  @override
+  State<_AddCustomCategorySheet> createState() =>
+      _AddCustomCategorySheetState();
+}
+
+class _AddCustomCategorySheetState extends State<_AddCustomCategorySheet> {
+  final _nameCtrl = TextEditingController();
+  late String _selectedType;
+
+  @override
+  void initState() {
+    super.initState();
+    _selectedType = widget.initialType;
+  }
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        20,
+        20,
+        MediaQuery.of(context).viewInsets.bottom + 20,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Text(
+                  context.tr('setup_cat_add_custom'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.inter(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
+                    color: context.appTextPrimary,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton(
+                icon: const Icon(Icons.close_rounded, size: 20),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          AppTextField(
+            controller: _nameCtrl,
+            labelText: context.tr('setup_cat_name_label'),
+            hintText: context.tr('setup_cat_name_hint'),
+            prefixIcon: Icons.category_outlined,
+          ),
+          const SizedBox(height: 14),
+          Text(
+            context.tr('setup_cat_type_label'),
+            style: GoogleFonts.inter(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: context.appTextSecondary,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  onTap: () => setState(() => _selectedType = 'expense'),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    decoration: BoxDecoration(
+                      color: _selectedType == 'expense'
+                          ? AppColors.primary.withAlpha(24)
+                          : context.appBackground,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: _selectedType == 'expense'
+                            ? AppColors.primary
+                            : context.appBorder,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.arrow_downward_rounded,
+                          size: 16,
+                          color: AppColors.expense,
+                        ),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              context.tr('setup_cat_expense'),
+                              maxLines: 1,
+                              style: GoogleFonts.inter(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: _selectedType == 'expense'
+                                    ? AppColors.primary
+                                    : context.appTextSecondary,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: GestureDetector(
+                  onTap: () => setState(() => _selectedType = 'income'),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 10),
+                    decoration: BoxDecoration(
+                      color: _selectedType == 'income'
+                          ? AppColors.primary.withAlpha(24)
+                          : context.appBackground,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(
+                        color: _selectedType == 'income'
+                            ? AppColors.primary
+                            : context.appBorder,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        const Icon(
+                          Icons.arrow_upward_rounded,
+                          size: 16,
+                          color: AppColors.income,
+                        ),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: FittedBox(
+                            fit: BoxFit.scaleDown,
+                            child: Text(
+                              context.tr('setup_cat_income'),
+                              maxLines: 1,
+                              style: GoogleFonts.inter(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: _selectedType == 'income'
+                                    ? AppColors.primary
+                                    : context.appTextSecondary,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          AppButton(
+            text: context.tr('setup_cat_add_btn'),
+            onPressed: () {
+              final name = _nameCtrl.text.trim();
+              if (name.isEmpty) return;
+              widget.onSubmit(name: name, selectedType: _selectedType);
+              Navigator.pop(context);
+            },
+          ),
+        ],
       ),
     );
   }

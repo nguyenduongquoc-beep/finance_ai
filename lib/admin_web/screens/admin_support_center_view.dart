@@ -54,6 +54,59 @@ enum _AdminSupportStage {
   }
 }
 
+/// Bộ mẫu trả lời nhanh tĩnh cho Helpdesk (0 lượt đọc Firestore, không CRUD phức tạp).
+/// Khi bấm chỉ điền vào ô nhập tin nhắn để Admin kiểm tra/chỉnh sửa trước khi gửi.
+class _QuickReplyPreset {
+  final String id;
+  final String label;
+  final String content;
+
+  const _QuickReplyPreset({
+    required this.id,
+    required this.label,
+    required this.content,
+  });
+
+  static const List<_QuickReplyPreset> defaults = [
+    _QuickReplyPreset(
+      id: 'ack',
+      label: 'Tiếp nhận',
+      content:
+          'Chào bạn, đội ngũ hỗ trợ Finance AI đã tiếp nhận yêu cầu và đang kiểm tra giúp bạn.',
+    ),
+    _QuickReplyPreset(
+      id: 'ask_info',
+      label: 'Hỏi thêm thông tin',
+      content:
+          'Bạn vui lòng mô tả rõ hơn thao tác gặp lỗi hoặc thời điểm phát sinh để mình hỗ trợ nhanh hơn nhé.',
+    ),
+    _QuickReplyPreset(
+      id: 'ocr_guide',
+      label: 'Hướng dẫn OCR',
+      content:
+          'Với tính năng quét hóa đơn OCR, bạn lưu ý chụp ở nơi đủ sáng và giữ hóa đơn phẳng để hệ thống nhận diện chính xác nhất.',
+    ),
+    _QuickReplyPreset(
+      id: 'wallet_budget',
+      label: 'Ví & Ngân sách',
+      content:
+          'Bạn có thể kiểm tra lại ví nguồn và hạn mức ngân sách tháng trong mục Quản lý; mọi thay đổi giao dịch sẽ tự động cập nhật số dư ví và tiến độ ngân sách.',
+    ),
+    _QuickReplyPreset(
+      id: 'account_sync',
+      label: 'Đăng nhập & Đồng bộ',
+      content:
+          'Nếu gặp sự cố đăng nhập hoặc dữ liệu chưa cập nhật, bạn hãy kiểm tra kết nối mạng, kéo xuống để làm mới dữ liệu hoặc đăng xuất và đăng nhập lại đúng email đã đăng ký nhé.',
+    ),
+    _QuickReplyPreset(
+      id: 'confirm_done',
+      label: 'Xác nhận xong',
+      content:
+          'Vấn đề của bạn đã được xử lý xong. Nếu không còn vướng mắc nào khác, mình xin phép đánh dấu yêu cầu này là Đã giải quyết nhé.',
+    ),
+  ];
+}
+
 /// Màn hình Trung tâm Hỗ trợ CSKH gọn nhẹ trên Admin Web Portal (Firebase Spark).
 /// - Đọc/ghi trực tiếp qua Cloud Firestore + Firestore Security Rules (`isAdmin()`).
 /// - Tìm kiếm theo mã vé / tiêu đề / người dùng và lọc theo 3 trạng thái chuẩn.
@@ -62,12 +115,16 @@ class AdminSupportCenterView extends StatefulWidget {
   final SupportService supportService;
   final String currentAdminUid;
   final String currentAdminName;
+  final String? initialTicketId;
+  final VoidCallback? onInitialTicketHandled;
 
   const AdminSupportCenterView({
     super.key,
     required this.supportService,
     required this.currentAdminUid,
     required this.currentAdminName,
+    this.initialTicketId,
+    this.onInitialTicketHandled,
   });
 
   @override
@@ -79,6 +136,7 @@ class _AdminSupportCenterViewState extends State<AdminSupportCenterView> {
 
   final _searchCtrl = TextEditingController();
   final _replyCtrl = TextEditingController();
+  final _replyFocusNode = FocusNode();
   final _msgScrollCtrl = ScrollController();
 
   int _limit = _pageSize;
@@ -87,7 +145,14 @@ class _AdminSupportCenterViewState extends State<AdminSupportCenterView> {
 
   late Stream<List<SupportTicket>> _ticketsStream;
   String? _selectedTicketId;
+  Stream<SupportTicket?>? _selectedTicketStream;
   Stream<List<SupportMessage>>? _selectedMessagesStream;
+
+  // Lưu bộ đếm từ luồng đầy đủ để giữ nhãn ổn định khi đang lọc phía server cho nhóm "Mới"
+  bool _hasCachedUnfilteredCounts = false;
+  int _cachedAllCount = 0;
+  int _cachedInProgressCount = 0;
+  int _cachedResolvedCount = 0;
 
   bool _isSubmitting = false;
   String? _markingReadTicketId;
@@ -96,18 +161,66 @@ class _AdminSupportCenterViewState extends State<AdminSupportCenterView> {
   void initState() {
     super.initState();
     _ticketsStream = _buildTicketsStream();
+    final initialId = widget.initialTicketId?.trim();
+    if (initialId != null && initialId.isNotEmpty) {
+      _applyInitialTicketSelection(initialId);
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant AdminSupportCenterView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    final nextId = widget.initialTicketId?.trim();
+    if (nextId != null &&
+        nextId.isNotEmpty &&
+        nextId != oldWidget.initialTicketId?.trim()) {
+      _applyInitialTicketSelection(nextId);
+    }
+  }
+
+  void _applyInitialTicketSelection(String ticketId) {
+    _selectedTicketId = ticketId;
+    _selectedTicketStream = widget.supportService.streamTicketById(ticketId);
+    _selectedMessagesStream =
+        widget.supportService.streamTicketMessages(ticketId);
+    _markReadByAdmin(ticketId);
+    if (widget.onInitialTicketHandled != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) widget.onInitialTicketHandled?.call();
+      });
+    }
   }
 
   @override
   void dispose() {
     _searchCtrl.dispose();
     _replyCtrl.dispose();
+    _replyFocusNode.dispose();
     _msgScrollCtrl.dispose();
     super.dispose();
   }
 
   Stream<List<SupportTicket>> _buildTicketsStream() {
-    return widget.supportService.streamAdminTickets(limit: _limit);
+    // Tận dụng composite index `(status ASC, updatedAt DESC)` khi Admin chọn lọc "Mới"
+    // để không bao giờ sót vé mới nằm ngoài top 30 vé cập nhật gần nhất.
+    return widget.supportService.streamAdminTickets(
+      statusFilter: _stageFilter == _AdminSupportStage.newTicket
+          ? SupportTicketStatus.newTicket
+          : null,
+      limit: _limit,
+    );
+  }
+
+  void _onStageChanged(_AdminSupportStage? nextStage) {
+    final prevWasNew = _stageFilter == _AdminSupportStage.newTicket;
+    final nextIsNew = nextStage == _AdminSupportStage.newTicket;
+    setState(() {
+      _stageFilter = nextStage;
+      if (prevWasNew != nextIsNew) {
+        _limit = _pageSize;
+        _ticketsStream = _buildTicketsStream();
+      }
+    });
   }
 
   void _loadMore() {
@@ -127,6 +240,8 @@ class _AdminSupportCenterViewState extends State<AdminSupportCenterView> {
     if (_selectedTicketId != ticket.ticketId) {
       setState(() {
         _selectedTicketId = ticket.ticketId;
+        _selectedTicketStream =
+            widget.supportService.streamTicketById(ticket.ticketId);
         _selectedMessagesStream =
             widget.supportService.streamTicketMessages(ticket.ticketId);
       });
@@ -193,6 +308,43 @@ class _AdminSupportCenterViewState extends State<AdminSupportCenterView> {
           );
         }
       });
+    } catch (e) {
+      if (!mounted) return;
+      AppSnackbar.show(context, formatAdminErrorMessage(e), isError: true);
+    } finally {
+      if (mounted) setState(() => _isSubmitting = false);
+    }
+  }
+
+  void _insertQuickReply(_QuickReplyPreset preset) {
+    final existing = _replyCtrl.text;
+    final nextText = existing.trim().isEmpty
+        ? preset.content
+        : '${existing.trimRight()}\n${preset.content}';
+    final clamped = nextText.length > SupportTicket.kMaxMessageLength
+        ? nextText.substring(0, SupportTicket.kMaxMessageLength)
+        : nextText;
+    _replyCtrl.value = TextEditingValue(
+      text: clamped,
+      selection: TextSelection.collapsed(offset: clamped.length),
+    );
+    _replyFocusNode.requestFocus();
+  }
+
+  Future<void> _handleReopenResolved(SupportTicket ticket) async {
+    if (_isSubmitting || !ticket.status.canAdminReopenResolved) return;
+    setState(() => _isSubmitting = true);
+    try {
+      await widget.supportService.reopenResolvedTicketByAdmin(
+        ticket: ticket,
+        adminUid: widget.currentAdminUid,
+        adminName: widget.currentAdminName,
+      );
+      if (!mounted) return;
+      AppSnackbar.show(
+        context,
+        'Đã mở lại xử lý yêu cầu ${ticket.ticketCode}.',
+      );
     } catch (e) {
       if (!mounted) return;
       AppSnackbar.show(context, formatAdminErrorMessage(e), isError: true);
@@ -312,65 +464,118 @@ class _AdminSupportCenterViewState extends State<AdminSupportCenterView> {
         }
 
         final allTickets = snapshot.data ?? const <SupportTicket>[];
+        final isServerFilteredNew =
+            _stageFilter == _AdminSupportStage.newTicket;
+        if (!isServerFilteredNew) {
+          _hasCachedUnfilteredCounts = true;
+          _cachedAllCount = allTickets.length;
+          _cachedInProgressCount = allTickets
+              .where((t) =>
+                  _AdminSupportStage.fromTicketStatus(t.status) ==
+                  _AdminSupportStage.inProgress)
+              .length;
+          _cachedResolvedCount = allTickets
+              .where((t) =>
+                  _AdminSupportStage.fromTicketStatus(t.status) ==
+                  _AdminSupportStage.resolved)
+              .length;
+        }
+
         final filteredTickets = _filterTickets(allTickets);
-        final selectedTicket = _resolveSelectedTicket(allTickets);
+        final listMatchedSelected = _resolveSelectedTicket(allTickets);
         final hasMore = allTickets.length >= _limit;
 
-        return LayoutBuilder(
-          builder: (context, constraints) {
-            final isWide = constraints.maxWidth >= 900;
-            final isCompactHeight = constraints.maxHeight < 520;
-            final pad = isCompactHeight ? 10.0 : 20.0;
+        return StreamBuilder<SupportTicket?>(
+          stream: _selectedTicketStream,
+          initialData: listMatchedSelected,
+          builder: (context, selectedSnap) {
+            final selectedTicket =
+                selectedSnap.data ?? listMatchedSelected;
 
-            final listPane = _SupportTicketListPane(
-              allTickets: allTickets,
-              filteredTickets: filteredTickets,
-              selectedTicketId: selectedTicket?.ticketId,
-              stageFilter: _stageFilter,
-              searchController: _searchCtrl,
-              hasMore: hasMore,
-              isCompact: isCompactHeight,
-              onSearchChanged: (v) => setState(() => _searchQuery = v),
-              onStageChanged: (stage) => setState(() => _stageFilter = stage),
-              onSelectTicket: _selectTicket,
-              onLoadMore: _loadMore,
-            );
+            // Tự động tắt `unreadByAdmin` khi ticket đang mở nhận tin nhắn mới từ User theo thời gian thực
+            if (selectedTicket != null && selectedTicket.unreadByAdmin) {
+              final ticketIdToMark = selectedTicket.ticketId;
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted && _selectedTicketId == ticketIdToMark) {
+                  _markReadByAdmin(ticketIdToMark);
+                }
+              });
+            }
 
-            final conversationPane = _SupportConversationPane(
-              ticket: selectedTicket,
-              messagesStream: _selectedMessagesStream,
-              replyController: _replyCtrl,
-              scrollController: _msgScrollCtrl,
-              isSubmitting: _isSubmitting,
-              isCompactHeight: isCompactHeight,
-              showBackButton: !isWide,
-              onBack: () => setState(() => _selectedTicketId = null),
-              onClaim: selectedTicket == null
-                  ? null
-                  : () => _handleClaim(selectedTicket),
-              onSendReply: selectedTicket == null
-                  ? null
-                  : () => _handleReply(selectedTicket),
-              onMarkResolved: selectedTicket == null
-                  ? null
-                  : () => _handleMarkResolved(selectedTicket),
-              onCloseResolved: selectedTicket == null
-                  ? null
-                  : () => _handleCloseResolved(selectedTicket),
-            );
+            return LayoutBuilder(
+              builder: (context, constraints) {
+                final isWide = constraints.maxWidth >= 900;
+                final isCompactHeight = constraints.maxHeight < 520;
+                final pad = isCompactHeight ? 10.0 : 20.0;
 
-            return Padding(
-              padding: EdgeInsets.all(pad),
-              child: isWide
-                  ? Row(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
-                        SizedBox(width: 360, child: listPane),
-                        const SizedBox(width: 16),
-                        Expanded(child: conversationPane),
-                      ],
-                    )
-                  : (selectedTicket == null ? listPane : conversationPane),
+                final listPane = _SupportTicketListPane(
+                  allTickets: allTickets,
+                  filteredTickets: filteredTickets,
+                  selectedTicketId: selectedTicket?.ticketId,
+                  stageFilter: _stageFilter,
+                  isServerFilteredNew: isServerFilteredNew,
+                  cachedAllCount:
+                      _hasCachedUnfilteredCounts ? _cachedAllCount : null,
+                  cachedInProgressCount: _hasCachedUnfilteredCounts
+                      ? _cachedInProgressCount
+                      : null,
+                  cachedResolvedCount:
+                      _hasCachedUnfilteredCounts ? _cachedResolvedCount : null,
+                  searchController: _searchCtrl,
+                  hasMore: hasMore,
+                  isCompact: isCompactHeight,
+                  onSearchChanged: (v) => setState(() => _searchQuery = v),
+                  onStageChanged: _onStageChanged,
+                  onSelectTicket: _selectTicket,
+                  onLoadMore: _loadMore,
+                );
+
+                final conversationPane = _SupportConversationPane(
+                  ticket: selectedTicket,
+                  messagesStream: _selectedMessagesStream,
+                  replyController: _replyCtrl,
+                  replyFocusNode: _replyFocusNode,
+                  scrollController: _msgScrollCtrl,
+                  isSubmitting: _isSubmitting,
+                  isCompactHeight: isCompactHeight,
+                  showBackButton: !isWide,
+                  onBack: () => setState(() {
+                    _selectedTicketId = null;
+                    _selectedTicketStream = null;
+                    _selectedMessagesStream = null;
+                  }),
+                  onClaim: selectedTicket == null
+                      ? null
+                      : () => _handleClaim(selectedTicket),
+                  onSendReply: selectedTicket == null
+                      ? null
+                      : () => _handleReply(selectedTicket),
+                  onInsertQuickReply: _insertQuickReply,
+                  onMarkResolved: selectedTicket == null
+                      ? null
+                      : () => _handleMarkResolved(selectedTicket),
+                  onReopenResolved: selectedTicket == null
+                      ? null
+                      : () => _handleReopenResolved(selectedTicket),
+                  onCloseResolved: selectedTicket == null
+                      ? null
+                      : () => _handleCloseResolved(selectedTicket),
+                );
+
+                return Padding(
+                  padding: EdgeInsets.all(pad),
+                  child: isWide
+                      ? Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            SizedBox(width: 360, child: listPane),
+                            const SizedBox(width: 16),
+                            Expanded(child: conversationPane),
+                          ],
+                        )
+                      : (selectedTicket == null ? listPane : conversationPane),
+                );
+              },
             );
           },
         );
@@ -385,6 +590,10 @@ class _SupportTicketListPane extends StatelessWidget {
   final List<SupportTicket> filteredTickets;
   final String? selectedTicketId;
   final _AdminSupportStage? stageFilter;
+  final bool isServerFilteredNew;
+  final int? cachedAllCount;
+  final int? cachedInProgressCount;
+  final int? cachedResolvedCount;
   final TextEditingController searchController;
   final bool hasMore;
   final bool isCompact;
@@ -398,6 +607,10 @@ class _SupportTicketListPane extends StatelessWidget {
     required this.filteredTickets,
     required this.selectedTicketId,
     required this.stageFilter,
+    required this.isServerFilteredNew,
+    this.cachedAllCount,
+    this.cachedInProgressCount,
+    this.cachedResolvedCount,
     required this.searchController,
     required this.hasMore,
     required this.isCompact,
@@ -415,9 +628,17 @@ class _SupportTicketListPane extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final newCount = _countForStage(_AdminSupportStage.newTicket);
-    final inProgressCount = _countForStage(_AdminSupportStage.inProgress);
-    final resolvedCount = _countForStage(_AdminSupportStage.resolved);
+    final newCount = isServerFilteredNew
+        ? allTickets.length
+        : _countForStage(_AdminSupportStage.newTicket);
+    final allCount =
+        isServerFilteredNew ? cachedAllCount : allTickets.length;
+    final inProgressCount = isServerFilteredNew
+        ? cachedInProgressCount
+        : _countForStage(_AdminSupportStage.inProgress);
+    final resolvedCount = isServerFilteredNew
+        ? cachedResolvedCount
+        : _countForStage(_AdminSupportStage.resolved);
 
     return Container(
       decoration: BoxDecoration(
@@ -463,7 +684,7 @@ class _SupportTicketListPane extends StatelessWidget {
                   children: [
                     _buildFilterChip(
                       key: const ValueKey('admin_support_status_chip_all'),
-                      label: 'Tất cả (${allTickets.length})',
+                      label: allCount != null ? 'Tất cả ($allCount)' : 'Tất cả',
                       selected: stageFilter == null,
                       onTap: () => onStageChanged(null),
                     ),
@@ -477,14 +698,18 @@ class _SupportTicketListPane extends StatelessWidget {
                       key: const ValueKey(
                         'admin_support_status_chip_in_progress',
                       ),
-                      label: 'Đang xử lý ($inProgressCount)',
+                      label: inProgressCount != null
+                          ? 'Đang xử lý ($inProgressCount)'
+                          : 'Đang xử lý',
                       selected: stageFilter == _AdminSupportStage.inProgress,
                       onTap: () =>
                           onStageChanged(_AdminSupportStage.inProgress),
                     ),
                     _buildFilterChip(
                       key: const ValueKey('admin_support_status_chip_resolved'),
-                      label: 'Đã giải quyết ($resolvedCount)',
+                      label: resolvedCount != null
+                          ? 'Đã giải quyết ($resolvedCount)'
+                          : 'Đã giải quyết',
                       selected: stageFilter == _AdminSupportStage.resolved,
                       onTap: () => onStageChanged(_AdminSupportStage.resolved),
                     ),
@@ -690,6 +915,7 @@ class _SupportConversationPane extends StatelessWidget {
   final SupportTicket? ticket;
   final Stream<List<SupportMessage>>? messagesStream;
   final TextEditingController replyController;
+  final FocusNode replyFocusNode;
   final ScrollController scrollController;
   final bool isSubmitting;
   final bool isCompactHeight;
@@ -697,21 +923,26 @@ class _SupportConversationPane extends StatelessWidget {
   final VoidCallback onBack;
   final VoidCallback? onClaim;
   final VoidCallback? onSendReply;
+  final ValueChanged<_QuickReplyPreset> onInsertQuickReply;
   final VoidCallback? onMarkResolved;
+  final VoidCallback? onReopenResolved;
   final VoidCallback? onCloseResolved;
 
   const _SupportConversationPane({
     required this.ticket,
     required this.messagesStream,
     required this.replyController,
+    required this.replyFocusNode,
     required this.scrollController,
     required this.isSubmitting,
     required this.isCompactHeight,
     required this.showBackButton,
     required this.onBack,
+    required this.onInsertQuickReply,
     this.onClaim,
     this.onSendReply,
     this.onMarkResolved,
+    this.onReopenResolved,
     this.onCloseResolved,
   });
 
@@ -811,7 +1042,7 @@ class _SupportConversationPane extends StatelessWidget {
 
   Widget _buildHeader(SupportTicket current, _AdminSupportStage stage) {
     return ConstrainedBox(
-      constraints: BoxConstraints(maxHeight: isCompactHeight ? 118 : 220),
+      constraints: BoxConstraints(maxHeight: isCompactHeight ? 104 : 220),
       child: SingleChildScrollView(
         padding: EdgeInsets.symmetric(
           horizontal: isCompactHeight ? 12 : 18,
@@ -964,14 +1195,74 @@ class _SupportConversationPane extends StatelessWidget {
     );
   }
 
+  Widget _buildQuickRepliesBar() {
+    return Padding(
+      key: const ValueKey('admin_support_quick_replies_bar'),
+      padding: EdgeInsets.only(
+        left: isCompactHeight ? 10 : 14,
+        right: isCompactHeight ? 10 : 14,
+        top: isCompactHeight ? 6 : 8,
+        bottom: isCompactHeight ? 2 : 4,
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            Icon(
+              Icons.bolt_rounded,
+              size: 15,
+              color: AppColors.primary.withValues(alpha: 0.8),
+            ),
+            const SizedBox(width: 4),
+            for (final preset in _QuickReplyPreset.defaults) ...[
+              Padding(
+                padding: const EdgeInsets.only(right: 6),
+                child: ActionChip(
+                  key: ValueKey('admin_support_quick_reply_${preset.id}'),
+                  label: Text(
+                    preset.label,
+                    style: GoogleFonts.inter(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w500,
+                      color: AppColors.slate700,
+                    ),
+                  ),
+                  tooltip: preset.content,
+                  onPressed:
+                      isSubmitting ? null : () => onInsertQuickReply(preset),
+                  visualDensity: VisualDensity.compact,
+                  materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 6,
+                    vertical: 0,
+                  ),
+                  backgroundColor: AppColors.slate50,
+                  side: const BorderSide(color: AppColors.slate200),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildReplyBar(SupportTicket current) {
     if (current.isClosed) {
       return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        key: const ValueKey('admin_support_closed_banner'),
+        padding: EdgeInsets.symmetric(
+          horizontal: isCompactHeight ? 12 : 16,
+          vertical: isCompactHeight ? 10 : 12,
+        ),
         color: AppColors.slate50,
         child: Row(
           children: [
-            const Icon(Icons.lock_outline_rounded, size: 16, color: AppColors.slate500),
+            const Icon(
+              Icons.lock_outline_rounded,
+              size: 16,
+              color: AppColors.slate500,
+            ),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
@@ -989,75 +1280,110 @@ class _SupportConversationPane extends StatelessWidget {
 
     if (!current.status.canAdminReply) {
       return Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        key: const ValueKey('admin_support_resolved_banner'),
+        padding: EdgeInsets.symmetric(
+          horizontal: isCompactHeight ? 12 : 16,
+          vertical: isCompactHeight ? 8 : 11,
+        ),
         color: AppColors.incomeBackground,
         child: Row(
           children: [
-            const Icon(Icons.check_circle_outline_rounded, size: 16, color: AppColors.income),
+            const Icon(
+              Icons.check_circle_outline_rounded,
+              size: 16,
+              color: AppColors.income,
+            ),
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                'Yêu cầu đã được đánh dấu Đã giải quyết. Chờ người dùng phản hồi thêm hoặc bấm Đóng yêu cầu.',
+                'Yêu cầu này đã được giải quyết.',
                 style: GoogleFonts.inter(
                   fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
                   color: AppColors.slate700,
                 ),
               ),
             ),
+            if (current.status.canAdminReopenResolved) ...[
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                key: const ValueKey('admin_support_reopen_btn'),
+                onPressed: isSubmitting ? null : onReopenResolved,
+                icon: const Icon(Icons.replay_rounded, size: 15),
+                label: const Text('Mở lại xử lý'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: AppColors.primary,
+                  side: const BorderSide(color: AppColors.primary),
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 6,
+                  ),
+                ),
+              ),
+            ],
           ],
         ),
       );
     }
 
-    return Padding(
-      padding: EdgeInsets.symmetric(
-        horizontal: isCompactHeight ? 10 : 14,
-        vertical: isCompactHeight ? 8 : 12,
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          Expanded(
-            child: TextField(
-              key: const ValueKey('admin_support_reply_input'),
-              controller: replyController,
-              minLines: 1,
-              maxLines: isCompactHeight ? 2 : 4,
-              maxLength: SupportTicket.kMaxMessageLength,
-              decoration: const InputDecoration(
-                hintText: 'Nhập nội dung phản hồi cho người dùng...',
-                counterText: '',
-                isDense: true,
-                contentPadding: EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 10,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _buildQuickRepliesBar(),
+        Padding(
+          padding: EdgeInsets.symmetric(
+            horizontal: isCompactHeight ? 10 : 14,
+            vertical: isCompactHeight ? 6 : 12,
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: TextField(
+                  key: const ValueKey('admin_support_reply_input'),
+                  controller: replyController,
+                  focusNode: replyFocusNode,
+                  minLines: 1,
+                  maxLines: isCompactHeight ? 2 : 4,
+                  maxLength: SupportTicket.kMaxMessageLength,
+                  decoration: const InputDecoration(
+                    hintText: 'Nhập nội dung phản hồi cho người dùng...',
+                    counterText: '',
+                    isDense: true,
+                    contentPadding: EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 10,
+                    ),
+                  ),
+                  onSubmitted: (_) {
+                    if (!isSubmitting && onSendReply != null) {
+                      onSendReply!();
+                    }
+                  },
                 ),
               ),
-              onSubmitted: (_) {
-                if (!isSubmitting && onSendReply != null) {
-                  onSendReply!();
-                }
-              },
-            ),
+              const SizedBox(width: 10),
+              FilledButton.icon(
+                key: const ValueKey('admin_support_send_reply_btn'),
+                onPressed: isSubmitting ? null : onSendReply,
+                icon: isSubmitting
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Colors.white,
+                        ),
+                      )
+                    : const Icon(Icons.send_rounded, size: 16),
+                label: const Text('Gửi phản hồi'),
+              ),
+            ],
           ),
-          const SizedBox(width: 10),
-          FilledButton.icon(
-            key: const ValueKey('admin_support_send_reply_btn'),
-            onPressed: isSubmitting ? null : onSendReply,
-            icon: isSubmitting
-                ? const SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: Colors.white,
-                    ),
-                  )
-                : const Icon(Icons.send_rounded, size: 16),
-            label: const Text('Gửi phản hồi'),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

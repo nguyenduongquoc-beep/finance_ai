@@ -1,18 +1,40 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../models/user_model.dart';
+import '../../services/auth_service.dart';
 import '../../services/firestore_service.dart';
 import '../../services/local_notification_service.dart';
 import '../../l10n/app_localizations.dart';
 import '../../utils/constants.dart';
 import '../../widgets/main_navigation.dart';
 import '../setup/wallet_setup_screen.dart';
+import 'login_screen.dart';
 import 'onboarding_screen.dart';
 
 /// Splash Screen - Màn hình khởi động với thương hiệu Fintech cao cấp
 class SplashScreen extends StatefulWidget {
-  const SplashScreen({super.key});
+  final Duration initialDelay;
+  final User? Function()? currentUserResolver;
+  final FirestoreService? firestoreService;
+  final AuthService? authService;
+  final WidgetBuilder? homeRouteBuilder;
+  final WidgetBuilder? walletSetupRouteBuilder;
+  final WidgetBuilder? loginRouteBuilder;
+  final WidgetBuilder? onboardingRouteBuilder;
+
+  const SplashScreen({
+    super.key,
+    this.initialDelay = const Duration(seconds: 2),
+    this.currentUserResolver,
+    this.firestoreService,
+    this.authService,
+    this.homeRouteBuilder,
+    this.walletSetupRouteBuilder,
+    this.loginRouteBuilder,
+    this.onboardingRouteBuilder,
+  });
 
   @override
   State<SplashScreen> createState() => _SplashScreenState();
@@ -59,21 +81,50 @@ class _SplashScreenState extends State<SplashScreen>
   }
 
   Future<void> _checkAuthState() async {
-    await Future.delayed(const Duration(seconds: 2));
+    if (widget.initialDelay > Duration.zero) {
+      await Future.delayed(widget.initialDelay);
+    }
     if (!mounted) return;
 
-    final user = FirebaseAuth.instance.currentUser;
+    final user = widget.currentUserResolver != null
+        ? widget.currentUserResolver!()
+        : FirebaseAuth.instance.currentUser;
     if (user == null) {
+      bool hasSeenOnboarding = false;
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        hasSeenOnboarding =
+            prefs.getBool(OnboardingScreen.hasSeenOnboardingKey) ?? false;
+      } catch (_) {}
+      if (!mounted) return;
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const OnboardingScreen()),
+        MaterialPageRoute(
+          builder: hasSeenOnboarding
+              ? (widget.loginRouteBuilder ?? (_) => const LoginScreen())
+              : (widget.onboardingRouteBuilder ??
+                  (_) => const OnboardingScreen()),
+        ),
       );
-    } else {
-      final firestore = FirestoreService();
-      final profile = await firestore.getUserProfile(user.uid);
+      return;
+    }
+
+    final firestore = widget.firestoreService ?? FirestoreService();
+    final authService = widget.authService ?? AuthService();
+    const firestoreTimeout = Duration(seconds: 8);
+
+    try {
+      final profile = await firestore
+          .getUserProfile(
+            user.uid,
+            includePrivateFinancial: false,
+          )
+          .timeout(firestoreTimeout);
       if (profile != null && profile.isLocked) {
         if (!mounted) return;
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const MainNavigation()),
+          MaterialPageRoute(
+            builder: widget.homeRouteBuilder ?? (_) => const MainNavigation(),
+          ),
         );
         return;
       }
@@ -81,34 +132,63 @@ class _SplashScreenState extends State<SplashScreen>
         final fallbackName = (user.displayName?.trim().isNotEmpty == true)
             ? user.displayName!.trim()
             : AppLocalizations.tr('common_user');
-        await firestore.createUserProfile(
-          AppUser(
-            uid: user.uid,
-            name: fallbackName,
-            email: user.email ?? '',
-            createdAt: DateTime.now(),
-          ),
-        );
+        final now = DateTime.now();
+        await firestore
+            .createUserProfile(
+              AppUser(
+                uid: user.uid,
+                name: fallbackName,
+                email: user.email ?? '',
+                authProvider: authService.authProviderCode,
+                createdAt: now,
+                lastActiveAt: now,
+              ),
+            )
+            .timeout(firestoreTimeout);
+      } else {
+        await firestore
+            .touchUserPresenceAndProvider(
+              uid: user.uid,
+              authProvider: authService.authProviderCode,
+            )
+            .timeout(firestoreTimeout);
       }
       if (!mounted) return;
-      final wallets = await firestore.streamWallets(user.uid).first;
+      final wallets =
+          await firestore.streamWallets(user.uid).first.timeout(firestoreTimeout);
       if (!mounted) return;
       if (wallets.isEmpty) {
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const WalletSetupScreen()),
+          MaterialPageRoute(
+            builder: widget.walletSetupRouteBuilder ??
+                (_) => const WalletSetupScreen(),
+          ),
         );
       } else {
         try {
-          await firestore.processDueRecurringTransactions(user.uid);
-          await firestore.syncRecurringNotifications(user.uid);
+          // syncRecurringNotifications đã bao gồm processDueRecurringTransactions ở bước đầu.
+          await firestore
+              .syncRecurringNotifications(user.uid)
+              .timeout(const Duration(seconds: 6));
         } catch (_) {
-          // Implemented silent fallback for offline/network errors
+          // Silent fallback cho tình huống offline hoặc timeout mạng
         }
         if (!mounted) return;
         Navigator.of(context).pushReplacement(
-          MaterialPageRoute(builder: (_) => const MainNavigation()),
+          MaterialPageRoute(
+            builder: widget.homeRouteBuilder ?? (_) => const MainNavigation(),
+          ),
         );
       }
+    } catch (_) {
+      // Xử lý mềm khi mất mạng / lỗi kết nối lúc mở app cho người dùng đã đăng nhập:
+      // ưu tiên đưa vào MainNavigation để dùng cache Firestore cục bộ thay vì treo màn chờ.
+      if (!mounted) return;
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(
+          builder: widget.homeRouteBuilder ?? (_) => const MainNavigation(),
+        ),
+      );
     }
   }
 

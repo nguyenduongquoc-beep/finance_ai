@@ -27,15 +27,24 @@ import 'transaction_detail_screen.dart';
 /// - Phân nhóm theo ngày chuyên nghiệp với tổng thu/chi từng ngày.
 /// ============================================================
 class TransactionListScreen extends StatefulWidget {
-  const TransactionListScreen({super.key});
+  final FirestoreService? firestoreService;
+  final FinancialExportService? exportService;
+  final String? userIdOverride;
+
+  const TransactionListScreen({
+    super.key,
+    this.firestoreService,
+    this.exportService,
+    this.userIdOverride,
+  });
 
   @override
   State<TransactionListScreen> createState() => _TransactionListScreenState();
 }
 
 class _TransactionListScreenState extends State<TransactionListScreen> {
-  final _firestoreService = FirestoreService();
-  final _exportService = FinancialExportService();
+  late final FirestoreService _firestoreService;
+  late final FinancialExportService _exportService;
   final _searchController = TextEditingController();
   final _searchFocusNode = FocusNode();
 
@@ -43,6 +52,10 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
   late Stream<List<AppTransaction>> _transactionsStream;
   late final Stream<List<Category>> _categoriesStream;
   late final Stream<List<Wallet>> _walletsStream;
+
+  List<AppTransaction> _latestFilteredTransactions = const [];
+  List<Category> _latestCategories = const [];
+  List<Wallet> _latestWallets = const [];
 
   // Search & Filter State
   String _searchQuery = '';
@@ -64,10 +77,16 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
   @override
   void initState() {
     super.initState();
-    try {
-      _uid = FirebaseAuth.instance.currentUser?.uid ?? '';
-    } catch (_) {
-      _uid = '';
+    _firestoreService = widget.firestoreService ?? FirestoreService();
+    _exportService = widget.exportService ?? FinancialExportService();
+    if (widget.userIdOverride != null) {
+      _uid = widget.userIdOverride!;
+    } else {
+      try {
+        _uid = FirebaseAuth.instance.currentUser?.uid ?? '';
+      } catch (_) {
+        _uid = '';
+      }
     }
     if (_uid.isNotEmpty) {
       _categoriesStream = _firestoreService.streamCategories(_uid);
@@ -100,7 +119,9 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
     if (_timeFilter != 'all' ||
         _selectedDate != null ||
         _selectedMonth != null ||
-        _selectedDateRange != null) count++;
+        _selectedDateRange != null) {
+      count++;
+    }
     if (_selectedCategoryId != null) count++;
     if (_selectedWalletId != null) count++;
     if (_amountFilter != 'all') count++;
@@ -189,8 +210,9 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
 
   bool _matchesAmountFilter(double amount) {
     if (_amountFilter == 'under_100k') return amount < 100000;
-    if (_amountFilter == '100k_500k')
+    if (_amountFilter == '100k_500k') {
       return amount >= 100000 && amount <= 500000;
+    }
     if (_amountFilter == '500k_2m') return amount > 500000 && amount <= 2000000;
     if (_amountFilter == 'over_2m') return amount > 2000000;
     return true;
@@ -201,7 +223,15 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
   // ============================================================
   Future<void> _exportFilteredCsv(List<AppTransaction> filteredList,
       List<Category> categories, List<Wallet> wallets) async {
-    if (_isExportingCsv || filteredList.isEmpty) return;
+    if (_isExportingCsv) return;
+    if (filteredList.isEmpty) {
+      AppSnackbar.show(
+        context,
+        context.tr('tx_list_export_empty'),
+        isWarning: true,
+      );
+      return;
+    }
     setState(() => _isExportingCsv = true);
 
     try {
@@ -254,8 +284,9 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
       body: StreamBuilder<List<AppTransaction>>(
         stream: _transactionsStream,
         builder: (context, txSnap) {
-          if (txSnap.hasError)
+          if (txSnap.hasError) {
             return StreamErrorWidget(error: txSnap.error.toString());
+          }
           if (!txSnap.hasData) {
             return const Center(child: CircularProgressIndicator());
           }
@@ -292,8 +323,10 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
                     // 1. Loại giao dịch
                     if (_typeFilter != 'all') {
                       if (_typeFilter == 'transfer') {
-                        if (tx.type != 'transfer' && !tx.type.contains('goal'))
+                        if (tx.type != 'transfer' &&
+                            !tx.type.contains('goal')) {
                           return false;
+                        }
                       } else if (tx.type != _typeFilter) {
                         return false;
                       }
@@ -325,6 +358,11 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
 
                   // Sắp xếp danh sách
                   _sortTransactions(filteredTransactions);
+
+                  // Cập nhật ảnh chụp tập đang lọc để nút Xuất CSV dùng đúng dữ liệu đang xem
+                  _latestFilteredTransactions = filteredTransactions;
+                  _latestCategories = categories;
+                  _latestWallets = wallets;
 
                   return Column(
                     children: [
@@ -374,8 +412,9 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
         ),
       ),
       actions: [
-        // Nút Xuất CSV
+        // Nút Xuất CSV (theo đúng danh sách đã lọc hiện tại)
         IconButton(
+          key: const ValueKey('tx_list_export_csv_btn'),
           icon: _isExportingCsv
               ? const SizedBox(
                   width: 18,
@@ -388,15 +427,11 @@ class _TransactionListScreenState extends State<TransactionListScreen> {
           tooltip: context.tr('tx_list_export_csv'),
           onPressed: _isExportingCsv
               ? null
-              : () async {
-                  final transactions =
-                      await _firestoreService.streamTransactions(_uid).first;
-                  final categories =
-                      await _firestoreService.streamCategories(_uid).first;
-                  final wallets =
-                      await _firestoreService.streamWallets(_uid).first;
-                  _exportFilteredCsv(transactions, categories, wallets);
-                },
+              : () => _exportFilteredCsv(
+                    List<AppTransaction>.from(_latestFilteredTransactions),
+                    List<Category>.from(_latestCategories),
+                    List<Wallet>.from(_latestWallets),
+                  ),
         ),
 
         // Nút Bộ Lọc Nâng Cao kèm Badge

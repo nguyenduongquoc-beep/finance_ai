@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../l10n/app_localizations.dart';
 import '../../models/wallet_model.dart';
@@ -14,8 +13,20 @@ import '../../widgets/app_text_field.dart';
 import 'category_setup_screen.dart';
 
 /// Thiết lập ví tiền đầu tiên (Bước 1/2) — Hiện đại, thân thiện & logic
+/// Chỉ giữ danh sách ví tạm trong phiên thiết lập và truyền sang Bước 2;
+/// dữ liệu chỉ được ghi nguyên tử xuống Firestore khi người dùng bấm Hoàn tất ở Bước 2,
+/// tránh tạo trùng ví nếu người dùng quay lại Bước 1 nhiều lần.
 class WalletSetupScreen extends StatefulWidget {
-  const WalletSetupScreen({super.key});
+  final FirestoreService? firestoreService;
+  final String? userIdOverride;
+  final VoidCallback? onSetupCompleted;
+
+  const WalletSetupScreen({
+    super.key,
+    this.firestoreService,
+    this.userIdOverride,
+    this.onSetupCompleted,
+  });
 
   @override
   State<WalletSetupScreen> createState() => _WalletSetupScreenState();
@@ -41,8 +52,6 @@ class _SetupWallet {
 }
 
 class _WalletSetupScreenState extends State<WalletSetupScreen> {
-  final _firestoreService = FirestoreService();
-  bool _isLoading = false;
 
   List<Map<String, String>> _quickBalances(BuildContext context) => [
         {'label': '0 ₫', 'value': '0'},
@@ -130,10 +139,6 @@ class _WalletSetupScreenState extends State<WalletSetupScreen> {
   }
 
   void _showAddCustomWalletSheet() {
-    final nameCtrl = TextEditingController();
-    final balanceCtrl = TextEditingController();
-    String selectedType = 'bank';
-
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -141,195 +146,63 @@ class _WalletSetupScreenState extends State<WalletSetupScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (ctx) {
-        return StatefulBuilder(
-          builder: (ctx, setSheetState) {
-            return Padding(
-              padding: EdgeInsets.fromLTRB(
-                20,
-                20,
-                20,
-                MediaQuery.of(ctx).viewInsets.bottom + 20,
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Expanded(
-                        child: Text(
-                          context.tr('setup_wallet_add_custom'),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: GoogleFonts.inter(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w700,
-                            color: context.appTextPrimary,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      IconButton(
-                        icon: const Icon(Icons.close_rounded, size: 20),
-                        onPressed: () => Navigator.pop(ctx),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  AppTextField(
-                    controller: nameCtrl,
-                    labelText: context.tr('setup_wallet_name_label'),
-                    hintText: context.tr('setup_wallet_name_hint'),
-                    prefixIcon: Icons.account_balance_wallet_outlined,
-                  ),
-                  const SizedBox(height: 14),
-                  Text(
-                    context.tr('setup_wallet_type_label'),
-                    style: GoogleFonts.inter(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: context.appTextSecondary,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(
-                    children: [
-                      _buildTypeOption(
-                        label: context.tr('setup_wallet_opt_bank'),
-                        value: 'bank',
-                        selectedValue: selectedType,
-                        icon: Icons.account_balance_rounded,
-                        onSelect: (v) =>
-                            setSheetState(() => selectedType = v),
-                      ),
-                      const SizedBox(width: 8),
-                      _buildTypeOption(
-                        label: context.tr('setup_wallet_opt_ewallet'),
-                        value: 'eWallet',
-                        selectedValue: selectedType,
-                        icon: Icons.account_balance_wallet_rounded,
-                        onSelect: (v) =>
-                            setSheetState(() => selectedType = v),
-                      ),
-                      const SizedBox(width: 8),
-                      _buildTypeOption(
-                        label: context.tr('setup_wallet_opt_cash'),
-                        value: 'cash',
-                        selectedValue: selectedType,
-                        icon: Icons.payments_rounded,
-                        onSelect: (v) =>
-                            setSheetState(() => selectedType = v),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 14),
-                  AppTextField(
-                    controller: balanceCtrl,
-                    labelText: context.tr('setup_wallet_init_bal_label'),
-                    hintText: '0',
-                    prefixIcon: Icons.attach_money_rounded,
-                    keyboardType: TextInputType.number,
-                    inputFormatters: const [CurrencyInputFormatter()],
-                  ),
-                  const SizedBox(height: 20),
-                  AppButton(
-                    text: context.tr('setup_wallet_add_to_list'),
-                    onPressed: () {
-                      final name = nameCtrl.text.trim();
-                      if (name.isEmpty) return;
+      builder: (_) => _AddCustomWalletSheet(
+        onSubmit: ({
+          required String name,
+          required String selectedType,
+          required String balanceText,
+        }) {
+          final normalizedName = name.toLowerCase();
+          final existingIndex = _suggestedWallets.indexWhere(
+            (w) =>
+                w.type == selectedType &&
+                (w.name.trim().toLowerCase() == normalizedName ||
+                    (!w.isUserNamed &&
+                        w.type == 'cash' &&
+                        WalletLocalizationHelper.isSystemCashName(w.name) &&
+                        WalletLocalizationHelper.isSystemCashName(name))),
+          );
 
-                      final icon = selectedType == 'cash'
-                          ? Icons.payments_rounded
-                          : selectedType == 'bank'
-                              ? Icons.account_balance_rounded
-                              : Icons.account_balance_wallet_rounded;
-                      final color = selectedType == 'cash'
-                          ? const Color(0xFF10B981)
-                          : selectedType == 'bank'
-                              ? const Color(0xFF0EA5E9)
-                              : const Color(0xFF8B5CF6);
+          if (existingIndex != -1) {
+            setState(() {
+              _suggestedWallets[existingIndex].selected = true;
+              if (balanceText.isNotEmpty) {
+                _suggestedWallets[existingIndex].controller.text = balanceText;
+              }
+            });
+            return;
+          }
 
-                      final newWallet = _SetupWallet(
-                        name,
-                        selectedType,
-                        icon,
-                        color,
-                        selected: true,
-                        isUserNamed: true,
-                      );
-                      newWallet.controller.text = balanceCtrl.text.trim();
+          final icon = selectedType == 'cash'
+              ? Icons.payments_rounded
+              : selectedType == 'bank'
+                  ? Icons.account_balance_rounded
+                  : Icons.account_balance_wallet_rounded;
+          final color = selectedType == 'cash'
+              ? const Color(0xFF10B981)
+              : selectedType == 'bank'
+                  ? const Color(0xFF0EA5E9)
+                  : const Color(0xFF8B5CF6);
 
-                      setState(() {
-                        _suggestedWallets.add(newWallet);
-                      });
-                      Navigator.pop(ctx);
-                    },
-                  ),
-                ],
-              ),
-            );
-          },
-        );
-      },
-    );
-  }
+          final newWallet = _SetupWallet(
+            name,
+            selectedType,
+            icon,
+            color,
+            selected: true,
+            isUserNamed: true,
+          );
+          newWallet.controller.text = balanceText;
 
-  Widget _buildTypeOption({
-    required String label,
-    required String value,
-    required String selectedValue,
-    required IconData icon,
-    required ValueChanged<String> onSelect,
-  }) {
-    final isSelected = value == selectedValue;
-    return Expanded(
-      child: GestureDetector(
-        onTap: () => onSelect(value),
-        child: Container(
-          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
-          decoration: BoxDecoration(
-            color: isSelected
-                ? AppColors.primary.withAlpha(24)
-                : context.appBackground,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(
-              color: isSelected ? AppColors.primary : context.appBorder,
-            ),
-          ),
-          child: Column(
-            children: [
-              Icon(
-                icon,
-                size: 18,
-                color: isSelected
-                    ? AppColors.primary
-                    : context.appTextSecondary,
-              ),
-              const SizedBox(height: 4),
-              FittedBox(
-                fit: BoxFit.scaleDown,
-                child: Text(
-                  label,
-                  maxLines: 1,
-                  style: GoogleFonts.inter(
-                    fontSize: 11,
-                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
-                    color: isSelected
-                        ? AppColors.primary
-                        : context.appTextSecondary,
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
+          setState(() {
+            _suggestedWallets.add(newWallet);
+          });
+        },
       ),
     );
   }
 
-  Future<void> _handleContinue() async {
+  void _handleContinue() {
     final selectedWallets =
         _suggestedWallets.where((w) => w.selected).toList();
     if (selectedWallets.isEmpty) {
@@ -341,30 +214,35 @@ class _WalletSetupScreenState extends State<WalletSetupScreen> {
       return;
     }
 
-    setState(() => _isLoading = true);
-    try {
-      final uid = FirebaseAuth.instance.currentUser!.uid;
+    final baseTime = DateTime.now();
+    final pendingWallets = <Wallet>[
+      for (int i = 0; i < selectedWallets.length; i++)
+        () {
+          final w = selectedWallets[i];
+          final balance = AppFormatters.parseCurrencyInput(w.controller.text);
+          return Wallet(
+            walletId: '',
+            userId: widget.userIdOverride ?? '',
+            walletName: w.name.trim(),
+            balance: balance,
+            initialBalance: balance,
+            type: w.type,
+            isUserNamed: w.isUserNamed,
+            createdAt: baseTime.add(Duration(milliseconds: i)),
+          );
+        }(),
+    ];
 
-      for (final w in selectedWallets) {
-        final balance = AppFormatters.parseCurrencyInput(w.controller.text);
-        final wallet = Wallet(
-          walletId: '',
-          userId: uid,
-          walletName: w.name,
-          balance: balance,
-          type: w.type,
-          isUserNamed: w.isUserNamed,
-          createdAt: DateTime.now(),
-        );
-        await _firestoreService.createWallet(wallet);
-      }
-      if (!mounted) return;
-      Navigator.of(context).push(
-        MaterialPageRoute(builder: (_) => const CategorySetupScreen()),
-      );
-    } finally {
-      if (mounted) setState(() => _isLoading = false);
-    }
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => CategorySetupScreen(
+          pendingWallets: pendingWallets,
+          firestoreService: widget.firestoreService,
+          userIdOverride: widget.userIdOverride,
+          onSetupCompleted: widget.onSetupCompleted,
+        ),
+      ),
+    );
   }
 
   @override
@@ -686,7 +564,6 @@ class _WalletSetupScreenState extends State<WalletSetupScreen> {
               child: AppButton(
                 text: context.tr('setup_wallet_next'),
                 icon: Icons.arrow_forward_rounded,
-                isLoading: _isLoading,
                 onPressed: _handleContinue,
               ),
             ),
@@ -778,6 +655,184 @@ class _WalletSetupScreenState extends State<WalletSetupScreen> {
             ],
           );
         }),
+      ),
+    );
+  }
+}
+
+class _AddCustomWalletSheet extends StatefulWidget {
+  final void Function({
+    required String name,
+    required String selectedType,
+    required String balanceText,
+  }) onSubmit;
+
+  const _AddCustomWalletSheet({required this.onSubmit});
+
+  @override
+  State<_AddCustomWalletSheet> createState() => _AddCustomWalletSheetState();
+}
+
+class _AddCustomWalletSheetState extends State<_AddCustomWalletSheet> {
+  final _nameCtrl = TextEditingController();
+  final _balanceCtrl = TextEditingController();
+  String _selectedType = 'bank';
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _balanceCtrl.dispose();
+    super.dispose();
+  }
+
+  Widget _buildTypeOption({
+    required String label,
+    required String value,
+    required IconData icon,
+  }) {
+    final isSelected = value == _selectedType;
+    return Expanded(
+      child: GestureDetector(
+        onTap: () => setState(() => _selectedType = value),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
+          decoration: BoxDecoration(
+            color: isSelected
+                ? AppColors.primary.withAlpha(24)
+                : context.appBackground,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(
+              color: isSelected ? AppColors.primary : context.appBorder,
+            ),
+          ),
+          child: Column(
+            children: [
+              Icon(
+                icon,
+                size: 18,
+                color: isSelected
+                    ? AppColors.primary
+                    : context.appTextSecondary,
+              ),
+              const SizedBox(height: 4),
+              FittedBox(
+                fit: BoxFit.scaleDown,
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  style: GoogleFonts.inter(
+                    fontSize: 11,
+                    fontWeight: isSelected ? FontWeight.w600 : FontWeight.w500,
+                    color: isSelected
+                        ? AppColors.primary
+                        : context.appTextSecondary,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.fromLTRB(
+        20,
+        20,
+        20,
+        MediaQuery.of(context).viewInsets.bottom + 20,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Text(
+                  context.tr('setup_wallet_add_custom'),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: GoogleFonts.inter(
+                    fontSize: 17,
+                    fontWeight: FontWeight.w700,
+                    color: context.appTextPrimary,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton(
+                icon: const Icon(Icons.close_rounded, size: 20),
+                onPressed: () => Navigator.pop(context),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          AppTextField(
+            controller: _nameCtrl,
+            labelText: context.tr('setup_wallet_name_label'),
+            hintText: context.tr('setup_wallet_name_hint'),
+            prefixIcon: Icons.account_balance_wallet_outlined,
+          ),
+          const SizedBox(height: 14),
+          Text(
+            context.tr('setup_wallet_type_label'),
+            style: GoogleFonts.inter(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: context.appTextSecondary,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              _buildTypeOption(
+                label: context.tr('setup_wallet_opt_bank'),
+                value: 'bank',
+                icon: Icons.account_balance_rounded,
+              ),
+              const SizedBox(width: 8),
+              _buildTypeOption(
+                label: context.tr('setup_wallet_opt_ewallet'),
+                value: 'eWallet',
+                icon: Icons.account_balance_wallet_rounded,
+              ),
+              const SizedBox(width: 8),
+              _buildTypeOption(
+                label: context.tr('setup_wallet_opt_cash'),
+                value: 'cash',
+                icon: Icons.payments_rounded,
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          AppTextField(
+            controller: _balanceCtrl,
+            labelText: context.tr('setup_wallet_init_bal_label'),
+            hintText: '0',
+            prefixIcon: Icons.attach_money_rounded,
+            keyboardType: TextInputType.number,
+            inputFormatters: const [CurrencyInputFormatter()],
+          ),
+          const SizedBox(height: 20),
+          AppButton(
+            text: context.tr('setup_wallet_add_to_list'),
+            onPressed: () {
+              final name = _nameCtrl.text.trim();
+              if (name.isEmpty) return;
+              widget.onSubmit(
+                name: name,
+                selectedType: _selectedType,
+                balanceText: _balanceCtrl.text.trim(),
+              );
+              Navigator.pop(context);
+            },
+          ),
+        ],
       ),
     );
   }

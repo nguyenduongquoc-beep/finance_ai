@@ -378,5 +378,198 @@ void main() {
       final remaining = await firestoreService.getUserChatSessions(userId);
       expect(remaining, isEmpty);
     });
+
+    test('saveChatSession: does NOT overwrite createdAt on subsequent updates', () async {
+      final fakeFirestore = FakeFirebaseFirestore();
+      final firestoreService = FirestoreService(firestore: fakeFirestore);
+
+      const userId = 'user_created_at_test';
+      const sessionId = 'session_preserve_created';
+
+      // Lần 1: Tạo phiên mới
+      await firestoreService.saveChatSession(
+        userId: userId,
+        sessionId: sessionId,
+        title: 'Phiên đầu tiên',
+        messages: [
+          {
+            'id': 'm1',
+            'text': 'Xin chào',
+            'isUser': true,
+            'timestamp': DateTime(2026, 11, 1, 9, 0).toIso8601String(),
+          },
+        ],
+      );
+
+      final firstSnapshot = await fakeFirestore
+          .collection('users')
+          .doc(userId)
+          .collection('chat_sessions')
+          .doc(sessionId)
+          .get();
+      final originalCreatedAt = firstSnapshot.data()?['createdAt'];
+      expect(originalCreatedAt, isNotNull);
+
+      // Chờ ngắn để serverTimestamp mới nếu có sẽ khác timestamp cũ
+      await Future<void>.delayed(const Duration(milliseconds: 25));
+
+      // Lần 2: Cập nhật thêm tin nhắn mới vào cùng session
+      await firestoreService.saveChatSession(
+        userId: userId,
+        sessionId: sessionId,
+        title: 'Phiên đầu tiên',
+        messages: [
+          {
+            'id': 'm1',
+            'text': 'Xin chào',
+            'isUser': true,
+            'timestamp': DateTime(2026, 11, 1, 9, 0).toIso8601String(),
+          },
+          {
+            'id': 'm2',
+            'text': 'Chào bạn!',
+            'isUser': false,
+            'timestamp': DateTime(2026, 11, 1, 9, 1).toIso8601String(),
+          },
+        ],
+      );
+
+      final secondSnapshot = await fakeFirestore
+          .collection('users')
+          .doc(userId)
+          .collection('chat_sessions')
+          .doc(sessionId)
+          .get();
+      expect(secondSnapshot.data()?['createdAt'], equals(originalCreatedAt));
+      expect((secondSnapshot.data()?['messages'] as List).length, equals(2));
+    });
+
+    test('detectInsightCard: marks safe budget cards with isAlert = false and overrun with isAlert = true', () {
+      final safeBudgetContext = FinancialChatContext(
+        rawPromptContext: 'Ăn uống an toàn',
+        incomeThisMonth: 20000000,
+        expenseThisMonth: 8000000,
+        netCashFlow: 12000000,
+        savingsRate: 60,
+        totalActiveBalance: 25000000,
+        averageMonthlySavings: 10000000,
+        budgets: [
+          Budget(
+            budgetId: 'b_food',
+            userId: 'user_1',
+            categoryId: 'cat_food',
+            limit: 4000000,
+            month: '11/2026',
+          ),
+        ],
+        currentExpenseByCat: const {'cat_food': 2500000},
+        overBudgets: const [],
+        nearLimitBudgets: const [],
+        savingGoals: const [],
+        issues: const [],
+        dynamicPrompts: const [],
+        hasSufficientData: true,
+        isEmptyData: false,
+      );
+
+      // 1. Hỏi đích danh danh mục có ngân sách đang an toàn
+      final safeCatCard = service.detectInsightCard(
+        question: 'Tôi chi bao nhiêu cho ăn uống tháng này?',
+        answer: 'Bạn đã chi 2.500.000 đ / 4.000.000 đ.',
+        context: safeBudgetContext,
+        categories: testCategories,
+      );
+      expect(safeCatCard, isNotNull);
+      expect(safeCatCard!.type, ChatInsightCardType.budgetOverrun);
+      expect(safeCatCard.isAlert, isFalse);
+
+      // Serialization giữ nguyên isAlert = false
+      final roundTrip = ChatInsightCardData.fromMap(safeCatCard.toMap());
+      expect(roundTrip.isAlert, isFalse);
+
+      // 2. Hỏi tổng quan ngân sách khi tất cả ngân sách đều an toàn
+      final allSafeCard = service.detectInsightCard(
+        question: 'Ngân sách tháng này của tôi thế nào?',
+        answer: 'Tất cả ngân sách đều trong tầm kiểm soát.',
+        context: safeBudgetContext,
+        categories: testCategories,
+      );
+      expect(allSafeCard, isNotNull);
+      expect(allSafeCard!.type, ChatInsightCardType.budgetOverrun);
+      expect(allSafeCard.isAlert, isFalse);
+
+      // 3. Khi vượt ngân sách -> isAlert = true
+      final overBudgetContext = FinancialChatContext(
+        rawPromptContext: 'Ăn uống vượt ngân sách',
+        incomeThisMonth: 20000000,
+        expenseThisMonth: 12000000,
+        netCashFlow: 8000000,
+        savingsRate: 40,
+        totalActiveBalance: 15000000,
+        averageMonthlySavings: 7000000,
+        budgets: [
+          Budget(
+            budgetId: 'b_food',
+            userId: 'user_1',
+            categoryId: 'cat_food',
+            limit: 4000000,
+            month: '11/2026',
+          ),
+        ],
+        currentExpenseByCat: const {'cat_food': 4800000},
+        overBudgets: [
+          Budget(
+            budgetId: 'b_food',
+            userId: 'user_1',
+            categoryId: 'cat_food',
+            limit: 4000000,
+            month: '11/2026',
+          ),
+        ],
+        nearLimitBudgets: const [],
+        savingGoals: const [],
+        issues: const [],
+        dynamicPrompts: const [],
+        hasSufficientData: true,
+        isEmptyData: false,
+      );
+
+      final overrunCard = service.detectInsightCard(
+        question: 'Tôi chi bao nhiêu cho ăn uống tháng này?',
+        answer: 'Danh mục Ăn uống đã vượt ngân sách.',
+        context: overBudgetContext,
+        categories: testCategories,
+      );
+      expect(overrunCard, isNotNull);
+      expect(overrunCard!.type, ChatInsightCardType.budgetOverrun);
+      expect(overrunCard.isAlert, isTrue);
+    });
+
+    test('selectCompactPrompts: keeps at most 5 chips and prioritizes red alerts first', () {
+      const allPrompts = [
+        DynamicPromptChip(label: 'Cảnh báo vượt ngân sách', category: 'featured', isAlert: true, icon: '⚠️'),
+        DynamicPromptChip(label: 'Cảnh báo dòng tiền âm', category: 'featured', isAlert: true, icon: '⚠️'),
+        DynamicPromptChip(label: 'Mục tiêu đúng hạn?', category: 'featured', icon: '🎯'),
+        DynamicPromptChip(label: 'Vấn đề cần chú ý', category: 'featured', icon: '🔥'),
+        DynamicPromptChip(label: 'Tổng quan tháng này', category: 'overview'),
+        DynamicPromptChip(label: 'Thu chi thay đổi?', category: 'overview'),
+        DynamicPromptChip(label: 'Tiêu nhiều nhất vào đâu?', category: 'expense'),
+        DynamicPromptChip(label: 'Cắt giảm gì?', category: 'expense'),
+        DynamicPromptChip(label: 'Sử dụng ngân sách?', category: 'budget'),
+        DynamicPromptChip(label: 'Tiết kiệm thêm bao nhiêu?', category: 'saving'),
+      ];
+
+      final compact = FinancialChatContextService.selectCompactPrompts(
+        allPrompts,
+        maxCount: 5,
+      );
+
+      expect(compact.length, 5);
+      // 2 chip cảnh báo đỏ luôn đứng đầu
+      expect(compact[0].isAlert, isTrue);
+      expect(compact[1].isAlert, isTrue);
+      // Tiếp theo ưu tiên mục tiêu và đa dạng nhóm
+      expect(compact[2].label, 'Mục tiêu đúng hạn?');
+    });
   });
 }

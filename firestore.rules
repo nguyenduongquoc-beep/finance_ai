@@ -23,34 +23,99 @@ service cloud.firestore {
     }
 
     // Helper: Kiểm tra quyền Admin ở tầng Backend.
-    // Bắt buộc document `users/{uid}` phải tồn tại và có `status == 'active'`
-    // (không kế thừa ngoại lệ `!exists(...)` của `isActiveUser()`, kể cả khi
-    // Custom Claim `admin: true` vẫn còn trên Firebase ID Token).
+    // Bắt buộc document `users/{uid}` phải tồn tại, có `status == 'active'` VÀ `role == 'admin'`
+    // (không dùng điều kiện OR với `token.admin == true` để chặn ngay Admin vừa bị hạ quyền
+    // khi JWT cũ vẫn còn hiệu lực tới 60 phút).
+    function isActiveAdminData(data) {
+      return data.get('status', '') == 'active' && data.get('role', 'user') == 'admin';
+    }
+
     function isAdmin() {
       return isSignedIn() &&
         exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        currentUserDoc().data.get('status', '') == 'active' &&
-        (request.auth.token.get('admin', false) == true ||
-         currentUserDoc().data.get('role', 'user') == 'admin');
+        isActiveAdminData(currentUserDoc().data);
     }
 
-    // 1. Hồ sơ người dùng (users/{uid})
-    // - Chính chủ đọc được hồ sơ của mình; Admin đọc được danh sách tài khoản để quản trị.
-    // - Khi User tự tạo mới hoặc cập nhật: CẤM tự gán/thay đổi `role` hoặc `status`.
+    // 1. Hồ sơ người dùng (users/{uid}) — Thuần Firebase Spark & Zero-Knowledge tuyệt đối
+    // - `users/{uid}` CHỈ lưu siêu dữ liệu vận hành phi tài chính (`monthlyIncome`, `savingGoal`,
+    //   `monthlyPlans` được tách sang subcollection riêng tư bị chặn hoàn toàn với Admin).
+    // - Chính chủ (`request.auth.uid == uid`): được đọc, tạo mới (`role == 'user'`, `status == 'active'`),
+    //   cập nhật thông tin cá nhân (cấm tự sửa `role`, `status`, `lockReason`, `lockedAt`, `lockedBy`),
+    //   và tự xóa `users/{uid}` khi thực hiện luồng tự xóa tài khoản trên Mobile.
+    // - Admin (`isAdmin()`): chỉ được đọc siêu dữ liệu vận hành và cập nhật khóa/mở khóa tài khoản User thường
+    //   (`request.auth.uid != uid`, `resource.data.role != 'admin'`). CẤM đổi vai trò `role`, CẤM xóa user.
     match /users/{uid} {
       allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin());
 
       allow create: if isSignedIn()
         && request.auth.uid == uid
         && request.resource.data.get('role', 'user') == 'user'
-        && request.resource.data.get('status', 'active') == 'active';
+        && request.resource.data.get('status', 'active') == 'active'
+        && request.resource.data.get('lockReason', null) == null
+        && request.resource.data.get('lockedAt', null) == null
+        && request.resource.data.get('lockedBy', null) == null
+        && !('monthlyIncome' in request.resource.data)
+        && !('savingGoal' in request.resource.data)
+        && !('monthlyPlans' in request.resource.data);
 
-      allow update: if isActiveUser()
+      allow update: if (
+        isActiveUser()
         && request.auth.uid == uid
         && request.resource.data.get('role', 'user') == resource.data.get('role', 'user')
-        && request.resource.data.get('status', 'active') == resource.data.get('status', 'active');
+        && request.resource.data.get('status', 'active') == resource.data.get('status', 'active')
+        && request.resource.data.get('lockReason', null) == resource.data.get('lockReason', null)
+        && request.resource.data.get('lockedAt', null) == resource.data.get('lockedAt', null)
+        && request.resource.data.get('lockedBy', null) == resource.data.get('lockedBy', null)
+        && (
+          !request.resource.data.diff(resource.data).affectedKeys().hasAny(['monthlyIncome', 'savingGoal', 'monthlyPlans'])
+          || (
+            !('monthlyIncome' in request.resource.data)
+            && !('savingGoal' in request.resource.data)
+            && !('monthlyPlans' in request.resource.data)
+          )
+        )
+      ) || (
+        isAdmin()
+        && request.auth.uid != uid
+        && resource.data.get('role', 'user') != 'admin'
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status',
+          'lockReason',
+          'lockedAt',
+          'lockedBy',
+          'updatedAt'
+        ])
+        && request.resource.data.status in ['active', 'locked']
+        && request.resource.data.updatedAt is string
+        && (
+          (
+            request.resource.data.status == 'locked'
+            && request.resource.data.lockReason is string
+            && request.resource.data.lockReason.size() >= 1
+            && request.resource.data.lockReason.size() <= 350
+            && request.resource.data.lockedAt == request.time
+            && request.resource.data.lockedBy is string
+            && request.resource.data.lockedBy.size() >= 1
+            && request.resource.data.lockedBy.size() <= 160
+          )
+          ||
+          (
+            request.resource.data.status == 'active'
+            && (request.resource.data.get('lockReason', null) == null
+                || request.resource.data.get('lockReason', '') == '')
+            && request.resource.data.get('lockedAt', null) == null
+            && request.resource.data.get('lockedBy', null) == null
+          )
+        )
+      );
 
-      allow delete: if false;
+      allow delete: if isActiveUser() && request.auth.uid == uid;
+
+      // Dữ liệu tài chính riêng tư (VD: `users/{uid}/private/financial_profile`)
+      // Chỉ chính chủ đang hoạt động được đọc/ghi/xóa; Admin bị chặn 100%.
+      match /private/{docId} {
+        allow read, write: if isActiveUser() && request.auth.uid == uid;
+      }
 
       match /quickTemplates/{templateId} {
         allow read, write: if isActiveUser() && request.auth.uid == uid;
@@ -174,24 +239,163 @@ service cloud.firestore {
         && request.resource.data.userId == request.auth.uid;
     }
 
-    // 3. Cấu hình hệ thống dành cho Admin (Mọi người dùng đăng nhập được đọc;
-    //    việc ghi phải đi qua Cloud Functions để đảm bảo sinh Audit Log phía Server)
+    // 3. Cấu hình hệ thống dành cho Admin (Đồng bộ trực tiếp trên Firebase Spark + Rules chặt chẽ)
+    // - Mọi người dùng đăng nhập được đọc để khởi tạo danh mục / xem thông báo.
+    // - Chỉ Admin đang hoạt động (`isAdmin()`) được tạo/cập nhật đúng schema; không xóa cứng danh mục hệ thống.
     match /system_categories/{catId} {
       allow read: if isSignedIn();
-      allow write: if false;
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasAll(['id', 'name', 'type', 'icon', 'color', 'isEssential', 'isActive', 'createdAt', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['id', 'name', 'type', 'icon', 'color', 'isEssential', 'isActive', 'createdAt', 'updatedAt'])
+        && request.resource.data.id == catId
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 1
+        && request.resource.data.name.size() <= 80
+        && request.resource.data.type in ['expense', 'income']
+        && request.resource.data.icon is string
+        && request.resource.data.icon.size() >= 1
+        && request.resource.data.icon.size() <= 50
+        && request.resource.data.color is int
+        && request.resource.data.isEssential is bool
+        && request.resource.data.isActive is bool
+        && request.resource.data.createdAt is string
+        && request.resource.data.updatedAt is string;
+      allow update: if isAdmin()
+        && (
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isActive', 'updatedAt'])
+            && request.resource.data.isActive is bool
+            && request.resource.data.updatedAt is string
+          )
+          ||
+          (
+            request.resource.data.keys().hasAll(['id', 'name', 'type', 'icon', 'color', 'isEssential', 'isActive', 'updatedAt'])
+            && request.resource.data.keys().hasOnly(['id', 'name', 'type', 'icon', 'color', 'isEssential', 'isActive', 'createdAt', 'updatedAt'])
+            && request.resource.data.id == catId
+            && request.resource.data.name is string
+            && request.resource.data.name.size() >= 1
+            && request.resource.data.name.size() <= 80
+            && request.resource.data.type in ['expense', 'income']
+            && request.resource.data.icon is string
+            && request.resource.data.icon.size() >= 1
+            && request.resource.data.icon.size() <= 50
+            && request.resource.data.color is int
+            && request.resource.data.isEssential is bool
+            && request.resource.data.isActive is bool
+            && request.resource.data.updatedAt is string
+          )
+        );
+      allow delete: if false;
     }
 
     match /system_announcements/{annId} {
       allow read: if isSignedIn();
-      allow write: if false;
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasAll(['id', 'title', 'content', 'isActive', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt'])
+        && request.resource.data.keys().hasOnly(['id', 'title', 'content', 'isActive', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt'])
+        && request.resource.data.id == annId
+        && request.resource.data.title is string
+        && request.resource.data.title.size() >= 1
+        && request.resource.data.title.size() <= 150
+        && request.resource.data.content is string
+        && request.resource.data.content.size() >= 1
+        && request.resource.data.content.size() <= 1000
+        && request.resource.data.isActive is bool
+        && request.resource.data.createdBy is string
+        && request.resource.data.updatedBy is string
+        && request.resource.data.createdAt is string
+        && request.resource.data.updatedAt is string;
+      allow update: if isAdmin()
+        && (
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isActive', 'updatedBy', 'updatedAt'])
+            && request.resource.data.isActive is bool
+            && request.resource.data.updatedBy is string
+            && request.resource.data.updatedAt is string
+          )
+          ||
+          (
+            request.resource.data.keys().hasAll(['id', 'title', 'content', 'isActive', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt'])
+            && request.resource.data.keys().hasOnly(['id', 'title', 'content', 'isActive', 'createdBy', 'updatedBy', 'createdAt', 'updatedAt'])
+            && request.resource.data.id == annId
+            && request.resource.data.title is string
+            && request.resource.data.title.size() >= 1
+            && request.resource.data.title.size() <= 150
+            && request.resource.data.content is string
+            && request.resource.data.content.size() >= 1
+            && request.resource.data.content.size() <= 1000
+            && request.resource.data.isActive is bool
+            && (resource.data.get('createdBy', '') == ''
+                || request.resource.data.createdBy == resource.data.get('createdBy', ''))
+            && (resource.data.get('createdAt', '') == ''
+                || request.resource.data.createdAt == resource.data.get('createdAt', ''))
+            && request.resource.data.updatedBy is string
+            && request.resource.data.updatedAt is string
+          )
+        );
+      allow delete: if isAdmin();
     }
 
-    // 4. Nhật ký quản trị hệ thống (Immutable Server-Authenticated Audit Logs)
-    // Chỉ Admin được phép đọc; việc tạo bản ghi nhật ký quản trị quan trọng được thực hiện
-    // thông qua Backend Cloud Functions (Admin SDK) để chống giả mạo từ Client.
+    // 4. Nhật ký quản trị hệ thống (Append-Only Immutable Audit Logs)
+    // - Chỉ Admin đang hoạt động được đọc và tạo mới log cho chính mình (`adminId == request.auth.uid`).
+    // - TUYỆT ĐỐI CẤM sửa hoặc xóa mọi bản ghi nhật ký (`allow update, delete: if false`).
     match /admin_logs/{logId} {
       allow read: if isAdmin();
-      allow write: if false;
+      allow create: if isAdmin()
+        && request.resource.data.keys().hasAll([
+          'adminId',
+          'adminEmail',
+          'action',
+          'targetType',
+          'targetId',
+          'targetLabel',
+          'result',
+          'details',
+          'source',
+          'createdAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'adminId',
+          'adminEmail',
+          'action',
+          'targetType',
+          'targetId',
+          'targetLabel',
+          'result',
+          'details',
+          'source',
+          'createdAt'
+        ])
+        && request.resource.data.adminId == request.auth.uid
+        && request.resource.data.adminEmail is string
+        && request.resource.data.action in [
+          'LOCK_USER',
+          'UNLOCK_USER',
+          'CREATE_SYSTEM_CATEGORY',
+          'UPDATE_SYSTEM_CATEGORY',
+          'HIDE_SYSTEM_CATEGORY',
+          'SHOW_SYSTEM_CATEGORY',
+          'SEED_SYSTEM_CATEGORIES',
+          'CREATE_ANNOUNCEMENT',
+          'UPDATE_ANNOUNCEMENT',
+          'ACTIVATE_ANNOUNCEMENT',
+          'DEACTIVATE_ANNOUNCEMENT',
+          'DELETE_ANNOUNCEMENT'
+        ]
+        && request.resource.data.targetType in [
+          'user',
+          'system_category',
+          'system_announcement'
+        ]
+        && request.resource.data.targetId is string
+        && request.resource.data.targetId.size() >= 1
+        && request.resource.data.targetLabel is string
+        && request.resource.data.result == 'success'
+        && request.resource.data.details is string
+        && request.resource.data.details.size() <= 500
+        && request.resource.data.source == 'admin_web'
+        && request.resource.data.createdAt is string;
+      allow update, delete: if false;
     }
 
     // 5. Khóa tuyệt đối các collection Quản trị AI & Tri thức đã gỡ bỏ
@@ -297,15 +501,26 @@ service cloud.firestore {
         && request.resource.data.get('ratingEditCount', 0) == resource.data.get('ratingEditCount', 0);
     }
 
+    function matchesSyncSupportMessageData(msgData, nextData, expectedRole, expectedType) {
+      return msgData.messageId == nextData.lastMessageId
+        && msgData.senderId == request.auth.uid
+        && msgData.senderRole == expectedRole
+        && msgData.messageType == expectedType
+        && msgData.createdAt == nextData.lastMessageAt;
+    }
+
     function hasSynchronizedNewSupportMessage(ticketId, expectedRole, expectedType) {
-      return isSupportText(request.resource.data.get('lastMessageId', ''), 1, 128)
-        && !exists(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId))
-        && existsAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId))
-        && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId)).data.messageId == request.resource.data.lastMessageId
-        && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId)).data.senderId == request.auth.uid
-        && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId)).data.senderRole == expectedRole
-        && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId)).data.messageType == expectedType
-        && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(request.resource.data.lastMessageId)).data.createdAt == request.resource.data.lastMessageAt;
+      let nextData = request.resource.data;
+      let msgId = nextData.get('lastMessageId', '');
+      return isSupportText(msgId, 1, 128)
+        && !exists(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(msgId))
+        && existsAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(msgId))
+        && matchesSyncSupportMessageData(
+            getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)/messages/$(msgId)).data,
+            nextData,
+            expectedRole,
+            expectedType
+          );
     }
 
     match /support_tickets/{ticketId} {
@@ -648,10 +863,10 @@ service cloud.firestore {
                 && request.resource.data.get('firstAdminResponseAt', null) == resource.data.get('firstAdminResponseAt', null))
             )
             && (
-              // #11 Tiếp nhận xử lý (`new` -> `in_progress`)
+              // #11 & #11b Tiếp nhận xử lý (`new` -> `in_progress`) hoặc Mở lại xử lý (`resolved` -> `in_progress`)
               (
-                resource.data.status == 'new'
-                && request.resource.data.status == 'in_progress'
+                request.resource.data.status == 'in_progress'
+                && resource.data.status in ['new', 'resolved']
                 && request.resource.data.resolvedAt == null
                 && request.resource.data.get('resolvedByRole', null) == null
                 && request.resource.data.closedAt == null
@@ -662,8 +877,8 @@ service cloud.firestore {
               ||
               // #12 Gửi phản hồi thường (`new|in_progress|waiting_for_user|replied` -> `replied`)
               (
-                resource.data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
-                && request.resource.data.status == 'replied'
+                request.resource.data.status == 'replied'
+                && resource.data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
                 && request.resource.data.resolvedAt == null
                 && request.resource.data.get('resolvedByRole', null) == null
                 && request.resource.data.closedAt == null
@@ -674,8 +889,8 @@ service cloud.firestore {
               ||
               // #13 Yêu cầu bổ sung thông tin (`new|in_progress|waiting_for_user|replied` -> `waiting_for_user`)
               (
-                resource.data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
-                && request.resource.data.status == 'waiting_for_user'
+                request.resource.data.status == 'waiting_for_user'
+                && resource.data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
                 && request.resource.data.resolvedAt == null
                 && request.resource.data.get('resolvedByRole', null) == null
                 && request.resource.data.closedAt == null
@@ -686,8 +901,8 @@ service cloud.firestore {
               ||
               // #14 Đánh dấu đã giải quyết (`new|in_progress|waiting_for_user|replied` -> `resolved`)
               (
-                resource.data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
-                && request.resource.data.status == 'resolved'
+                request.resource.data.status == 'resolved'
+                && resource.data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
                 && isSupportText(request.resource.data.resolvedAt, 10, 40)
                 && request.resource.data.resolvedAt == request.resource.data.lastMessageAt
                 && request.resource.data.resolvedByRole == 'admin'
@@ -699,8 +914,8 @@ service cloud.firestore {
               ||
               // #15 Đóng chuẩn sau giải quyết (`resolved` -> `closed`), bảo toàn nguyên vẹn `resolvedAt` & `resolvedByRole`
               (
-                resource.data.status == 'resolved'
-                && request.resource.data.status == 'closed'
+                request.resource.data.status == 'closed'
+                && resource.data.status == 'resolved'
                 && resource.data.resolvedAt != null
                 && request.resource.data.resolvedAt == resource.data.resolvedAt
                 && (
@@ -720,8 +935,8 @@ service cloud.firestore {
               // #16 Đóng ngoại lệ chưa giải quyết (`new|in_progress|waiting_for_user|replied` -> `closed`),
               // bắt buộc `resolvedAt == null`, `resolvedByRole == null` và lý do ngoại lệ hợp lệ
               (
-                resource.data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
-                && request.resource.data.status == 'closed'
+                request.resource.data.status == 'closed'
+                && resource.data.status in ['new', 'in_progress', 'waiting_for_user', 'replied']
                 && request.resource.data.resolvedAt == null
                 && request.resource.data.get('resolvedByRole', null) == null
                 && isSupportText(request.resource.data.closedAt, 10, 40)
@@ -829,7 +1044,7 @@ service cloud.firestore {
                       && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status in ['resolved', 'closed'])
                     ||
                     (get(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status == 'resolved'
-                      && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status == 'closed')
+                      && getAfter(/databases/$(database)/documents/support_tickets/$(ticketId)).data.status in ['in_progress', 'closed'])
                   )
                 )
               )

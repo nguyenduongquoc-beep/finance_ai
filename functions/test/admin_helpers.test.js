@@ -5,6 +5,7 @@ const {
   isAllowedAdminOrigin,
   applyAdminCorsPolicy,
   verifyAdminCallerWithDeps,
+  assertNotLastActiveAdmin,
   createAdminEndpointHandlers,
   cleanupUserData,
   handleAuthUserDeleteTrigger,
@@ -38,6 +39,38 @@ class FakeFirestore {
 
   collection(name) {
     const store = this;
+    const makeQuery = (filters = [], limitNum = null) => ({
+      where(field, op, val) {
+        return makeQuery([...filters, { field, op, val }], limitNum);
+      },
+      limit(nextLimit) {
+        return makeQuery(filters, nextLimit);
+      },
+      async get() {
+        const col = store._getCol(name);
+        const matchingDocs = [];
+        for (const [docId, data] of col.entries()) {
+          const matchesAll = filters.every((f) => {
+            if (f.op === "==") return data[f.field] === f.val;
+            return false;
+          });
+          if (matchesAll) {
+            matchingDocs.push({
+              id: docId,
+              ref: store.collection(name).doc(docId),
+              data: () => structuredClone(data),
+            });
+            if (limitNum !== null && matchingDocs.length >= limitNum) break;
+          }
+        }
+        return {
+          empty: matchingDocs.length === 0,
+          size: matchingDocs.length,
+          docs: matchingDocs,
+        };
+      },
+    });
+
     return {
       doc(id) {
         const docId = id || `auto_${store._autoId++}`;
@@ -77,53 +110,14 @@ class FakeFirestore {
           },
         };
       },
+      get() {
+        return makeQuery().get();
+      },
       limit(limitNum) {
-        return {
-          async get() {
-            const col = store._getCol(name);
-            const docs = [];
-            for (const [docId, data] of col.entries()) {
-              docs.push({
-                id: docId,
-                ref: store.collection(name).doc(docId),
-                data: () => structuredClone(data),
-              });
-              if (docs.length >= limitNum) break;
-            }
-            return {
-              empty: docs.length === 0,
-              size: docs.length,
-              docs,
-            };
-          },
-        };
+        return makeQuery([], limitNum);
       },
       where(field, op, val) {
-        return {
-          limit(limitNum) {
-            return {
-              async get() {
-                const col = store._getCol(name);
-                const matchingDocs = [];
-                for (const [docId, data] of col.entries()) {
-                  if (op === "==" && data[field] === val) {
-                    matchingDocs.push({
-                      id: docId,
-                      ref: store.collection(name).doc(docId),
-                      data: () => structuredClone(data),
-                    });
-                    if (matchingDocs.length >= limitNum) break;
-                  }
-                }
-                return {
-                  empty: matchingDocs.length === 0,
-                  size: matchingDocs.length,
-                  docs: matchingDocs,
-                };
-              },
-            };
-          },
-        };
+        return makeQuery([{ field, op, val }]);
       },
       async add(payload) {
         const docId = `auto_${store._autoId++}`;
@@ -179,6 +173,7 @@ class FakeFirestore {
 
 function createFakeAuth({ verifiedTokens = {}, users = {} } = {}) {
   const userRecords = new Map(Object.entries(structuredClone(users)));
+  const revokedUids = [];
   return {
     async verifyIdToken(token) {
       if (!verifiedTokens[token]) {
@@ -188,13 +183,28 @@ function createFakeAuth({ verifiedTokens = {}, users = {} } = {}) {
     },
     async getUser(uid) {
       if (!userRecords.has(uid)) {
-        return { uid, customClaims: {} };
+        const err = new Error(`User not found: ${uid}`);
+        err.code = "auth/user-not-found";
+        throw err;
       }
+      return structuredClone(userRecords.get(uid));
+    },
+    async updateUser(uid, updates) {
+      if (!userRecords.has(uid)) {
+        const err = new Error(`User not found: ${uid}`);
+        err.code = "auth/user-not-found";
+        throw err;
+      }
+      const prev = userRecords.get(uid);
+      userRecords.set(uid, { ...prev, ...structuredClone(updates) });
       return structuredClone(userRecords.get(uid));
     },
     async setCustomUserClaims(uid, claims) {
       const prev = userRecords.get(uid) || { uid };
       userRecords.set(uid, { ...prev, customClaims: structuredClone(claims) });
+    },
+    async revokeRefreshTokens(uid) {
+      revokedUids.push(uid);
     },
     async deleteUser(uid) {
       if (!userRecords.has(uid)) {
@@ -206,6 +216,9 @@ function createFakeAuth({ verifiedTokens = {}, users = {} } = {}) {
     },
     _getStoredUser(uid) {
       return userRecords.get(uid);
+    },
+    _getRevokedUids() {
+      return [...revokedUids];
     },
   };
 }
@@ -776,5 +789,388 @@ test("handleAuthUserDeleteTrigger: khi user bị xóa độc lập (Console / t�
   const logs = Array.from(db._getCol("admin_logs").values());
   assert.equal(logs.length, 1);
   assert.equal(logs[0].action, "CLEANUP_DELETED_AUTH_USER");
+});
+
+test("Thu hồi quyền Admin tức thì: adminSetUserRole gọi revokeRefreshTokens khi hạ về user & verifyAdminCaller chặn ngay JWT cũ còn admin=true", async () => {
+  const db = new FakeFirestore({
+    users: {
+      admin_a: { email: "a@app.vn", name: "Admin A", role: "admin", status: "active" },
+      admin_b: { email: "b@app.vn", name: "Admin B", role: "admin", status: "active" },
+    },
+  });
+  const auth = createFakeAuth({
+    verifiedTokens: {
+      tok_a: { uid: "admin_a", email: "a@app.vn", admin: true },
+      tok_b_stale: { uid: "admin_b", email: "b@app.vn", admin: true },
+    },
+    users: {
+      admin_a: { uid: "admin_a", customClaims: { admin: true } },
+      admin_b: { uid: "admin_b", customClaims: { admin: true, tier: "ops" } },
+    },
+  });
+  const handlers = createAdminEndpointHandlers({ db, auth, logger: { error() {}, warn() {} } });
+
+  // 1. Admin A hạ quyền Admin B về user -> cập nhật claims (giữ claim phụ) + Firestore + revokeRefreshTokens
+  const resDemote = createMockRes();
+  await handlers.adminSetUserRole(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_a" },
+      body: { targetUid: "admin_b", role: "user" },
+    },
+    resDemote
+  );
+  assert.equal(resDemote.statusCode, 200);
+  assert.equal(resDemote.body.tokensRevoked, true);
+  assert.deepEqual(auth._getStoredUser("admin_b").customClaims, {
+    tier: "ops",
+    admin: false,
+  });
+  assert.deepEqual(auth._getRevokedUids(), ["admin_b"]);
+  assert.equal((await db.collection("users").doc("admin_b").get()).data().role, "user");
+
+  // 2. Ngay cả khi JWT cũ của Admin B vẫn còn `admin: true`, verifyAdminCaller PHẢI từ chối 403 lập tức
+  const resStale = createMockRes();
+  await handlers.adminVerifySession(
+    {
+      method: "GET",
+      headers: { authorization: "Bearer tok_b_stale" },
+    },
+    resStale
+  );
+  assert.equal(resStale.statusCode, 403);
+});
+
+test("Bảo vệ Admin hoạt động cuối cùng: chặn khóa, hạ quyền và xóa khi không còn Admin active nào khác", async () => {
+  // 1. Kiểm tra trực tiếp helper assertNotLastActiveAdmin
+  const soloDb = new FakeFirestore({
+    users: {
+      only_admin: { email: "only@app.vn", role: "admin", status: "active" },
+      locked_admin: { email: "locked@app.vn", role: "admin", status: "locked" },
+      normal_user: { email: "u@app.vn", role: "user", status: "active" },
+    },
+  });
+  await assert.rejects(
+    () =>
+      assertNotLastActiveAdmin(soloDb, "only_admin", {
+        role: "admin",
+        status: "active",
+      }),
+    (err) => err.statusCode === 400
+  );
+  // Tài khoản locked_admin KHÔNG phải active admin nên vẫn được phép xóa/cập nhật
+  await assertNotLastActiveAdmin(soloDb, "locked_admin", {
+    role: "admin",
+    status: "locked",
+  });
+
+  // 2. Mô phỏng race condition đồng thời (caller vượt qua verifyCaller ngay trước khi chính caller bị hạ quyền,
+  //    khiến target trở thành Admin active duy nhất còn lại) -> cả 3 endpoint đều phải chặn 400 & rollback Auth
+  const makeRaceDb = () => {
+    const inner = new FakeFirestore({
+      users: {
+        admin_caller: { email: "caller@app.vn", role: "admin", status: "active" },
+        admin_target: { email: "target@app.vn", role: "admin", status: "active" },
+      },
+    });
+    let callerReadCount = 0;
+    const origCollection = inner.collection.bind(inner);
+    inner.collection = (name) => {
+      const col = origCollection(name);
+      if (name !== "users") return col;
+      const origDoc = col.doc.bind(col);
+      col.doc = (id) => {
+        const d = origDoc(id);
+        if (id !== "admin_caller") return d;
+        const origGet = d.get.bind(d);
+        d.get = async () => {
+          const snap = await origGet();
+          callerReadCount += 1;
+          if (callerReadCount === 1) {
+            // Ngay sau khi caller xác thực xong, giả lập caller bị khóa đồng thời bởi phiên khác
+            inner._getCol("users").set("admin_caller", {
+              email: "caller@app.vn",
+              role: "admin",
+              status: "locked",
+            });
+          }
+          return snap;
+        };
+        return d;
+      };
+      return col;
+    };
+    return inner;
+  };
+
+  // 2a. Chặn hạ quyền Admin cuối cùng
+  const raceDbRole = makeRaceDb();
+  const raceAuthRole = createFakeAuth({
+    verifiedTokens: { tok_c: { uid: "admin_caller", email: "caller@app.vn", admin: true } },
+    users: {
+      admin_caller: { uid: "admin_caller", customClaims: { admin: true } },
+      admin_target: { uid: "admin_target", customClaims: { admin: true } },
+    },
+  });
+  const hRole = createAdminEndpointHandlers({
+    db: raceDbRole,
+    auth: raceAuthRole,
+    logger: { error() {}, warn() {} },
+  });
+  const resRole = createMockRes();
+  await hRole.adminSetUserRole(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_c" },
+      body: { targetUid: "admin_target", role: "user" },
+    },
+    resRole
+  );
+  assert.equal(resRole.statusCode, 400);
+  assert.equal(raceAuthRole._getStoredUser("admin_target").customClaims.admin, true);
+  assert.equal((await raceDbRole.collection("users").doc("admin_target").get()).data().role, "admin");
+
+  // 2b. Chặn khóa Admin cuối cùng
+  const raceDbLock = makeRaceDb();
+  const raceAuthLock = createFakeAuth({
+    verifiedTokens: { tok_c: { uid: "admin_caller", email: "caller@app.vn", admin: true } },
+    users: {
+      admin_caller: { uid: "admin_caller", disabled: false },
+      admin_target: { uid: "admin_target", disabled: false },
+    },
+  });
+  const hLock = createAdminEndpointHandlers({
+    db: raceDbLock,
+    auth: raceAuthLock,
+    logger: { error() {}, warn() {} },
+  });
+  const resLock = createMockRes();
+  await hLock.adminSetUserStatus(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_c" },
+      body: { targetUid: "admin_target", status: "locked" },
+    },
+    resLock
+  );
+  assert.equal(resLock.statusCode, 400);
+  assert.equal(raceAuthLock._getStoredUser("admin_target").disabled, false);
+  assert.equal((await raceDbLock.collection("users").doc("admin_target").get()).data().status, "active");
+
+  // 2c. Chặn xóa Admin cuối cùng
+  const raceDbDel = makeRaceDb();
+  const raceAuthDel = createFakeAuth({
+    verifiedTokens: { tok_c: { uid: "admin_caller", email: "caller@app.vn", admin: true } },
+    users: {
+      admin_caller: { uid: "admin_caller" },
+      admin_target: { uid: "admin_target" },
+    },
+  });
+  const hDel = createAdminEndpointHandlers({
+    db: raceDbDel,
+    auth: raceAuthDel,
+    logger: { error() {}, warn() {} },
+  });
+  const resDel = createMockRes();
+  await hDel.adminDeleteUser(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_c" },
+      body: { targetUid: "admin_target" },
+    },
+    resDel
+  );
+  assert.equal(resDel.statusCode, 400);
+  assert.ok(raceAuthDel._getStoredUser("admin_target"));
+  assert.equal((await raceDbDel.collection("users").doc("admin_target").get()).exists, true);
+});
+
+test("adminListUsers (Zero-Knowledge) chỉ trả 7 trường phi tài chính & adminSetUserStatus xử lý mềm user-not-found + rollback Auth khi Firestore lỗi", async () => {
+  const db = new FakeFirestore({
+    users: {
+      admin_1: { email: "admin@app.vn", name: "Admin", role: "admin", status: "active" },
+      u_rich: {
+        email: "rich@app.vn",
+        name: "Nguyễn Văn Giàu",
+        role: "user",
+        status: "active",
+        occupation: "Kỹ sư",
+        createdAt: "2026-10-15T00:00:00.000Z",
+        monthlyIncome: 85000000,
+        savingGoal: "Mua căn hộ 3 tỷ",
+        monthlyPlans: { "11_2026": { targetSavingAmount: 25000000 } },
+      },
+      u_firestore_only: {
+        email: "ghost@app.vn",
+        name: "Ghost User",
+        role: "user",
+        status: "active",
+      },
+    },
+  });
+  const auth = createFakeAuth({
+    verifiedTokens: { tok_admin: { uid: "admin_1", email: "admin@app.vn", admin: true } },
+    users: {
+      admin_1: { uid: "admin_1", disabled: false, customClaims: { admin: true } },
+      u_rich: { uid: "u_rich", disabled: false },
+    },
+  });
+  const handlers = createAdminEndpointHandlers({ db, auth, logger: { error() {}, warn() {} } });
+
+  // 1. Zero-Knowledge adminListUsers
+  const resList = createMockRes();
+  await handlers.adminListUsers(
+    { method: "GET", headers: { authorization: "Bearer tok_admin" } },
+    resList
+  );
+  assert.equal(resList.statusCode, 200);
+  const richUser = resList.body.users.find((u) => u.uid === "u_rich");
+  assert.deepEqual(Object.keys(richUser).sort(), [
+    "createdAt",
+    "email",
+    "name",
+    "occupation",
+    "role",
+    "status",
+    "uid",
+  ]);
+  assert.equal(Object.prototype.hasOwnProperty.call(richUser, "monthlyIncome"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(richUser, "savingGoal"), false);
+  assert.equal(Object.prototype.hasOwnProperty.call(richUser, "monthlyPlans"), false);
+
+  // 2. Xử lý mềm auth/user-not-found trên adminSetUserStatus
+  const resGhost = createMockRes();
+  await handlers.adminSetUserStatus(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_admin" },
+      body: { targetUid: "u_firestore_only", status: "locked", reason: "Hồ sơ mồ côi" },
+    },
+    resGhost
+  );
+  assert.equal(resGhost.statusCode, 200);
+  assert.equal(resGhost.body.authUpdated, false);
+  assert.equal((await db.collection("users").doc("u_firestore_only").get()).data().status, "locked");
+
+  // 3. Rollback Auth disabled khi bước ghi Firestore thất bại
+  const origRunTx = db.runTransaction.bind(db);
+  db.runTransaction = async () => {
+    throw new Error("Simulated Firestore write failure");
+  };
+  const resFail = createMockRes();
+  await handlers.adminSetUserStatus(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_admin" },
+      body: { targetUid: "u_rich", status: "locked" },
+    },
+    resFail
+  );
+  db.runTransaction = origRunTx;
+  assert.equal(resFail.statusCode, 500);
+  assert.equal(auth._getStoredUser("u_rich").disabled, false);
+  assert.equal((await db.collection("users").doc("u_rich").get()).data().status, "active");
+});
+
+test("adminManageAnnouncement: giữ nguyên createdBy/createdAt khi sửa (lưu thêm updatedBy) & trả 404 khi toggle/delete ID không tồn tại", async () => {
+  const db = new FakeFirestore({
+    users: {
+      admin_a: { email: "creator@app.vn", role: "admin", status: "active" },
+      admin_b: { email: "editor@app.vn", role: "admin", status: "active" },
+    },
+  });
+  const auth = createFakeAuth({
+    verifiedTokens: {
+      tok_a: { uid: "admin_a", email: "creator@app.vn", admin: true },
+      tok_b: { uid: "admin_b", email: "editor@app.vn", admin: true },
+    },
+  });
+  let clock = Date.UTC(2026, 10, 20, 8, 0, 0);
+  const handlers = createAdminEndpointHandlers({
+    db,
+    auth,
+    nowProvider: () => clock,
+    logger: { error() {}, warn() {} },
+  });
+
+  // 1. Admin A tạo thông báo mới
+  const resCreate = createMockRes();
+  await handlers.adminManageAnnouncement(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_a" },
+      body: {
+        action: "save",
+        isNew: true,
+        announcement: {
+          id: "ann_keep_author",
+          title: "Thông báo gốc",
+          content: "Nội dung ban đầu",
+          isActive: true,
+        },
+      },
+    },
+    resCreate
+  );
+  assert.equal(resCreate.statusCode, 200);
+  const createdDoc = (await db.collection("system_announcements").doc("ann_keep_author").get()).data();
+  assert.equal(createdDoc.createdBy, "creator@app.vn");
+  assert.equal(createdDoc.updatedBy, "creator@app.vn");
+  const originalCreatedAt = createdDoc.createdAt;
+
+  // 2. Admin B chỉnh sửa thông báo (kể cả client truyền createdBy=editor@app.vn) -> PHẢI giữ nguyên createdBy gốc & lưu updatedBy=editor@app.vn
+  clock = Date.UTC(2026, 10, 21, 9, 30, 0);
+  const resEdit = createMockRes();
+  await handlers.adminManageAnnouncement(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_b" },
+      body: {
+        action: "save",
+        isNew: false,
+        announcement: {
+          id: "ann_keep_author",
+          title: "Thông báo đã cập nhật",
+          content: "Nội dung mới",
+          createdBy: "editor@app.vn",
+          createdAt: "2099-01-01T00:00:00.000Z",
+          isActive: true,
+        },
+      },
+    },
+    resEdit
+  );
+  assert.equal(resEdit.statusCode, 200);
+  const editedDoc = (await db.collection("system_announcements").doc("ann_keep_author").get()).data();
+  assert.equal(editedDoc.createdBy, "creator@app.vn");
+  assert.equal(editedDoc.createdAt, originalCreatedAt);
+  assert.equal(editedDoc.updatedBy, "editor@app.vn");
+  assert.equal(editedDoc.title, "Thông báo đã cập nhật");
+
+  // 3. toggle_active & delete với ID không tồn tại -> trả 404, không tạo doc rác, không ghi Audit Log ảo
+  const logCountBefore = db._getCol("admin_logs").size;
+  const resToggle404 = createMockRes();
+  await handlers.adminManageAnnouncement(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_b" },
+      body: { action: "toggle_active", announcementId: "missing_ann_id", isActive: false },
+    },
+    resToggle404
+  );
+  assert.equal(resToggle404.statusCode, 404);
+  assert.equal((await db.collection("system_announcements").doc("missing_ann_id").get()).exists, false);
+
+  const resDel404 = createMockRes();
+  await handlers.adminManageAnnouncement(
+    {
+      method: "POST",
+      headers: { authorization: "Bearer tok_b" },
+      body: { action: "delete", announcementId: "missing_ann_id" },
+    },
+    resDel404
+  );
+  assert.equal(resDel404.statusCode, 404);
+  assert.equal(db._getCol("admin_logs").size, logCountBefore);
 });
 

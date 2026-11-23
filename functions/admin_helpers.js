@@ -228,7 +228,9 @@ async function verifyAdminCallerWithDeps({
   const hasClaim = decoded.admin === true;
   const hasFirestoreRole = userData.role === "admin";
 
-  if (!hasClaim && !hasFirestoreRole) {
+  // Bắt buộc `users/{uid}.role === 'admin'` song hành `status === 'active'`:
+  // không cho phép token cũ còn `admin: true` vượt qua khi quyền Admin đã bị hạ về `user`.
+  if (!hasFirestoreRole) {
     throw createHttpError(
       403,
       "Truy cập bị từ chối: Tài khoản không có quyền Quản trị viên (Admin)."
@@ -257,12 +259,42 @@ async function verifyAdminCallerWithDeps({
     uid: decoded.uid,
     email: decoded.email || userData.email || "",
     name: userData.name || decoded.name || "",
-    role: userData.role || (hasClaim ? "admin" : "user"),
+    role: "admin",
     status: userData.status || "active",
     hasAdminClaim: hasClaim || claimsSynced,
-    hasFirestoreRole: hasFirestoreRole,
+    hasFirestoreRole: true,
     claimsSynced: claimsSynced,
   };
+}
+
+/**
+ * Bảo vệ Quản trị viên đang hoạt động cuối cùng của hệ thống.
+ * Chặn thao tác khóa, hạ quyền hoặc xóa nếu `targetUid` là tài khoản
+ * `role == 'admin' && status == 'active'` duy nhất còn lại.
+ */
+async function assertNotLastActiveAdmin(db, targetUid, targetData, tx = null) {
+  const isTargetActiveAdmin =
+    Boolean(targetData) &&
+    targetData.role === "admin" &&
+    targetData.status === "active";
+  if (!isTargetActiveAdmin) return;
+
+  const activeAdminsQuery = db
+    .collection("users")
+    .where("role", "==", "admin")
+    .where("status", "==", "active")
+    .limit(2);
+
+  const snap = tx ? await tx.get(activeAdminsQuery) : await activeAdminsQuery.get();
+  const docs = (snap && snap.docs) || [];
+  const hasOtherActiveAdmin = docs.some((doc) => doc.id !== targetUid);
+
+  if (!hasOtherActiveAdmin) {
+    throw createHttpError(
+      400,
+      "Không thể khóa, hạ quyền hoặc xóa Quản trị viên đang hoạt động cuối cùng của hệ thống."
+    );
+  }
 }
 
 /**
@@ -613,6 +645,188 @@ function createAdminEndpointHandlers({
     }
   }
 
+  async function adminListUsers(req, res) {
+    if (req.method !== "GET" && req.method !== "POST") {
+      res.status(405).json({ error: "Method Not Allowed" });
+      return;
+    }
+    try {
+      await verifyCaller(req);
+      const snap = await db.collection("users").get();
+      const users = (snap.docs || []).map((doc) => {
+        const d = (typeof doc.data === "function" ? doc.data() : doc.data) || {};
+        const rawCreatedAt = d.createdAt || null;
+        const normalizedCreatedAt =
+          rawCreatedAt && typeof rawCreatedAt.toDate === "function"
+            ? rawCreatedAt.toDate().toISOString()
+            : rawCreatedAt;
+        // Zero-Knowledge Privacy: CHỈ trả 7 trường hồ sơ phi tài chính,
+        // tuyệt đối không trả monthlyIncome, savingGoal, monthlyPlans hay dữ liệu riêng tư.
+        return {
+          uid: doc.id,
+          name: d.name || "",
+          email: d.email || "",
+          role: d.role || "user",
+          status: d.status || "active",
+          occupation: d.occupation || null,
+          createdAt: normalizedCreatedAt,
+        };
+      });
+
+      res.status(200).json({
+        success: true,
+        users: users,
+      });
+    } catch (error) {
+      if (logger && typeof logger.error === "function") {
+        logger.error("Lỗi adminListUsers:", error.message || error);
+      }
+      sendErrorResponse(res, error, "Không thể lấy danh sách tài khoản.");
+    }
+  }
+
+  async function adminSetUserStatus(req, res) {
+    if (req.method !== "POST") {
+      res.status(405).json({ error: "Method Not Allowed" });
+      return;
+    }
+    try {
+      const caller = await verifyCaller(req);
+      const { targetUid, status, reason } = req.body || {};
+
+      if (!targetUid || typeof targetUid !== "string" || (status !== "active" && status !== "locked")) {
+        throw createHttpError(400, "Tham số targetUid hoặc status không hợp lệ.");
+      }
+
+      if (targetUid === caller.uid) {
+        throw createHttpError(400, "Quản trị viên không thể tự khóa tài khoản của chính mình.");
+      }
+
+      const isLocked = status === "locked";
+      const targetDocRef = db.collection("users").doc(targetUid);
+      const targetSnap = await targetDocRef.get();
+      const targetData = targetSnap && targetSnap.exists
+        ? (typeof targetSnap.data === "function" ? targetSnap.data() : targetSnap.data)
+        : {};
+      const targetEmail = (targetData && targetData.email) || targetUid;
+
+      if (isLocked) {
+        await assertNotLastActiveAdmin(db, targetUid, targetData);
+      }
+
+      // 1. Vô hiệu hóa hoặc khôi phục tài khoản trên Firebase Authentication (xử lý mềm user-not-found)
+      let authUpdated = false;
+      let previousAuthDisabled = null;
+      if (auth && typeof auth.updateUser === "function") {
+        try {
+          if (typeof auth.getUser === "function") {
+            const existingAuthUser = await auth.getUser(targetUid);
+            previousAuthDisabled = Boolean(existingAuthUser && existingAuthUser.disabled);
+          }
+          await auth.updateUser(targetUid, { disabled: isLocked });
+          authUpdated = true;
+        } catch (authErr) {
+          if (authErr && authErr.code === "auth/user-not-found") {
+            if (logger && typeof logger.warn === "function") {
+              logger.warn(
+                `User ${targetUid} không tồn tại trên Authentication, tiếp tục đồng bộ trạng thái Firestore.`
+              );
+            }
+          } else {
+            throw createHttpError(
+              500,
+              `Không thể cập nhật trạng thái trên Authentication: ${authErr.message || authErr}`
+            );
+          }
+        }
+      }
+
+      // 2. Cập nhật trạng thái trên Firestore trong transaction (kiểm tra lại Admin cuối cùng & rollback Auth nếu lỗi)
+      const nowIso = new Date(nowProvider()).toISOString();
+      try {
+        if (typeof db.runTransaction === "function") {
+          await db.runTransaction(async (tx) => {
+            const latestSnap = await tx.get(targetDocRef);
+            const latestData = latestSnap && latestSnap.exists
+              ? (typeof latestSnap.data === "function" ? latestSnap.data() : latestSnap.data)
+              : targetData;
+            if (isLocked) {
+              await assertNotLastActiveAdmin(db, targetUid, latestData, tx);
+            }
+            await tx.set(
+              targetDocRef,
+              {
+                status: status,
+                updatedAt: nowIso,
+              },
+              { merge: true }
+            );
+          });
+        } else {
+          await targetDocRef.set(
+            {
+              status: status,
+              updatedAt: nowIso,
+            },
+            { merge: true }
+          );
+        }
+      } catch (firestoreErr) {
+        if (authUpdated && auth && typeof auth.updateUser === "function") {
+          const rollbackDisabled =
+            previousAuthDisabled !== null ? previousAuthDisabled : !isLocked;
+          try {
+            await auth.updateUser(targetUid, { disabled: rollbackDisabled });
+          } catch (rbErr) {
+            if (logger && typeof logger.error === "function") {
+              logger.error(`Rollback Auth disabled cho ${targetUid} thất bại:`, rbErr);
+            }
+          }
+        }
+        throw firestoreErr;
+      }
+
+      if (isLocked && authUpdated && auth && typeof auth.revokeRefreshTokens === "function") {
+        await auth.revokeRefreshTokens(targetUid);
+      }
+
+      // 3. Ghi nhật ký quản trị sau khi thao tác thực tế thành công
+      const cleanReason = typeof reason === "string" ? reason.trim() : "";
+      const actionCode = isLocked ? "LOCK_USER" : "UNLOCK_USER";
+      const logRef = await db.collection("admin_logs").add({
+        adminId: caller.uid,
+        adminEmail: caller.email,
+        action: actionCode,
+        targetType: "user",
+        targetId: targetUid,
+        targetLabel: targetEmail,
+        result: "success",
+        details: cleanReason
+          ? `${isLocked ? "Khóa" : "Mở khóa"} tài khoản ${targetEmail}. Lý do: ${cleanReason}`
+          : `${isLocked ? "Khóa" : "Mở khóa"} tài khoản ${targetEmail} (Đồng bộ Firebase Auth & Firestore).`,
+        source: "cloud_function",
+        createdAt: nowIso,
+      });
+
+      res.status(200).json({
+        success: true,
+        targetUid: targetUid,
+        status: status,
+        authDisabled: authUpdated ? isLocked : false,
+        authUpdated: authUpdated,
+        logId: logRef.id,
+        message: isLocked
+          ? `Đã khóa tài khoản ${targetEmail} trên Firebase Auth và Firestore.`
+          : `Đã mở khóa tài khoản ${targetEmail}.`,
+      });
+    } catch (error) {
+      if (logger && typeof logger.error === "function") {
+        logger.error("Lỗi adminSetUserStatus:", error.message || error);
+      }
+      sendErrorResponse(res, error, "Không thể cập nhật trạng thái tài khoản.");
+    }
+  }
+
   async function adminSetUserRole(req, res) {
     if (req.method !== "POST") {
       res.status(405).json({ error: "Method Not Allowed" });
@@ -633,32 +847,82 @@ function createAdminEndpointHandlers({
       const isAdminRole = role === "admin";
       const targetDocRef = db.collection("users").doc(targetUid);
       const targetSnap = await targetDocRef.get();
-      const targetEmail = targetSnap.exists ? targetSnap.data().email || targetUid : targetUid;
+      const targetData = targetSnap && targetSnap.exists
+        ? (typeof targetSnap.data === "function" ? targetSnap.data() : targetSnap.data)
+        : {};
+      const targetEmail = (targetData && targetData.email) || targetUid;
+
+      if (!isAdminRole) {
+        await assertNotLastActiveAdmin(db, targetUid, targetData);
+      }
 
       // 1. Cập nhật Custom Claims NHƯNG luôn bảo toàn các claims khác hiện có trên tài khoản
       const existingUser = await auth.getUser(targetUid);
+      const previousClaims =
+        existingUser && existingUser.customClaims
+          ? { ...existingUser.customClaims }
+          : {};
       const mergedClaims = {
-        ...(existingUser && existingUser.customClaims ? existingUser.customClaims : {}),
+        ...previousClaims,
         admin: isAdminRole,
       };
       await auth.setCustomUserClaims(targetUid, mergedClaims);
 
-      // 2. Đồng bộ role trên Firestore (giữ nguyên status hiện có, mặc định 'active' nếu tạo mới)
+      // 2. Đồng bộ role trên Firestore (kiểm tra lại Admin cuối cùng & rollback claims nếu lỗi)
       const nowIso = new Date(nowProvider()).toISOString();
-      const preservedStatus =
-        targetSnap.exists && targetSnap.data().status
-          ? targetSnap.data().status
-          : "active";
-      await targetDocRef.set(
-        {
-          role: role,
-          status: preservedStatus,
-          updatedAt: nowIso,
-        },
-        { merge: true }
-      );
+      try {
+        if (typeof db.runTransaction === "function") {
+          await db.runTransaction(async (tx) => {
+            const latestSnap = await tx.get(targetDocRef);
+            const latestData = latestSnap && latestSnap.exists
+              ? (typeof latestSnap.data === "function" ? latestSnap.data() : latestSnap.data)
+              : targetData;
+            if (!isAdminRole) {
+              await assertNotLastActiveAdmin(db, targetUid, latestData, tx);
+            }
+            const preservedStatus =
+              latestData && latestData.status ? latestData.status : "active";
+            await tx.set(
+              targetDocRef,
+              {
+                role: role,
+                status: preservedStatus,
+                updatedAt: nowIso,
+              },
+              { merge: true }
+            );
+          });
+        } else {
+          const preservedStatus =
+            targetData && targetData.status ? targetData.status : "active";
+          await targetDocRef.set(
+            {
+              role: role,
+              status: preservedStatus,
+              updatedAt: nowIso,
+            },
+            { merge: true }
+          );
+        }
+      } catch (firestoreErr) {
+        try {
+          await auth.setCustomUserClaims(targetUid, previousClaims);
+        } catch (rbErr) {
+          if (logger && typeof logger.error === "function") {
+            logger.error(`Rollback Custom Claims cho ${targetUid} thất bại:`, rbErr);
+          }
+        }
+        throw firestoreErr;
+      }
 
-      // 3. Ghi nhật ký quản trị
+      // 3. Thu hồi ngay Refresh Token khi hạ quyền về 'user' để đóng khe hở JWT cũ 60 phút
+      let tokensRevoked = false;
+      if (!isAdminRole && typeof auth.revokeRefreshTokens === "function") {
+        await auth.revokeRefreshTokens(targetUid);
+        tokensRevoked = true;
+      }
+
+      // 4. Ghi nhật ký quản trị
       const logRef = await db.collection("admin_logs").add({
         adminId: caller.uid,
         adminEmail: caller.email,
@@ -667,7 +931,9 @@ function createAdminEndpointHandlers({
         targetId: targetUid,
         targetLabel: targetEmail,
         result: "success",
-        details: `Cập nhật quyền tài khoản ${targetEmail} thành ${role.toUpperCase()} (Custom Claim admin=${isAdminRole}).`,
+        details: `Cập nhật quyền tài khoản ${targetEmail} thành ${role.toUpperCase()} (Custom Claim admin=${isAdminRole}${
+          tokensRevoked ? ", đã thu hồi phiên cũ" : ""
+        }).`,
         source: "cloud_function",
         createdAt: nowIso,
       });
@@ -676,6 +942,7 @@ function createAdminEndpointHandlers({
         success: true,
         targetUid: targetUid,
         role: role,
+        tokensRevoked: tokensRevoked,
         logId: logRef.id,
         message: `Đã cập nhật quyền ${targetEmail} thành ${role.toUpperCase()}.`,
       });
@@ -710,6 +977,10 @@ function createAdminEndpointHandlers({
         ? (typeof targetSnap.data === "function" ? targetSnap.data() : targetSnap.data)
         : {};
       const targetEmail = targetData.email || targetUid;
+
+      // Chặn xóa Quản trị viên đang hoạt động cuối cùng của hệ thống
+      await assertNotLastActiveAdmin(db, targetUid, targetData);
+
       const nowMs = nowProvider();
       const nowIso = new Date(nowMs).toISOString();
 
@@ -996,14 +1267,32 @@ function createAdminEndpointHandlers({
             ? col.doc(String(announcement.id).trim())
             : col.doc();
 
+        const existingSnap = await docRef.get();
+        const existingData =
+          existingSnap && existingSnap.exists
+            ? (typeof existingSnap.data === "function"
+                ? existingSnap.data()
+                : existingSnap.data) || {}
+            : null;
+        const actorLabel = caller.email || caller.uid;
+        const preservedCreatedBy =
+          existingData && existingData.createdBy
+            ? existingData.createdBy
+            : announcement.createdBy || actorLabel;
+        const preservedCreatedAt =
+          existingData && existingData.createdAt
+            ? existingData.createdAt
+            : announcement.createdAt || nowIso;
+
         await docRef.set(
           {
             id: docRef.id,
             title: annTitle,
             content: annContent,
             isActive: announcement.isActive !== false,
-            createdBy: announcement.createdBy || caller.email || caller.uid,
-            createdAt: announcement.createdAt || nowIso,
+            createdBy: preservedCreatedBy,
+            updatedBy: actorLabel,
+            createdAt: preservedCreatedAt,
             updatedAt: nowIso,
           },
           { merge: true }
@@ -1035,14 +1324,25 @@ function createAdminEndpointHandlers({
         if (!id || typeof isActive !== "boolean") {
           throw createHttpError(400, "Tham số announcementId hoặc isActive không hợp lệ.");
         }
-        await col.doc(id).set(
+        const docRef = col.doc(id);
+        const existingSnap = await docRef.get();
+        if (!existingSnap || !existingSnap.exists) {
+          throw createHttpError(404, "Không tìm thấy thông báo hệ thống cần cập nhật.");
+        }
+        const existingData =
+          (typeof existingSnap.data === "function"
+            ? existingSnap.data()
+            : existingSnap.data) || {};
+
+        await docRef.set(
           {
             isActive: isActive,
+            updatedBy: caller.email || caller.uid,
             updatedAt: nowIso,
           },
           { merge: true }
         );
-        const label = String(title || id).trim();
+        const label = String(existingData.title || title || id).trim();
         const logRef = await db.collection("admin_logs").add({
           adminId: caller.uid,
           adminEmail: caller.email,
@@ -1072,8 +1372,18 @@ function createAdminEndpointHandlers({
         if (!id) {
           throw createHttpError(400, "Thiếu announcementId cần xóa.");
         }
-        await col.doc(id).delete();
-        const label = String(title || id).trim();
+        const docRef = col.doc(id);
+        const existingSnap = await docRef.get();
+        if (!existingSnap || !existingSnap.exists) {
+          throw createHttpError(404, "Không tìm thấy thông báo hệ thống cần xóa.");
+        }
+        const existingData =
+          (typeof existingSnap.data === "function"
+            ? existingSnap.data()
+            : existingSnap.data) || {};
+
+        await docRef.delete();
+        const label = String(existingData.title || title || id).trim();
         const logRef = await db.collection("admin_logs").add({
           adminId: caller.uid,
           adminEmail: caller.email,
@@ -1106,6 +1416,8 @@ function createAdminEndpointHandlers({
 
   return {
     adminVerifySession,
+    adminListUsers,
+    adminSetUserStatus,
     adminSetUserRole,
     adminDeleteUser,
     adminManageSystemCategory,
@@ -1126,5 +1438,6 @@ module.exports = {
   isAllowedAdminOrigin,
   applyAdminCorsPolicy,
   verifyAdminCallerWithDeps,
+  assertNotLastActiveAdmin,
   createAdminEndpointHandlers,
 };

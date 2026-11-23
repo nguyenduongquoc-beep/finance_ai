@@ -50,7 +50,9 @@ class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
   late final AdminWebService _adminService;
   late final SupportService _supportService;
   late final Stream<int> _supportUnreadCountStream;
+  late final Stream<AppUser?>? _userProfileStream;
   late int _selectedIndex;
+  String? _pendingSupportTicketId;
   bool _isSidebarCollapsed = false;
   bool _isCheckingInitialAuth = true;
   AdminAuthCheckResult? _initialAuthCheck;
@@ -102,6 +104,10 @@ class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
           firestore: _adminService.firestoreService.firestoreInstance,
         );
     _supportUnreadCountStream = _supportService.streamAdminUnreadCount();
+    final initialUid = _resolvedAdminUid;
+    _userProfileStream = initialUid.isNotEmpty
+        ? _adminService.firestoreService.streamUserProfile(initialUid)
+        : null;
     _selectedIndex = widget.initialIndex.clamp(0, _navItems.length - 1);
     _verifyInitialAccess();
   }
@@ -214,15 +220,15 @@ class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
     }
 
     final uid = _resolvedAdminUid;
-    final hasClaim = widget.tokenClaimsOverride?['admin'] == true ||
-        initialCheck.hasAdminCustomClaim;
 
     return StreamBuilder<AppUser?>(
-      stream: uid.isNotEmpty
-          ? _adminService.firestoreService.streamUserProfile(uid)
-          : null,
+      stream: _userProfileStream,
       builder: (context, snapshot) {
-        final liveUser = snapshot.data ?? initialCheck.userProfile;
+        final hasLiveSnapshot =
+            snapshot.connectionState == ConnectionState.active ||
+                snapshot.connectionState == ConnectionState.done;
+        final liveUser =
+            hasLiveSnapshot ? snapshot.data : initialCheck.userProfile;
 
         if (liveUser != null && liveUser.isLocked) {
           return _buildUnauthorizedBlockScreen(
@@ -230,15 +236,15 @@ class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
           );
         }
 
-        if (!hasClaim && (liveUser == null || !liveUser.isAdmin)) {
+        if (liveUser == null || !liveUser.isAdmin) {
           return _buildUnauthorizedBlockScreen(
             'Tài khoản không có quyền Quản trị viên (Admin) để truy cập trang này.',
           );
         }
 
-        final adminEmail = liveUser?.email ?? '';
-        final adminName = (liveUser?.name.isNotEmpty == true)
-            ? liveUser!.name
+        final adminEmail = liveUser.email;
+        final adminName = liveUser.name.isNotEmpty
+            ? liveUser.name
             : 'Quản trị viên';
 
         return LayoutBuilder(
@@ -809,6 +815,15 @@ class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
     );
   }
 
+  void _openSupportTicketFromUserDetail(String ticketId) {
+    final cleanId = ticketId.trim();
+    if (cleanId.isEmpty) return;
+    setState(() {
+      _pendingSupportTicketId = cleanId;
+      _selectedIndex = _supportTabIndex;
+    });
+  }
+
   Widget _buildActiveView({
     required String adminUid,
     required String adminEmail,
@@ -818,6 +833,8 @@ class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
       case 0:
         return AdminOverviewView(
           adminService: _adminService,
+          currentAdminUid: adminUid,
+          tokenClaimsOverride: widget.tokenClaimsOverride,
           onNavigateTab: (idx) => setState(() => _selectedIndex = idx),
         );
       case 1:
@@ -826,6 +843,7 @@ class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
           currentAdminUid: adminUid,
           currentAdminEmail: adminEmail,
           tokenClaimsOverride: widget.tokenClaimsOverride,
+          onOpenSupportTicket: _openSupportTicketFromUserDetail,
         );
       case 2:
         return AdminCategoriesManagementView(
@@ -850,10 +868,18 @@ class _AdminWebShellScreenState extends State<AdminWebShellScreen> {
           supportService: _supportService,
           currentAdminUid: adminUid,
           currentAdminName: adminName,
+          initialTicketId: _pendingSupportTicketId,
+          onInitialTicketHandled: () {
+            if (mounted && _pendingSupportTicketId != null) {
+              setState(() => _pendingSupportTicketId = null);
+            }
+          },
         );
       default:
         return AdminOverviewView(
           adminService: _adminService,
+          currentAdminUid: adminUid,
+          tokenClaimsOverride: widget.tokenClaimsOverride,
           onNavigateTab: (idx) => setState(() => _selectedIndex = idx),
         );
     }

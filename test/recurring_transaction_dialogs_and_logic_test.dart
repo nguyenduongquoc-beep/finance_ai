@@ -1,8 +1,14 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:finance_ai_app/l10n/app_localizations.dart';
 import 'package:finance_ai_app/models/category_model.dart';
 import 'package:finance_ai_app/models/notification_model.dart';
 import 'package:finance_ai_app/models/recurring_transaction_model.dart';
+import 'package:finance_ai_app/screens/management/recurring_transaction_screen.dart';
 import 'package:finance_ai_app/services/firestore_service.dart';
+import 'package:finance_ai_app/services/language_controller.dart';
 import 'package:finance_ai_app/services/recurring_transaction_service.dart';
 import 'package:finance_ai_app/services/local_notification_service.dart';
 
@@ -305,6 +311,221 @@ void main() {
       expect(items.length, equals(1));
       expect(items.first.isOnDueDate, isTrue);
       expect(items.first.title, contains('Hóa đơn định kỳ'));
+    });
+
+    test(
+        '11. Defer note and alternative-wallet localization strings match backend semantics in both VI and EN',
+        () async {
+      SharedPreferences.setMockInitialValues({});
+      await LanguageController.setLanguage('vi');
+
+      final viDeferNote = AppLocalizations.tr('rec_dlg_defer_note');
+      expect(viDeferNote, contains('chỉ dời riêng kỳ hiện tại'));
+      expect(viDeferNote, contains('lịch lặp gốc'));
+      expect(
+        AppLocalizations.tr('rec_dlg_switch_wallet_btn'),
+        contains('Trả kỳ này bằng ví khác'),
+      );
+      expect(
+        AppLocalizations.tr('rec_hero_planned_period'),
+        contains('tháng'),
+      );
+
+      await LanguageController.setLanguage('en');
+
+      final enDeferNote = AppLocalizations.tr('rec_dlg_defer_note');
+      expect(enDeferNote, contains('only reschedules the current occurrence'));
+      expect(enDeferNote, contains('original schedule'));
+      expect(
+        AppLocalizations.tr('rec_dlg_switch_wallet_btn'),
+        contains('Pay this cycle with another wallet'),
+      );
+      expect(
+        AppLocalizations.tr('rec_hero_planned_period'),
+        contains('Est. monthly recurring'),
+      );
+
+      await LanguageController.setLanguage('vi');
+    });
+
+    testWidgets(
+        '12. RecurringHeroCard displays normalized monthly totals, weekly conversion note, and never overflows on 320dp @ 1.2x in VI and EN',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      final schedules = [
+        RecurringTransactionSchedule(
+          scheduleId: 's_month',
+          userId: 'u1',
+          type: 'expense',
+          walletId: 'w1',
+          categoryId: 'c1',
+          amount: 5000000,
+          frequency: 'monthly',
+          startDate: DateTime(2026, 11, 1),
+          nextDueDate: DateTime(2026, 12, 1),
+          isActive: true,
+          createdAt: DateTime(2026, 11, 1),
+        ),
+        RecurringTransactionSchedule(
+          scheduleId: 's_week',
+          userId: 'u1',
+          type: 'expense',
+          walletId: 'w1',
+          categoryId: 'c2',
+          amount: 250000,
+          frequency: 'weekly',
+          startDate: DateTime(2026, 11, 2),
+          nextDueDate: DateTime(2026, 11, 23),
+          isActive: true,
+          createdAt: DateTime(2026, 11, 1),
+        ),
+        RecurringTransactionSchedule(
+          scheduleId: 's_inc_week',
+          userId: 'u1',
+          type: 'income',
+          walletId: 'w1',
+          categoryId: 'c3',
+          amount: 500000,
+          frequency: 'weekly',
+          startDate: DateTime(2026, 11, 3),
+          nextDueDate: DateTime(2026, 11, 24),
+          isActive: true,
+          createdAt: DateTime(2026, 11, 1),
+        ),
+      ];
+
+      for (final lang in ['vi', 'en']) {
+        await LanguageController.setLanguage(lang);
+        await tester.binding.setSurfaceSize(const Size(320, 700));
+        var tappedDue = false;
+        final errors = <FlutterErrorDetails>[];
+        final prevOnError = FlutterError.onError;
+        FlutterError.onError = errors.add;
+
+        try {
+          await tester.pumpWidget(
+            MaterialApp(
+              locale: Locale(lang),
+              supportedLocales: const [Locale('vi'), Locale('en')],
+              localizationsDelegates: const [
+                AppLocalizations.delegate,
+                GlobalMaterialLocalizations.delegate,
+                GlobalWidgetsLocalizations.delegate,
+                GlobalCupertinoLocalizations.delegate,
+              ],
+              builder: (context, child) => MediaQuery(
+                data: MediaQuery.of(context).copyWith(
+                  textScaler: const TextScaler.linear(1.2),
+                ),
+                child: child ?? const SizedBox.shrink(),
+              ),
+              home: Scaffold(
+                body: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: RecurringHeroCard(
+                    schedules: schedules,
+                    dueCount: 2,
+                    onTapDueBadge: () => tappedDue = true,
+                  ),
+                ),
+              ),
+            ),
+          );
+          await tester.pumpAndSettle();
+
+          // Normalized monthly expense: 5,000,000 + 250,000*4 = 6,000,000
+          expect(find.byKey(const ValueKey('hero_expense_6000000')), findsOneWidget);
+          // Weekly conversion note appears with count=2
+          expect(
+            find.text(
+              AppLocalizations.tr(
+                'rec_hero_weekly_converted_note',
+                params: {'count': '2'},
+              ),
+            ),
+            findsOneWidget,
+          );
+
+          // Tapping due badge fires callback
+          await tester.tap(
+            find.text(
+              AppLocalizations.tr(
+                'rec_hero_pending_badge',
+                params: {'count': '2'},
+              ),
+            ),
+          );
+          expect(tappedDue, isTrue);
+
+          expect(tester.takeException(), isNull);
+          expect(errors, isEmpty, reason: 'Overflow/layout error in $lang: $errors');
+        } finally {
+          FlutterError.onError = prevOnError;
+          await tester.binding.setSurfaceSize(null);
+        }
+      }
+
+      await LanguageController.setLanguage('vi');
+    });
+
+    testWidgets(
+        '13. RecurringHeroCard hides weekly note when only monthly schedules are active',
+        (tester) async {
+      SharedPreferences.setMockInitialValues({});
+      await LanguageController.setLanguage('vi');
+
+      final monthlyOnly = [
+        RecurringTransactionSchedule(
+          scheduleId: 's_m1',
+          userId: 'u1',
+          type: 'expense',
+          walletId: 'w1',
+          categoryId: 'c1',
+          amount: 3000000,
+          frequency: 'monthly',
+          startDate: DateTime(2026, 11, 1),
+          nextDueDate: DateTime(2026, 12, 1),
+          isActive: true,
+          createdAt: DateTime(2026, 11, 1),
+        ),
+        // Paused weekly schedule must NOT trigger the weekly conversion footnote
+        RecurringTransactionSchedule(
+          scheduleId: 's_w_paused',
+          userId: 'u1',
+          type: 'expense',
+          walletId: 'w1',
+          categoryId: 'c1',
+          amount: 200000,
+          frequency: 'weekly',
+          startDate: DateTime(2026, 11, 2),
+          nextDueDate: DateTime(2026, 11, 23),
+          isActive: false,
+          createdAt: DateTime(2026, 11, 1),
+        ),
+      ];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          locale: const Locale('vi'),
+          supportedLocales: const [Locale('vi'), Locale('en')],
+          localizationsDelegates: const [
+            AppLocalizations.delegate,
+            GlobalMaterialLocalizations.delegate,
+            GlobalWidgetsLocalizations.delegate,
+            GlobalCupertinoLocalizations.delegate,
+          ],
+          home: Scaffold(
+            body: RecurringHeroCard(
+              schedules: monthlyOnly,
+              dueCount: 0,
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const ValueKey('hero_expense_3000000')), findsOneWidget);
+      expect(find.byIcon(Icons.info_outline_rounded), findsNothing);
     });
   });
 }

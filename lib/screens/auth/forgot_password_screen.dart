@@ -9,6 +9,10 @@ import '../../widgets/app_text_field.dart';
 
 /// Màn hình Quên mật khẩu - Khôi phục bằng liên kết an toàn qua Email (Firebase Auth)
 class ForgotPasswordScreen extends StatefulWidget {
+  static final RegExp emailValidationRegex = RegExp(
+    r'^[^\s@]+@(?:[^\s@.]+\.)+[^\s@.]{2,}$',
+  );
+
   final String? initialEmail;
   final Future<void> Function(String email)? onSendResetEmail;
 
@@ -213,10 +217,8 @@ class _ForgotPasswordScreenState extends State<ForgotPasswordScreen> {
                     if (v == null || v.trim().isEmpty) {
                       return context.tr('forgot_pw_email_required');
                     }
-                    final emailRegex = RegExp(
-                      r'^[\w-\.]+@([\w-]+\.)+[\w-]{2,4}$',
-                    );
-                    if (!emailRegex.hasMatch(v.trim())) {
+                    if (!ForgotPasswordScreen.emailValidationRegex
+                        .hasMatch(v.trim())) {
                       return context.tr('forgot_pw_email_invalid');
                     }
                     return null;

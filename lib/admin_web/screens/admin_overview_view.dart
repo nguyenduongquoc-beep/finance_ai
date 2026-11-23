@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
@@ -6,167 +7,281 @@ import '../../models/admin_audit_log_model.dart';
 import '../../models/monthly_financial_plan.dart';
 import '../../models/user_model.dart';
 import '../../utils/constants.dart';
+import '../../widgets/app_snackbar.dart';
 import '../services/admin_web_service.dart';
 import '../widgets/admin_governance_widgets.dart';
 
+/// Tính khoảng chia trục Y động cho biểu đồ tăng trưởng người dùng
+/// nhằm tránh chồng chéo đường lưới và nhãn số khi lượng đăng ký tăng cao.
+double computeAdminChartYInterval(double maxY) {
+  return math.max(1, (maxY / 4).ceil()).toDouble();
+}
+
 /// Màn hình Dashboard Tổng quan (Admin Overview) trên Admin Web Portal.
-/// Hiển thị các chỉ số tổng hợp và biểu đồ tăng trưởng thực tế từ Firestore.
-class AdminOverviewView extends StatelessWidget {
+/// - Lấy danh sách người dùng đã lọc sạch 7 trường phi tài chính qua `listUsersViaBackend` (Zero-Knowledge).
+/// - Cache sẵn các Stream Firestore (`system_categories`, `admin_logs(limit: 25)`) trong `initState()`.
+class AdminOverviewView extends StatefulWidget {
   final AdminWebService adminService;
+  final String? currentAdminUid;
+  final Map<String, dynamic>? tokenClaimsOverride;
   final ValueChanged<int>? onNavigateTab;
 
   const AdminOverviewView({
     super.key,
     required this.adminService,
+    this.currentAdminUid,
+    this.tokenClaimsOverride,
     this.onNavigateTab,
   });
 
   @override
+  State<AdminOverviewView> createState() => _AdminOverviewViewState();
+}
+
+class _AdminOverviewViewState extends State<AdminOverviewView> {
+  late Stream<List<SystemCategoryTemplate>> _categoriesStream;
+  late Stream<List<AdminAuditLog>> _logsStream;
+
+  List<AppUser> _users = const <AppUser>[];
+  bool _isLoadingUsers = true;
+  bool _isRefreshing = false;
+  Object? _usersError;
+
+  @override
+  void initState() {
+    super.initState();
+    _initStreams();
+    _loadUsers();
+  }
+
+  @override
+  void didUpdateWidget(covariant AdminOverviewView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.adminService != widget.adminService) {
+      _initStreams();
+      _loadUsers();
+    }
+  }
+
+  void _initStreams() {
+    final firestore = widget.adminService.firestoreService;
+    _categoriesStream = firestore.streamSystemCategoryTemplates();
+    _logsStream = firestore.streamAdminAuditLogs(limit: 25);
+  }
+
+  void _retryLogsStream() {
+    setState(() {
+      _logsStream =
+          widget.adminService.firestoreService.streamAdminAuditLogs(limit: 25);
+    });
+  }
+
+  Future<void> _loadUsers({bool silent = false}) async {
+    if (!silent) {
+      setState(() {
+        _isLoadingUsers = true;
+        _usersError = null;
+      });
+    } else {
+      setState(() => _isRefreshing = true);
+    }
+
+    try {
+      final fetched = await widget.adminService.listUsersViaBackend(
+        adminUid: widget.currentAdminUid,
+        tokenClaimsOverride: widget.tokenClaimsOverride,
+      );
+      if (!mounted) return;
+      setState(() {
+        _users = fetched;
+        _isLoadingUsers = false;
+        _isRefreshing = false;
+        _usersError = null;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _isLoadingUsers = false;
+        _isRefreshing = false;
+        if (_users.isEmpty) {
+          _usersError = e;
+        }
+      });
+      if (silent && _users.isNotEmpty) {
+        AppSnackbar.show(
+          context,
+          'Không thể làm mới danh sách tài khoản: ${formatAdminErrorMessage(e)}',
+          isError: true,
+        );
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final firestore = adminService.firestoreService;
+    if (_isLoadingUsers && _users.isEmpty) {
+      return const Center(child: CircularProgressIndicator());
+    }
+    if (_usersError != null && _users.isEmpty) {
+      return Padding(
+        padding: const EdgeInsets.all(24),
+        child: AdminErrorStateCard(
+          error: _usersError!,
+          onRetry: _loadUsers,
+        ),
+      );
+    }
 
-    return StreamBuilder<List<AppUser>>(
-      stream: firestore.streamAllUsersForAdmin(),
-      builder: (context, userSnap) {
-        if (userSnap.connectionState == ConnectionState.waiting &&
-            !userSnap.hasData) {
-          return const Center(child: CircularProgressIndicator());
-        }
-        if (userSnap.hasError) {
-          return Padding(
-            padding: const EdgeInsets.all(24),
-            child: AdminErrorStateCard(error: userSnap.error!),
-          );
-        }
-        final users = userSnap.data ?? const <AppUser>[];
+    return StreamBuilder<List<SystemCategoryTemplate>>(
+      stream: _categoriesStream,
+      builder: (context, catSnap) {
+        final categories = catSnap.data ?? const <SystemCategoryTemplate>[];
 
-        return StreamBuilder<List<SystemCategoryTemplate>>(
-          stream: firestore.streamSystemCategoryTemplates(),
-          builder: (context, catSnap) {
-            final categories =
-                catSnap.data ?? const <SystemCategoryTemplate>[];
+        return StreamBuilder<List<AdminAuditLog>>(
+          stream: _logsStream,
+          builder: (context, logSnap) {
+            final logs = logSnap.data ?? const <AdminAuditLog>[];
+            final metrics = widget.adminService.computeDashboardMetrics(
+              users: _users,
+              categories: categories,
+              logs: logs,
+            );
 
-            return StreamBuilder<List<AdminAuditLog>>(
-              stream: firestore.streamAdminAuditLogs(limit: 25),
-              builder: (context, logSnap) {
-                final logs = logSnap.data ?? const <AdminAuditLog>[];
-                final metrics = adminService.computeDashboardMetrics(
-                  users: users,
-                  categories: categories,
-                  logs: logs,
-                );
-
-                return SingleChildScrollView(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+            return SingleChildScrollView(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
                     children: [
-                      // 1. 4 Thẻ KPI Tổng quan Vận hành
-                      LayoutBuilder(
-                        builder: (context, constraints) {
-                          final isWide = constraints.maxWidth >= 820;
-                          final cardWidth = isWide
-                              ? (constraints.maxWidth - 36) / 4
-                              : (constraints.maxWidth >= 480
-                                  ? (constraints.maxWidth - 12) / 2
-                                  : constraints.maxWidth);
-
-                          return Wrap(
-                            spacing: 12,
-                            runSpacing: 12,
-                            children: [
-                              SizedBox(
-                                width: cardWidth,
-                                child: _buildKpiCard(
-                                  key: const ValueKey('kpi_total_users'),
-                                  title: 'Tổng số tài khoản',
-                                  value: '${metrics.totalUsers}',
-                                  subtitle:
-                                      '${metrics.adminUsers} Quản trị viên · ${metrics.totalUsers - metrics.adminUsers} Người dùng',
-                                  icon: Icons.people_alt_rounded,
-                                  accentColor: AppColors.primary,
+                      OutlinedButton.icon(
+                        key: const ValueKey('admin_overview_refresh_btn'),
+                        onPressed: _isRefreshing
+                            ? null
+                            : () => _loadUsers(silent: true),
+                        icon: _isRefreshing
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
                                 ),
-                              ),
-                              SizedBox(
-                                width: cardWidth,
-                                child: _buildKpiCard(
-                                  key: const ValueKey('kpi_active_users'),
-                                  title: 'Tài khoản hoạt động',
-                                  value: '${metrics.activeUsers}',
-                                  subtitle: 'Đang có quyền truy cập bình thường',
-                                  icon: Icons.verified_user_rounded,
-                                  accentColor: AppColors.income,
-                                ),
-                              ),
-                              SizedBox(
-                                width: cardWidth,
-                                child: _buildKpiCard(
-                                  key: const ValueKey('kpi_locked_users'),
-                                  title: 'Tài khoản bị khóa',
-                                  value: '${metrics.lockedUsers}',
-                                  subtitle: 'Đã vô hiệu hóa quyền đăng nhập',
-                                  icon: Icons.lock_person_rounded,
-                                  accentColor: AppColors.expense,
-                                ),
-                              ),
-                              SizedBox(
-                                width: cardWidth,
-                                child: _buildKpiCard(
-                                  key: const ValueKey('kpi_system_categories'),
-                                  title: 'Danh mục hệ thống',
-                                  value: '${metrics.totalSystemCategories}',
-                                  subtitle:
-                                      '${metrics.activeSystemCategories} hiển thị · ${metrics.hiddenSystemCategories} đang ẩn',
-                                  icon: Icons.category_rounded,
-                                  accentColor: const Color(0xFF0284C7),
-                                ),
-                              ),
-                            ],
-                          );
-                        },
-                      ),
-                      const SizedBox(height: 20),
-
-                      // 2. Biểu đồ tăng trưởng người dùng theo thời gian
-                      _buildUserGrowthChartCard(metrics.monthlyGrowth),
-                      const SizedBox(height: 20),
-
-                      // 3. Hai bảng dữ liệu thực tế: Tài khoản đăng ký gần đây & Nhật ký quản trị gần đây
-                      LayoutBuilder(
-                        builder: (context, constraints) {
-                          if (constraints.maxWidth >= 900) {
-                            return Row(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Expanded(
-                                  flex: 5,
-                                  child: _buildRecentUsersCard(
-                                    metrics.recentUsers,
-                                  ),
-                                ),
-                                const SizedBox(width: 16),
-                                Expanded(
-                                  flex: 6,
-                                  child: _buildRecentAuditLogsCard(
-                                    metrics.recentLogs,
-                                  ),
-                                ),
-                              ],
-                            );
-                          }
-                          return Column(
-                            children: [
-                              _buildRecentUsersCard(metrics.recentUsers),
-                              const SizedBox(height: 16),
-                              _buildRecentAuditLogsCard(metrics.recentLogs),
-                            ],
-                          );
-                        },
+                              )
+                            : const Icon(Icons.refresh_rounded, size: 17),
+                        label: const Text('Làm mới'),
                       ),
                     ],
                   ),
-                );
-              },
+                  const SizedBox(height: 12),
+                  // 1. 4 Thẻ KPI Tổng quan Vận hành
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      final isWide = constraints.maxWidth >= 820;
+                      final cardWidth = isWide
+                          ? (constraints.maxWidth - 36) / 4
+                          : (constraints.maxWidth >= 480
+                              ? (constraints.maxWidth - 12) / 2
+                              : constraints.maxWidth);
+
+                      return Wrap(
+                        spacing: 12,
+                        runSpacing: 12,
+                        children: [
+                          SizedBox(
+                            width: cardWidth,
+                            child: _buildKpiCard(
+                              key: const ValueKey('kpi_total_users'),
+                              title: 'Tổng số tài khoản',
+                              value: '${metrics.totalUsers}',
+                              subtitle:
+                                  '${metrics.adminUsers} Quản trị viên · ${metrics.totalUsers - metrics.adminUsers} Người dùng',
+                              icon: Icons.people_alt_rounded,
+                              accentColor: AppColors.primary,
+                            ),
+                          ),
+                          SizedBox(
+                            width: cardWidth,
+                            child: _buildKpiCard(
+                              key: const ValueKey('kpi_active_users'),
+                              title: 'Tài khoản hoạt động',
+                              value: '${metrics.activeUsers}',
+                              subtitle: 'Đang có quyền truy cập bình thường',
+                              icon: Icons.verified_user_rounded,
+                              accentColor: AppColors.income,
+                            ),
+                          ),
+                          SizedBox(
+                            width: cardWidth,
+                            child: _buildKpiCard(
+                              key: const ValueKey('kpi_locked_users'),
+                              title: 'Tài khoản bị khóa',
+                              value: '${metrics.lockedUsers}',
+                              subtitle: 'Đã vô hiệu hóa quyền đăng nhập',
+                              icon: Icons.lock_person_rounded,
+                              accentColor: AppColors.expense,
+                            ),
+                          ),
+                          SizedBox(
+                            width: cardWidth,
+                            child: _buildKpiCard(
+                              key: const ValueKey('kpi_system_categories'),
+                              title: 'Danh mục hệ thống',
+                              value: '${metrics.totalSystemCategories}',
+                              subtitle:
+                                  '${metrics.activeSystemCategories} hiển thị · ${metrics.hiddenSystemCategories} đang ẩn',
+                              icon: Icons.category_rounded,
+                              accentColor: const Color(0xFF0284C7),
+                            ),
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                  const SizedBox(height: 20),
+
+                  // 2. Biểu đồ tăng trưởng người dùng theo thời gian
+                  _buildUserGrowthChartCard(metrics.monthlyGrowth),
+                  const SizedBox(height: 20),
+
+                  // 3. Hai bảng dữ liệu thực tế: Tài khoản đăng ký gần đây & Nhật ký quản trị gần đây
+                  LayoutBuilder(
+                    builder: (context, constraints) {
+                      if (constraints.maxWidth >= 900) {
+                        return Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Expanded(
+                              flex: 5,
+                              child: _buildRecentUsersCard(
+                                metrics.recentUsers,
+                              ),
+                            ),
+                            const SizedBox(width: 16),
+                            Expanded(
+                              flex: 6,
+                              child: _buildRecentAuditLogsCard(
+                                metrics.recentLogs,
+                                logsError: logSnap.error,
+                              ),
+                            ),
+                          ],
+                        );
+                      }
+                      return Column(
+                        children: [
+                          _buildRecentUsersCard(metrics.recentUsers),
+                          const SizedBox(height: 16),
+                          _buildRecentAuditLogsCard(
+                            metrics.recentLogs,
+                            logsError: logSnap.error,
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ],
+              ),
             );
           },
         );
@@ -247,6 +362,7 @@ class AdminOverviewView extends StatelessWidget {
       (prev, b) => b.newUsersCount > prev ? b.newUsersCount : prev,
     );
     final maxY = (maxNew < 4 ? 4 : maxNew + 1).toDouble();
+    final yInterval = computeAdminChartYInterval(maxY);
 
     return Container(
       key: const ValueKey('admin_user_growth_chart_card'),
@@ -315,7 +431,7 @@ class AdminOverviewView extends StatelessWidget {
                 gridData: FlGridData(
                   show: true,
                   drawVerticalLine: false,
-                  horizontalInterval: 1,
+                  horizontalInterval: yInterval,
                   getDrawingHorizontalLine: (_) => const FlLine(
                     color: AppColors.slate200,
                     strokeWidth: 1,
@@ -332,8 +448,8 @@ class AdminOverviewView extends StatelessWidget {
                   leftTitles: AxisTitles(
                     sideTitles: SideTitles(
                       showTitles: true,
-                      reservedSize: 32,
-                      interval: 1,
+                      reservedSize: maxY >= 1000 ? 44 : 36,
+                      interval: yInterval,
                       getTitlesWidget: (val, _) {
                         if (val % 1 != 0) return const SizedBox.shrink();
                         return Text(
@@ -420,9 +536,9 @@ class AdminOverviewView extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              if (onNavigateTab != null)
+              if (widget.onNavigateTab != null)
                 TextButton(
-                  onPressed: () => onNavigateTab!(1),
+                  onPressed: () => widget.onNavigateTab!(1),
                   child: const Text('Xem tất cả'),
                 ),
             ],
@@ -535,7 +651,10 @@ class AdminOverviewView extends StatelessWidget {
     );
   }
 
-  Widget _buildRecentAuditLogsCard(List<AdminAuditLog> recentLogs) {
+  Widget _buildRecentAuditLogsCard(
+    List<AdminAuditLog> recentLogs, {
+    Object? logsError,
+  }) {
     return Container(
       key: const ValueKey('admin_recent_logs_card'),
       padding: const EdgeInsets.all(20),
@@ -561,15 +680,20 @@ class AdminOverviewView extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              if (onNavigateTab != null)
+              if (widget.onNavigateTab != null)
                 TextButton(
-                  onPressed: () => onNavigateTab!(4),
+                  onPressed: () => widget.onNavigateTab!(4),
                   child: const Text('Xem toàn bộ log'),
                 ),
             ],
           ),
           const SizedBox(height: 12),
-          if (recentLogs.isEmpty)
+          if (logsError != null && recentLogs.isEmpty)
+            AdminErrorStateCard(
+              error: logsError,
+              onRetry: _retryLogsStream,
+            )
+          else if (recentLogs.isEmpty)
             Padding(
               padding: const EdgeInsets.symmetric(vertical: 24),
               child: Center(

@@ -35,6 +35,10 @@ class ChatInsightCardData {
   final double? progressPercent; // 0.0 -> 1.0
   final String actionLabel;
   final String? targetId; // categoryId, goalId...
+  /// Đánh dấu trạng thái cảnh báo đỏ (ví dụ ngân sách vượt hạn mức).
+  /// Khi `type == ChatInsightCardType.budgetOverrun` và `isAlert == false`,
+  /// UI hiển thị tông xanh tích cực cho ngân sách đang an toàn.
+  final bool isAlert;
 
   const ChatInsightCardData({
     required this.type,
@@ -45,7 +49,8 @@ class ChatInsightCardData {
     this.progressPercent,
     required this.actionLabel,
     this.targetId,
-  });
+    bool? isAlert,
+  }) : isAlert = isAlert ?? (type == ChatInsightCardType.budgetOverrun);
 
   Map<String, dynamic> toMap() {
     return {
@@ -57,6 +62,7 @@ class ChatInsightCardData {
       'progressPercent': progressPercent,
       'actionLabel': actionLabel,
       'targetId': targetId,
+      'isAlert': isAlert,
     };
   }
 
@@ -66,6 +72,17 @@ class ChatInsightCardData {
       (e) => e.name == typeName,
       orElse: () => ChatInsightCardType.none,
     );
+    final bool resolvedIsAlert;
+    if (map['isAlert'] is bool) {
+      resolvedIsAlert = map['isAlert'] as bool;
+    } else if (cardType == ChatInsightCardType.budgetOverrun) {
+      final sec = (map['secondaryMetric'] as String?)?.toLowerCase() ?? '';
+      final isExplicitSafe =
+          sec.contains('an toàn') || sec.contains('on track');
+      resolvedIsAlert = !isExplicitSafe;
+    } else {
+      resolvedIsAlert = false;
+    }
     return ChatInsightCardData(
       type: cardType,
       title: map['title'] ?? '',
@@ -73,8 +90,10 @@ class ChatInsightCardData {
       primaryMetric: map['primaryMetric'] ?? '',
       secondaryMetric: map['secondaryMetric'],
       progressPercent: (map['progressPercent'] as num?)?.toDouble(),
-      actionLabel: map['actionLabel'] ?? AppLocalizations.tr('svc_chat_view_details'),
+      actionLabel:
+          map['actionLabel'] ?? AppLocalizations.tr('svc_chat_view_details'),
       targetId: map['targetId'],
+      isAlert: resolvedIsAlert,
     );
   }
 }
@@ -630,6 +649,73 @@ class FinancialChatContextService {
     return prompts;
   }
 
+  /// Chọn lọc tối đa [maxCount] (mặc định 5) chip gợi ý động thông minh nhất
+  /// cho thanh gợi ý 1 hàng gọn trên giao diện AI Chat:
+  /// - Ưu tiên 1: Các chip cảnh báo đỏ (`isAlert == true`: vượt ngân sách, dòng tiền âm, chi đột biến).
+  /// - Ưu tiên 2: Các câu hỏi sát ngữ cảnh nhất theo đa dạng khía cạnh (mục tiêu, ngân sách, tổng quan, chi tiêu, tiết kiệm).
+  static List<DynamicPromptChip> selectCompactPrompts(
+    List<DynamicPromptChip> allPrompts, {
+    int maxCount = 5,
+    bool hasNearLimitBudgets = false,
+  }) {
+    if (allPrompts.length <= maxCount) {
+      return List<DynamicPromptChip>.unmodifiable(allPrompts);
+    }
+
+    final selected = <DynamicPromptChip>[];
+    final seenLabels = <String>{};
+
+    bool addIfEligible(DynamicPromptChip chip) {
+      if (selected.length >= maxCount) return false;
+      final key = chip.label.trim().toLowerCase();
+      if (key.isEmpty || seenLabels.contains(key)) return false;
+      seenLabels.add(key);
+      selected.add(chip);
+      return true;
+    }
+
+    // 1. Ưu tiên cao nhất: Toàn bộ chip cảnh báo đỏ
+    for (final chip in allPrompts.where((p) => p.isAlert)) {
+      addIfEligible(chip);
+    }
+
+    // 2. Ưu tiên chip mục tiêu tiết kiệm (nếu người dùng có mục tiêu)
+    for (final chip in allPrompts
+        .where((p) => !p.isAlert && p.category == 'featured' && p.icon == '🎯')) {
+      if (addIfEligible(chip)) break;
+    }
+
+    // 3. Nếu có ngân sách gần chạm hạn mức, ưu tiên chip kiểm tra ngân sách
+    if (hasNearLimitBudgets) {
+      for (final chip in allPrompts.where((p) => !p.isAlert && p.category == 'budget')) {
+        if (addIfEligible(chip)) break;
+      }
+    }
+
+    // 4. Lấp đầy cân bằng đa dạng góc nhìn (Tổng quan -> Chi tiêu -> Tiết kiệm -> Ngân sách -> Nổi bật)
+    const priorityCategories = [
+      'overview',
+      'expense',
+      'saving',
+      'budget',
+      'featured',
+    ];
+    for (final cat in priorityCategories) {
+      if (selected.length >= maxCount) break;
+      for (final chip in allPrompts.where((p) => !p.isAlert && p.category == cat)) {
+        if (addIfEligible(chip)) break;
+      }
+    }
+
+    // 5. Fallback bổ sung nếu danh sách nguồn có ít phân nhóm
+    for (final chip in allPrompts) {
+      if (selected.length >= maxCount) break;
+      addIfEligible(chip);
+    }
+
+    return List<DynamicPromptChip>.unmodifiable(selected);
+  }
+
   /// Lọc PII khỏi tên hiển thị (không bao giờ gửi email, SĐT hoặc UID cho Gemini)
   static String _sanitizeDisplayName(String? rawName) {
     if (rawName == null || rawName.trim().isEmpty) return AppLocalizations.tr('svc_chat_guest');
@@ -1071,6 +1157,7 @@ class FinancialChatContextService {
               catBudget.limit > 0 ? (spentAmount / catBudget.limit) : 0,
           actionLabel: AppLocalizations.tr('ai_chat_view_budget_btn'),
           targetId: catBudget.budgetId,
+          isAlert: isOver,
         );
       } else if (spentAmount > 0) {
         return ChatInsightCardData(
@@ -1171,6 +1258,7 @@ class FinancialChatContextService {
           secondaryMetric: AppLocalizations.tr('svc_chat_card_ctrl'),
           actionLabel: AppLocalizations.tr('ai_chat_view_budget_btn'),
           targetId: b.budgetId,
+          isAlert: true,
         );
       } else if (context.budgets.isNotEmpty) {
         return ChatInsightCardData(
@@ -1179,7 +1267,9 @@ class FinancialChatContextService {
           subtitle: AppLocalizations.tr('svc_chat_budgets_all_sub'),
           primaryMetric: AppLocalizations.tr('svc_chat_budgets_active_count',
               params: {'count': '${context.budgets.length}'}),
+          secondaryMetric: AppLocalizations.tr('svc_chat_card_safe'),
           actionLabel: AppLocalizations.tr('ai_chat_view_budget_btn'),
+          isAlert: false,
         );
       }
     }

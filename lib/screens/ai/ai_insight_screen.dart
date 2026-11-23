@@ -1886,9 +1886,9 @@ class _AiInsightScreenState extends State<AiInsightScreen> {
       try {
         if (uid != null && uid.isNotEmpty) {
           try {
-            await _firestoreService.updateUserProfile(
+            await _firestoreService.updatePrivateFinancialProfile(
               uid,
-              {'monthlyIncome': result},
+              monthlyIncome: result,
             );
           } catch (_) {}
         }

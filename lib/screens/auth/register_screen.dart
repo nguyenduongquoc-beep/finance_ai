@@ -11,7 +11,16 @@ import '../setup/wallet_setup_screen.dart';
 
 /// Register Screen - Nhập Họ tên, Email, Password, Confirm Password
 class RegisterScreen extends StatefulWidget {
-  const RegisterScreen({super.key});
+  final AuthService? authService;
+  final FirestoreService? firestoreService;
+  final WidgetBuilder? walletSetupRouteBuilder;
+
+  const RegisterScreen({
+    super.key,
+    this.authService,
+    this.firestoreService,
+    this.walletSetupRouteBuilder,
+  });
 
   @override
   State<RegisterScreen> createState() => _RegisterScreenState();
@@ -23,13 +32,28 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
-  final _authService = AuthService();
+  late final AuthService _authService;
 
   bool _isLoading = false;
   bool _obscurePassword = true;
   bool _obscureConfirmPassword = true;
   bool _agreeToTerms = false;
   String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _authService = widget.authService ?? AuthService();
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _emailController.dispose();
+    _passwordController.dispose();
+    _confirmPasswordController.dispose();
+    super.dispose();
+  }
 
   Future<void> _handleRegister() async {
     if (!_formKey.currentState!.validate()) return;
@@ -52,18 +76,26 @@ class _RegisterScreenState extends State<RegisterScreen> {
       );
       final uid = credential.user?.uid ?? '';
       if (uid.isNotEmpty) {
-        await FirestoreService().createUserProfile(
+        final now = DateTime.now();
+        final firestore = widget.firestoreService ?? FirestoreService();
+        await firestore.createUserProfile(
           AppUser(
             uid: uid,
             name: name,
             email: email,
-            createdAt: DateTime.now(),
+            authProvider: 'password',
+            createdAt: now,
+            lastActiveAt: now,
           ),
         );
       }
       if (!mounted) return;
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => const WalletSetupScreen()),
+      Navigator.of(context).pushAndRemoveUntil(
+        MaterialPageRoute(
+          builder: widget.walletSetupRouteBuilder ??
+              (_) => const WalletSetupScreen(),
+        ),
+        (route) => false,
       );
     } catch (e) {
       setState(() =>

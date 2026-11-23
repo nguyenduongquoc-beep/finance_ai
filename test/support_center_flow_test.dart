@@ -25,7 +25,25 @@ void main() {
     supportService = SupportService(firestore: fakeFirestore);
     adminService = AdminWebService(
       firestoreService: firestoreService,
-      cloudCaller: (fn, payload) async => {'success': true},
+      cloudCaller: (fn, payload) async {
+        if (fn == 'adminListUsers') {
+          final snap = await fakeFirestore.collection('users').get();
+          final users = snap.docs.map((doc) {
+            final d = doc.data();
+            return {
+              'uid': doc.id,
+              'name': d['name'] ?? '',
+              'email': d['email'] ?? '',
+              'role': d['role'] ?? 'user',
+              'status': d['status'] ?? 'active',
+              'occupation': d['occupation'],
+              'createdAt': d['createdAt'],
+            };
+          }).toList();
+          return {'success': true, 'users': users};
+        }
+        return {'success': true};
+      },
     );
 
     await fakeFirestore.collection('users').doc('admin_01').set(
@@ -1232,6 +1250,10 @@ void main() {
             findsWidgets,
           );
           expect(
+            find.byKey(const ValueKey('admin_support_quick_replies_bar')),
+            findsOneWidget,
+          );
+          expect(
             find.byKey(const ValueKey('admin_support_reply_input')),
             findsOneWidget,
           );
@@ -1354,6 +1376,324 @@ void main() {
           findsOneWidget,
         );
         expect(find.byType(AdminSupportCenterView), findsOneWidget);
+      },
+    );
+
+    testWidgets(
+      '3.5. Quick Replies tĩnh (chỉ điền & nối dòng, không tự gửi) và khóa ô nhập khi đã giải quyết + Mở lại xử lý (khép kín vòng đời)',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 960);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(tester.view.resetPhysicalSize);
+
+        final ticket = await supportService.createTicket(
+          category: SupportCategory.bugReport,
+          title: 'Hóa đơn quét OCR bị lệch số tiền',
+          description:
+              'Khi quét hóa đơn siêu thị buổi tối, số tiền bị nhận nhầm thiếu số 0.',
+          userIdOverride: 'user_a',
+          userNameOverride: 'Nguyễn Văn A',
+          userEmailOverride: 'user_a@gmail.com',
+        );
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: AdminSupportCenterView(
+                supportService: supportService,
+                currentAdminUid: 'admin_01',
+                currentAdminName: 'Quản trị viên Hỗ trợ',
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Chọn vé hỗ trợ
+        await tester.tap(
+          find.byKey(ValueKey('admin_ticket_row_${ticket.ticketId}')),
+        );
+        await tester.pumpAndSettle();
+
+        // 1. Thanh Quick Replies hiển thị gọn ngay trên ô nhập
+        expect(
+          find.byKey(const ValueKey('admin_support_quick_replies_bar')),
+          findsOneWidget,
+        );
+        final msgCountBefore =
+            (await supportService.streamTicketMessages(ticket.ticketId).first)
+                .length;
+
+        // 2. Bấm chip "Tiếp nhận" -> chỉ điền vào ô nhập, đặt con trỏ về cuối và KHÔNG tự gửi
+        await tester.tap(
+          find.byKey(const ValueKey('admin_support_quick_reply_ack')),
+        );
+        await tester.pumpAndSettle();
+
+        var replyField = tester.widget<TextField>(
+          find.byKey(const ValueKey('admin_support_reply_input')),
+        );
+        final firstText = replyField.controller!.text;
+        expect(
+          firstText,
+          'Chào bạn, đội ngũ hỗ trợ Finance AI đã tiếp nhận yêu cầu và đang kiểm tra giúp bạn.',
+        );
+        expect(replyField.controller!.selection.baseOffset, firstText.length);
+        expect(replyField.controller!.selection.isCollapsed, isTrue);
+
+        // Chưa tự gửi tin nhắn!
+        var msgCountAfter =
+            (await supportService.streamTicketMessages(ticket.ticketId).first)
+                .length;
+        expect(msgCountAfter, msgCountBefore);
+
+        // 3. Khi ô nhập đang có sẵn chữ, bấm thêm chip "Hướng dẫn OCR" -> xuống dòng nối thêm, KHÔNG ghi đè
+        await tester.tap(
+          find.byKey(const ValueKey('admin_support_quick_reply_ocr_guide')),
+        );
+        await tester.pumpAndSettle();
+
+        replyField = tester.widget<TextField>(
+          find.byKey(const ValueKey('admin_support_reply_input')),
+        );
+        final combinedText = replyField.controller!.text;
+        expect(
+          combinedText,
+          'Chào bạn, đội ngũ hỗ trợ Finance AI đã tiếp nhận yêu cầu và đang kiểm tra giúp bạn.\n'
+          'Với tính năng quét hóa đơn OCR, bạn lưu ý chụp ở nơi đủ sáng và giữ hóa đơn phẳng để hệ thống nhận diện chính xác nhất.',
+        );
+        expect(
+          replyField.controller!.selection.baseOffset,
+          combinedText.length,
+        );
+        // Vẫn chưa tự gửi tin nhắn!
+        msgCountAfter =
+            (await supportService.streamTicketMessages(ticket.ticketId).first)
+                .length;
+        expect(msgCountAfter, msgCountBefore);
+
+        // 4. Đánh dấu vé là Đã giải quyết -> ẩn/khóa ô nhập và thanh Quick Replies, hiện thanh trạng thái + nút Mở lại xử lý
+        await tester.tap(
+          find.byKey(const ValueKey('admin_support_resolve_btn')),
+        );
+        await tester.pumpAndSettle();
+
+        var live = (await supportService.getTicketById(ticket.ticketId))!;
+        expect(live.status, SupportTicketStatus.resolved);
+        expect(
+          find.byKey(const ValueKey('admin_support_reply_input')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('admin_support_send_reply_btn')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('admin_support_quick_replies_bar')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('admin_support_resolved_banner')),
+          findsOneWidget,
+        );
+        expect(find.text('Yêu cầu này đã được giải quyết.'), findsOneWidget);
+        expect(
+          find.byKey(const ValueKey('admin_support_reopen_btn')),
+          findsOneWidget,
+        );
+
+        // 5. Đợi SnackBar thông báo tự ẩn rồi bấm "Mở lại xử lý" -> chuyển về `in_progress`, mở lại ô chat & thanh Quick Replies
+        await tester.pump(const Duration(seconds: 3));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('admin_support_reopen_btn')),
+        );
+        await tester.pumpAndSettle();
+
+        live = (await supportService.getTicketById(ticket.ticketId))!;
+        expect(live.status, SupportTicketStatus.inProgress);
+        expect(live.resolvedAt, isNull);
+        expect(live.resolvedByRole, isNull);
+        expect(live.unreadByUser, isTrue);
+        expect(
+          find.byKey(const ValueKey('admin_support_reply_input')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('admin_support_quick_replies_bar')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('admin_support_resolved_banner')),
+          findsNothing,
+        );
+
+        // 6. Đánh dấu giải quyết lại rồi Đóng yêu cầu -> khóa hoàn toàn, không còn nút Mở lại xử lý
+        await tester.tap(
+          find.byKey(const ValueKey('admin_support_resolve_btn')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('admin_support_close_btn')));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('admin_support_confirm_close_btn')),
+        );
+        await tester.pumpAndSettle();
+
+        live = (await supportService.getTicketById(ticket.ticketId))!;
+        expect(live.status, SupportTicketStatus.closed);
+        expect(
+          find.byKey(const ValueKey('admin_support_closed_banner')),
+          findsOneWidget,
+        );
+        expect(
+          find.byKey(const ValueKey('admin_support_reply_input')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('admin_support_quick_replies_bar')),
+          findsNothing,
+        );
+        expect(
+          find.byKey(const ValueKey('admin_support_reopen_btn')),
+          findsNothing,
+        );
+      },
+    );
+
+    testWidgets(
+      '3.6. Lọc chip "Mới" truy vấn phía server không bị sót vé mới ngoài top 30 & tự tắt unreadByAdmin khi ticket đang mở nhận tin mới từ User',
+      (tester) async {
+        tester.view.physicalSize = const Size(1440, 960);
+        tester.view.devicePixelRatio = 1.0;
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        // 1. Tạo 1 vé "Mới" có mốc thời gian cũ hơn hẳn 32 vé "Đã giải quyết" mới hơn
+        const oldNewId = 'ticket_old_new_beyond_30';
+        final oldTimeIso = DateTime.utc(2026, 10, 1, 8, 0).toIso8601String();
+        await fakeFirestore.collection('support_tickets').doc(oldNewId).set({
+          'ticketId': oldNewId,
+          'ticketCode': 'SUP-261001-OLDN',
+          'userId': 'user_a',
+          'userName': 'Nguyễn Văn A',
+          'userEmail': 'user_a@gmail.com',
+          'category': 'app_guide',
+          'title': 'Vé mới cũ nằm ngoài top 30',
+          'description': 'Cần hỗ trợ câu hỏi từ đầu tháng trước.',
+          'status': 'new',
+          'priority': 'normal',
+          'assignedAdminId': null,
+          'assignedAdminName': null,
+          'lastMessageId': 'msg_init_old',
+          'lastMessagePreview': 'Cần hỗ trợ câu hỏi từ đầu tháng trước.',
+          'lastMessageSenderRole': 'user',
+          'lastMessageAt': oldTimeIso,
+          'unreadByAdmin': true,
+          'unreadByUser': false,
+          'createdAt': oldTimeIso,
+          'updatedAt': oldTimeIso,
+          'resolvedAt': null,
+          'closedAt': null,
+        });
+        await fakeFirestore
+            .collection('support_tickets')
+            .doc(oldNewId)
+            .collection('messages')
+            .doc('msg_init_old')
+            .set({
+          'messageId': 'msg_init_old',
+          'senderId': 'user_a',
+          'senderRole': 'user',
+          'senderDisplayName': 'Nguyễn Văn A',
+          'body': 'Cần hỗ trợ câu hỏi từ đầu tháng trước.',
+          'messageType': 'text',
+          'createdAt': oldTimeIso,
+        });
+
+        for (int i = 1; i <= 32; i++) {
+          final ts = DateTime.utc(2026, 11, 1, 0, i).toIso8601String();
+          final id = 'resolved_recent_$i';
+          await fakeFirestore.collection('support_tickets').doc(id).set({
+            'ticketId': id,
+            'ticketCode': 'SUP-261101-${i.toString().padLeft(4, '0')}',
+            'userId': 'user_b',
+            'userName': 'Trần Thị B',
+            'userEmail': 'user_b@gmail.com',
+            'category': 'other',
+            'title': 'Vé đã giải quyết #$i',
+            'description': 'Đã xử lý xong trước đó.',
+            'status': 'resolved',
+            'priority': 'normal',
+            'assignedAdminId': 'admin_01',
+            'assignedAdminName': 'Admin',
+            'lastMessagePreview': 'Đã giải quyết.',
+            'lastMessageSenderRole': 'system',
+            'lastMessageAt': ts,
+            'unreadByAdmin': false,
+            'unreadByUser': false,
+            'createdAt': ts,
+            'updatedAt': ts,
+            'resolvedAt': ts,
+            'closedAt': null,
+          });
+        }
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: AdminSupportCenterView(
+                supportService: supportService,
+                currentAdminUid: 'admin_01',
+                currentAdminName: 'Quản trị viên Hỗ trợ',
+              ),
+            ),
+          ),
+        );
+        await tester.pumpAndSettle();
+
+        // Ở chế độ "Tất cả" (top 30 mới nhất), vé mới cũ nằm ở vị trí 33 nên chưa xuất hiện
+        expect(
+          find.byKey(const ValueKey('admin_ticket_row_$oldNewId')),
+          findsNothing,
+        );
+
+        // Bấm chip "Mới" -> truy vấn server `statusFilter: newTicket` tìm thấy ngay vé mới cũ!
+        await tester.tap(
+          find.byKey(const ValueKey('admin_support_status_chip_new')),
+        );
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('admin_ticket_row_$oldNewId')),
+          findsOneWidget,
+        );
+
+        // 2. Mở ticket -> unreadByAdmin chuyển sang false
+        await tester.tap(
+          find.byKey(const ValueKey('admin_ticket_row_$oldNewId')),
+        );
+        await tester.pumpAndSettle();
+        var liveTicket = (await supportService.getTicketById(oldNewId))!;
+        expect(liveTicket.unreadByAdmin, isFalse);
+
+        // 3. Trong lúc Admin VẪN đang mở ticket trên màn hình, User gửi tin nhắn mới (unreadByAdmin -> true)
+        await supportService.sendUserMessage(
+          ticket: liveTicket,
+          body: 'Mình bổ sung thêm chi tiết khi Admin đang xem màn hình!',
+          userIdOverride: 'user_a',
+          userNameOverride: 'Nguyễn Văn A',
+        );
+        await tester.pumpAndSettle();
+
+        // addPostFrameCallback phải tự động gọi markTicketReadByAdmin để tắt unreadByAdmin về false
+        liveTicket = (await supportService.getTicketById(oldNewId))!;
+        expect(liveTicket.unreadByAdmin, isFalse);
+        expect(
+          find.textContaining('Mình bổ sung thêm chi tiết'),
+          findsWidgets,
+        );
       },
     );
   });

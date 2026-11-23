@@ -757,7 +757,7 @@ class _AiReportScreenState extends State<AiReportScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header row: "BÁO CÁO THÁNG N" + badge "AI Generated"
+          // Header row: "BÁO CÁO THÁNG N" + badge "Phân tích tự động" / "Auto Analytics"
           AiReportHeroHeaderRow(
             title: context.tr(
               'ai_rep_banner_title',
@@ -2201,7 +2201,7 @@ class _AiReportScreenState extends State<AiReportScreen> {
   }
 }
 
-/// Hàng header trong hero card Báo cáo AI: tiêu đề tháng/năm và nhãn "AI Generated",
+/// Hàng header trong hero card Báo cáo: tiêu đề tháng/năm và nhãn "Phân tích tự động" / "Auto Analytics",
 /// giữ bố cục cân đối và chống tràn pixel khi chuyển ngôn ngữ.
 class AiReportHeroHeaderRow extends StatelessWidget {
   final String title;

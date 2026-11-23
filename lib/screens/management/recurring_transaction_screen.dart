@@ -598,216 +598,10 @@ class _RecurringTransactionScreenState extends State<RecurringTransactionScreen>
     required List<RecurringTransactionSchedule> schedules,
     required int dueCount,
   }) {
-    final active = schedules.where((s) => s.isActive).toList();
-    final expenseTotal = active
-        .where((s) => s.type == 'expense')
-        .fold<double>(0, (a, s) => a + s.amount);
-    final incomeTotal = active
-        .where((s) => s.type == 'income')
-        .fold<double>(0, (a, s) => a + s.amount);
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(18),
-        gradient: const LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [Color(0xFF1F6F8B), Color(0xFF134A5D)],
-        ),
-        boxShadow: [
-          BoxShadow(
-            color: AppColors.primary.withValues(alpha: 0.2),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Expanded(
-                child: Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.all(6),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.18),
-                        borderRadius: BorderRadius.circular(9),
-                      ),
-                      child: const Icon(Icons.event_repeat_rounded,
-                          color: Colors.white, size: 16),
-                    ),
-                    const SizedBox(width: 8),
-                    Flexible(
-                      child: Text(
-                        context.tr('rec_hero_planned_period'),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 12.5,
-                          fontWeight: FontWeight.w500,
-                          color: Colors.white.withValues(alpha: 0.9),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 8),
-              if (dueCount > 0)
-                Flexible(
-                  child: GestureDetector(
-                    onTap: () {
-                      setState(() => _showNeedsActionSection = true);
-                    },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: AppColors.expense.withValues(alpha: 0.92),
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: FittedBox(
-                        fit: BoxFit.scaleDown,
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            const Icon(Icons.warning_amber_rounded,
-                                color: Colors.white, size: 12),
-                            const SizedBox(width: 4),
-                            Text(
-                              context.tr(
-                                'rec_hero_pending_badge',
-                                params: {'count': dueCount.toString()},
-                              ),
-                              maxLines: 1,
-                              style: const TextStyle(
-                                fontSize: 11,
-                                fontWeight: FontWeight.w700,
-                                color: Colors.white,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ),
-                )
-              else
-                Flexible(
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.2),
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: FittedBox(
-                      fit: BoxFit.scaleDown,
-                      child: Text(
-                        context.tr(
-                          'rec_hero_active_badge',
-                          params: {'count': active.length.toString()},
-                        ),
-                        maxLines: 1,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.white,
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          AnimatedSwitcher(
-            duration: const Duration(milliseconds: 200),
-            transitionBuilder: (child, anim) =>
-                FadeTransition(opacity: anim, child: child),
-            child: FittedBox(
-              key: ValueKey('hero_expense_${expenseTotal.round()}'),
-              fit: BoxFit.scaleDown,
-              alignment: Alignment.centerLeft,
-              child: Text(
-                AppFormatters.compactCurrency(expenseTotal, unit: '₫'),
-                style: const TextStyle(
-                  fontSize: 26,
-                  fontWeight: FontWeight.w800,
-                  color: Colors.white,
-                  letterSpacing: -0.5,
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 10),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-            decoration: BoxDecoration(
-              color: Colors.white.withValues(alpha: 0.12),
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Flexible(
-                  child: Row(
-                    children: [
-                      const Icon(Icons.arrow_downward_rounded,
-                          color: Color(0xFF56D69B), size: 13),
-                      const SizedBox(width: 4),
-                      Flexible(
-                        child: Text(
-                          context.tr(
-                            'rec_hero_income_sub',
-                            params: {
-                              'amount': AppFormatters.compactCurrency(
-                                  incomeTotal,
-                                  unit: '₫')
-                            },
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.w600,
-                            color: Colors.white.withValues(alpha: 0.95),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Flexible(
-                  child: Text(
-                    context.tr(
-                      'rec_hero_active_ratio',
-                      params: {
-                        'active': active.length.toString(),
-                        'total': schedules.length.toString(),
-                      },
-                    ),
-                    textAlign: TextAlign.end,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      color: Colors.white.withValues(alpha: 0.85),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
+    return RecurringHeroCard(
+      schedules: schedules,
+      dueCount: dueCount,
+      onTapDueBadge: () => setState(() => _showNeedsActionSection = true),
     );
   }
 
@@ -1440,17 +1234,13 @@ class _RecurringTransactionScreenState extends State<RecurringTransactionScreen>
                         setState(() =>
                             _actionInProgressIds.add(schedule.scheduleId));
                         try {
-                          // Cập nhật ví của lịch và xác nhận thanh toán
-                          await _firestoreService.updateRecurringTransaction(
-                            schedule.scheduleId,
-                            {'walletId': w.walletId},
-                          );
-                          final updatedSchedule =
-                              schedule.copyWith(walletId: w.walletId);
+                          // Thanh toán nguyên tử RIÊNG kỳ hiện tại bằng ví thay thế
+                          // trong đúng 1 Firestore Transaction mà không đổi ví mặc định của lịch.
                           await _firestoreService.confirmRecurringOccurrence(
                             userId: _uid,
-                            schedule: updatedSchedule,
+                            schedule: schedule,
                             occurrenceDate: occurrenceDate,
+                            overrideWalletId: w.walletId,
                           );
                           if (mounted) {
                             AppSnackbar.show(
@@ -1463,6 +1253,14 @@ class _RecurringTransactionScreenState extends State<RecurringTransactionScreen>
                                           this.context, w),
                                 },
                               ),
+                            );
+                          }
+                        } on InsufficientBalanceException catch (e) {
+                          if (mounted) {
+                            AppSnackbar.show(
+                              this.context,
+                              e.message,
+                              isError: true,
                             );
                           }
                         } catch (e) {
@@ -1884,13 +1682,18 @@ class _RecurringTransactionScreenState extends State<RecurringTransactionScreen>
     DateTime occurrenceDate,
   ) async {
     final now = DateTime.now();
-    final initial = occurrenceDate.isBefore(now) ? now : occurrenceDate;
+    final minDeferDate = RecurringTransactionService.minValidDeferDate(
+      occurrenceDate: occurrenceDate,
+      referenceDate: now,
+    );
+    final maxDeferDate =
+        DateTime(minDeferDate.year > 2035 ? minDeferDate.year + 1 : 2035);
 
     final picked = await showDatePicker(
       context: context,
-      initialDate: initial,
-      firstDate: DateTime(now.year, now.month, now.day),
-      lastDate: DateTime(2035),
+      initialDate: minDeferDate,
+      firstDate: minDeferDate,
+      lastDate: maxDeferDate,
       helpText: context.tr('rec_dlg_defer_picker_help'),
     );
 
@@ -3120,6 +2923,7 @@ class _RecurringFormSheet extends StatefulWidget {
 class _RecurringFormSheetState extends State<_RecurringFormSheet> {
   final _formKey = GlobalKey<FormState>();
   final _firestoreService = FirestoreService();
+  final _recService = RecurringTransactionService();
   final _notificationService = LocalNotificationService();
 
   late final String _uid;
@@ -3304,7 +3108,19 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
         if (!mounted) return;
         AppSnackbar.show(context, context.tr('rec_form_created_ok'));
       } else {
-        // Cập nhật schedule cũ
+        // Cập nhật schedule cũ — bảo toàn nextDueDate nếu startDate và frequency không đổi
+        final existing = widget.schedule!;
+        final startDateChanged =
+            RecurringTransactionService.dateOnly(_startDate) !=
+                RecurringTransactionService.dateOnly(existing.startDate);
+        final effectiveStartDate =
+            startDateChanged ? _startDate : existing.startDate;
+        final resolvedNextDueDate = _recService.resolveNextDueDateOnEdit(
+          existing: existing,
+          newStartDate: effectiveStartDate,
+          newFrequency: _frequency,
+        );
+
         final updateData = {
           'type': _type,
           'walletId': _selectedWalletId,
@@ -3312,25 +3128,25 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
           'amount': amount,
           'note': scheduleNote,
           'frequency': _frequency,
-          'startDate': _startDate.toIso8601String(),
-          'nextDueDate': _startDate.toIso8601String(),
+          'startDate': effectiveStartDate.toIso8601String(),
+          'nextDueDate': resolvedNextDueDate.toIso8601String(),
           'reminderDaysBefore': _reminderDaysBefore,
           'postingMode': _postingMode,
         };
 
         await _firestoreService.updateRecurringTransaction(
-            widget.schedule!.scheduleId, updateData);
+            existing.scheduleId, updateData);
 
-        final updatedSchedule = widget.schedule!.copyWith(
+        final updatedSchedule = existing.copyWith(
           type: _type,
           walletId: _selectedWalletId,
           categoryId: _selectedCategoryId,
           amount: amount,
           note: scheduleNote,
           frequency: _frequency,
-          startDate: _startDate,
-          nextDueDate: _startDate,
-          isActive: widget.schedule!.isActive,
+          startDate: effectiveStartDate,
+          nextDueDate: resolvedNextDueDate,
+          isActive: existing.isActive,
           reminderDaysBefore: _reminderDaysBefore,
           postingMode: _postingMode,
         );
@@ -3963,44 +3779,40 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
                         Border.all(color: Colors.grey.withValues(alpha: 0.4)),
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: Column(
-                    children: [
-                      RadioListTile<String>(
-                        value: RecurringTransactionSchedule.postingModeManual,
-                        groupValue: _postingMode,
-                        title: Text(context.tr('rec_form_manual_title'),
-                            style: const TextStyle(
-                                fontSize: 13, fontWeight: FontWeight.w600)),
-                        subtitle: Text(context.tr('rec_form_manual_sub'),
-                            style: const TextStyle(fontSize: 11)),
-                        contentPadding:
-                            const EdgeInsets.symmetric(horizontal: 8),
-                        dense: true,
-                        onChanged: (val) {
-                          if (val != null && val != _postingMode) {
-                            setState(() => _postingMode = val);
-                          }
-                        },
-                      ),
-                      const Divider(height: 1),
-                      RadioListTile<String>(
-                        value: RecurringTransactionSchedule.postingModeAuto,
-                        groupValue: _postingMode,
-                        title: Text(context.tr('rec_form_auto_title'),
-                            style: const TextStyle(
-                                fontSize: 13, fontWeight: FontWeight.w600)),
-                        subtitle: Text(context.tr('rec_form_auto_sub'),
-                            style: const TextStyle(fontSize: 11)),
-                        contentPadding:
-                            const EdgeInsets.symmetric(horizontal: 8),
-                        dense: true,
-                        onChanged: (val) {
-                          if (val != null && val != _postingMode) {
-                            setState(() => _postingMode = val);
-                          }
-                        },
-                      ),
-                    ],
+                  child: RadioGroup<String>(
+                    groupValue: _postingMode,
+                    onChanged: (val) {
+                      if (val != null && val != _postingMode) {
+                        setState(() => _postingMode = val);
+                      }
+                    },
+                    child: Column(
+                      children: [
+                        RadioListTile<String>(
+                          value: RecurringTransactionSchedule.postingModeManual,
+                          title: Text(context.tr('rec_form_manual_title'),
+                              style: const TextStyle(
+                                  fontSize: 13, fontWeight: FontWeight.w600)),
+                          subtitle: Text(context.tr('rec_form_manual_sub'),
+                              style: const TextStyle(fontSize: 11)),
+                          contentPadding:
+                              const EdgeInsets.symmetric(horizontal: 8),
+                          dense: true,
+                        ),
+                        const Divider(height: 1),
+                        RadioListTile<String>(
+                          value: RecurringTransactionSchedule.postingModeAuto,
+                          title: Text(context.tr('rec_form_auto_title'),
+                              style: const TextStyle(
+                                  fontSize: 13, fontWeight: FontWeight.w600)),
+                          subtitle: Text(context.tr('rec_form_auto_sub'),
+                              style: const TextStyle(fontSize: 11)),
+                          contentPadding:
+                              const EdgeInsets.symmetric(horizontal: 8),
+                          dense: true,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
                 const SizedBox(height: 14),
@@ -4108,6 +3920,262 @@ class _RecurringFormSheetState extends State<_RecurringFormSheet> {
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// ============================================================
+/// RECURRING HERO CARD (Quy đổi ước tính hàng tháng, chống tràn đa ngôn ngữ)
+/// ============================================================
+class RecurringHeroCard extends StatelessWidget {
+  final List<RecurringTransactionSchedule> schedules;
+  final int dueCount;
+  final VoidCallback? onTapDueBadge;
+
+  const RecurringHeroCard({
+    super.key,
+    required this.schedules,
+    required this.dueCount,
+    this.onTapDueBadge,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final summary =
+        RecurringTransactionService.computeMonthlySummary(schedules);
+    final expenseTotal = summary.estimatedMonthlyExpense;
+    final incomeTotal = summary.estimatedMonthlyIncome;
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(18),
+        gradient: const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [Color(0xFF1F6F8B), Color(0xFF134A5D)],
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primary.withValues(alpha: 0.2),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Expanded(
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(6),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.18),
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      child: const Icon(Icons.event_repeat_rounded,
+                          color: Colors.white, size: 16),
+                    ),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        context.tr('rec_hero_planned_period'),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w500,
+                          color: Colors.white.withValues(alpha: 0.9),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (dueCount > 0)
+                Flexible(
+                  child: GestureDetector(
+                    onTap: onTapDueBadge,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: AppColors.expense.withValues(alpha: 0.92),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.warning_amber_rounded,
+                                color: Colors.white, size: 12),
+                            const SizedBox(width: 4),
+                            Text(
+                              context.tr(
+                                'rec_hero_pending_badge',
+                                params: {'count': dueCount.toString()},
+                              ),
+                              maxLines: 1,
+                              style: const TextStyle(
+                                fontSize: 11,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.white,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+                )
+              else
+                Flexible(
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.2),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        context.tr(
+                          'rec_hero_active_badge',
+                          params: {'count': summary.activeCount.toString()},
+                        ),
+                        maxLines: 1,
+                        style: const TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 200),
+            transitionBuilder: (child, anim) =>
+                FadeTransition(opacity: anim, child: child),
+            child: FittedBox(
+              key: ValueKey('hero_expense_${expenseTotal.round()}'),
+              fit: BoxFit.scaleDown,
+              alignment: Alignment.centerLeft,
+              child: Text(
+                AppFormatters.compactCurrency(expenseTotal, unit: '₫'),
+                style: const TextStyle(
+                  fontSize: 26,
+                  fontWeight: FontWeight.w800,
+                  color: Colors.white,
+                  letterSpacing: -0.5,
+                ),
+              ),
+            ),
+          ),
+          if (summary.hasWeeklySchedules) ...[
+            const SizedBox(height: 4),
+            Row(
+              children: [
+                Icon(
+                  Icons.info_outline_rounded,
+                  size: 12,
+                  color: Colors.white.withValues(alpha: 0.78),
+                ),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    context.tr(
+                      'rec_hero_weekly_converted_note',
+                      params: {'count': summary.activeWeeklyCount.toString()},
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 10.5,
+                      color: Colors.white.withValues(alpha: 0.8),
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+          const SizedBox(height: 10),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.12),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Flexible(
+                  flex: 6,
+                  child: Row(
+                    children: [
+                      const Icon(Icons.arrow_downward_rounded,
+                          color: Color(0xFF56D69B), size: 13),
+                      const SizedBox(width: 4),
+                      Flexible(
+                        child: Text(
+                          context.tr(
+                            'rec_hero_income_sub',
+                            params: {
+                              'amount': AppFormatters.compactCurrency(
+                                  incomeTotal,
+                                  unit: '₫')
+                            },
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                            color: Colors.white.withValues(alpha: 0.95),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Flexible(
+                  flex: 4,
+                  child: Text(
+                    context.tr(
+                      'rec_hero_active_ratio',
+                      params: {
+                        'active': summary.activeCount.toString(),
+                        'total': schedules.length.toString(),
+                      },
+                    ),
+                    textAlign: TextAlign.end,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      color: Colors.white.withValues(alpha: 0.85),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

@@ -5,8 +5,7 @@ import 'package:intl/date_symbol_data_local.dart';
 /// ============================================================
 /// LANGUAGE CONTROLLER (I18N)
 /// Quản lý trạng thái đa ngôn ngữ (Tiếng Việt & English) toàn app.
-/// Sử dụng ValueNotifier tương tự ThemeController, lưu vào
-/// SharedPreferences để duy trì lựa chọn của người dùng.
+/// Sử dụng ValueNotifier và lưu vào SharedPreferences để duy trì lựa chọn.
 /// ============================================================
 class LanguageController {
   static const String _prefKey = 'app_language';

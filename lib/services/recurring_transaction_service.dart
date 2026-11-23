@@ -22,6 +22,25 @@ class PlannedRemainingAmounts {
   });
 }
 
+/// Kết quả quy đổi tổng thu/chi định kỳ đang bật về mức ước tính hàng tháng
+class MonthlyRecurringSummary {
+  final double estimatedMonthlyExpense;
+  final double estimatedMonthlyIncome;
+  final int activeCount;
+  final int activeWeeklyCount;
+  final int activeMonthlyCount;
+
+  const MonthlyRecurringSummary({
+    required this.estimatedMonthlyExpense,
+    required this.estimatedMonthlyIncome,
+    required this.activeCount,
+    required this.activeWeeklyCount,
+    required this.activeMonthlyCount,
+  });
+
+  bool get hasWeeklySchedules => activeWeeklyCount > 0;
+}
+
 /// Kết quả đánh giá thời hạn chờ xác nhận 3 ngày (grace period) cho lịch manualConfirmation
 class ManualGraceEvaluation {
   final RecurringTransactionSchedule schedule;
@@ -51,6 +70,9 @@ class RecurringTransactionService {
   /// được tính từ ngày đến hạn thực tế (nextDueDate).
   static const int manualConfirmationGraceDays = 3;
 
+  /// Hệ số quy đổi lịch hàng tuần sang mức ước tính hàng tháng (4 tuần / tháng).
+  static const double weeklyToMonthlyFactor = 4.0;
+
   static DateTime dateOnly(DateTime d) => DateTime(d.year, d.month, d.day);
 
   /// Chênh lệch số ngày theo lịch (dùng UTC date-only để tránh sai lệch DST).
@@ -58,6 +80,111 @@ class RecurringTransactionService {
     final fromUtc = DateTime.utc(fromDate.year, fromDate.month, fromDate.day);
     final toUtc = DateTime.utc(toDate.year, toDate.month, toDate.day);
     return toUtc.difference(fromUtc).inDays;
+  }
+
+  /// Quy đổi số tiền 1 kỳ của lịch về mức ước tính hàng tháng:
+  /// - `monthly`: `amount`
+  /// - `weekly`: `amount * 4`
+  static double normalizeToMonthlyAmount(RecurringTransactionSchedule schedule) {
+    if (schedule.frequency == 'weekly') {
+      return schedule.amount * weeklyToMonthlyFactor;
+    }
+    return schedule.amount;
+  }
+
+  /// Tổng hợp ước tính chi/thu định kỳ hàng tháng từ các lịch đang hoạt động (`isActive`).
+  static MonthlyRecurringSummary computeMonthlySummary(
+    List<RecurringTransactionSchedule> schedules,
+  ) {
+    double expense = 0;
+    double income = 0;
+    int activeCount = 0;
+    int weeklyCount = 0;
+    int monthlyCount = 0;
+
+    for (final s in schedules) {
+      if (!s.isActive) continue;
+      activeCount++;
+      if (s.frequency == 'weekly') {
+        weeklyCount++;
+      } else {
+        monthlyCount++;
+      }
+      final monthlyAmount = normalizeToMonthlyAmount(s);
+      if (s.type == 'expense') {
+        expense += monthlyAmount;
+      } else if (s.type == 'income') {
+        income += monthlyAmount;
+      }
+    }
+
+    return MonthlyRecurringSummary(
+      estimatedMonthlyExpense: expense,
+      estimatedMonthlyIncome: income,
+      activeCount: activeCount,
+      activeWeeklyCount: weeklyCount,
+      activeMonthlyCount: monthlyCount,
+    );
+  }
+
+  /// Ngày hợp lệ nhỏ nhất khi dời kỳ hạn (`Defer`):
+  /// Luôn bằng `max(today, occurrenceDate) + 1 ngày` (theo ngày lịch).
+  static DateTime minValidDeferDate({
+    required DateTime occurrenceDate,
+    DateTime? referenceDate,
+  }) {
+    final todayOnly = dateOnly(referenceDate ?? DateTime.now());
+    final occOnly = dateOnly(occurrenceDate);
+    final base = occOnly.isAfter(todayOnly) ? occOnly : todayOnly;
+    return DateTime(base.year, base.month, base.day + 1);
+  }
+
+  /// Kiểm tra `newDueDate` hợp lệ cho thao tác dời ngày:
+  /// Bắt buộc theo ngày lịch phải lớn hơn hẳn CẢ `today` LẪN `occurrenceDate`.
+  static bool isValidDeferDate({
+    required DateTime occurrenceDate,
+    required DateTime newDueDate,
+    DateTime? referenceDate,
+  }) {
+    final minDate = minValidDeferDate(
+      occurrenceDate: occurrenceDate,
+      referenceDate: referenceDate,
+    );
+    return !dateOnly(newDueDate).isBefore(minDate);
+  }
+
+  /// Tính `nextDueDate` an toàn khi chỉnh sửa lịch định kỳ đã tồn tại:
+  /// - Nếu người dùng KHÔNG đổi `startDate` (so sánh theo ngày lịch) và KHÔNG đổi `frequency`:
+  ///   giữ nguyên `existing.nextDueDate` hiện tại.
+  /// - Nếu `startDate` hoặc `frequency` thay đổi:
+  ///   tính lại từ `newStartDate`; nếu `newStartDate` nằm trong quá khứ (`< today`),
+  ///   tịnh tiến theo `nextOccurrenceAfter` tới kỳ hợp lệ đầu tiên `>= today` để không
+  ///   kéo ngược lịch đang chạy về quá khứ gây auto-skip / auto-post nhầm.
+  DateTime resolveNextDueDateOnEdit({
+    required RecurringTransactionSchedule existing,
+    required DateTime newStartDate,
+    required String newFrequency,
+    DateTime? referenceDate,
+  }) {
+    final startDateChanged =
+        dateOnly(newStartDate) != dateOnly(existing.startDate);
+    final frequencyChanged = newFrequency != existing.frequency;
+
+    if (!startDateChanged && !frequencyChanged) {
+      return existing.nextDueDate;
+    }
+
+    final todayOnly = dateOnly(referenceDate ?? DateTime.now());
+    var candidate = newStartDate;
+    var guard = 0;
+    const maxIterations = 5000;
+    while (dateOnly(candidate).isBefore(todayOnly) && guard < maxIterations) {
+      final next = nextOccurrenceAfter(candidate, newFrequency, newStartDate);
+      if (!next.isAfter(candidate)) break;
+      candidate = next;
+      guard++;
+    }
+    return candidate;
   }
 
   /// Đánh giá chu kỳ chờ xác nhận 3 ngày cho lịch `manualConfirmation`.

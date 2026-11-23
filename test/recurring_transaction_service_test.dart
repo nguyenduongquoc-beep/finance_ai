@@ -3,6 +3,7 @@ import 'package:fake_cloud_firestore/fake_cloud_firestore.dart';
 import 'package:finance_ai_app/models/recurring_transaction_model.dart';
 import 'package:finance_ai_app/models/transaction_model.dart';
 import 'package:finance_ai_app/models/wallet_model.dart';
+import 'package:finance_ai_app/services/financial_context_revision_tracker.dart';
 import 'package:finance_ai_app/services/financial_forecast_service.dart';
 import 'package:finance_ai_app/services/firestore_service.dart';
 import 'package:finance_ai_app/services/recurring_transaction_service.dart';
@@ -939,6 +940,7 @@ void main() {
         schedule: schedule,
         occurrenceDate: dueDate,
         newDueDate: deferredDate,
+        referenceDate: dueDate,
       );
 
       // Verify NO transaction created
@@ -1194,6 +1196,7 @@ void main() {
         schedule: schedule,
         occurrenceDate: dueDate,
         newDueDate: deferredDate1,
+        referenceDate: dueDate,
       );
 
       final schDocAfterFirst =
@@ -1208,6 +1211,7 @@ void main() {
           schedule: schedule,
           occurrenceDate: dueDate,
           newDueDate: deferredDate2,
+          referenceDate: dueDate,
         ),
         throwsA(isA<Exception>()),
       );
@@ -1328,6 +1332,7 @@ void main() {
         schedule: schedule,
         occurrenceDate: dueDate,
         newDueDate: deferredDate,
+        referenceDate: dueDate,
       );
 
       // Attempt to confirm the same occurrence — should throw
@@ -1681,6 +1686,7 @@ void main() {
         schedule: schedule,
         occurrenceDate: schedule.nextDueDate,
         newDueDate: deferredDate,
+        referenceDate: DateTime(2026, 10, 7, 12, 0),
       );
 
       // On Oct 12 (2 days after deferredDate, 7 days after original Oct 5): NOT auto-skipped!
@@ -1766,6 +1772,556 @@ void main() {
           .get();
       expect(txSnap.docs.length, equals(1));
       expect((txSnap.docs.first.data()['amount'] as num).toDouble(), equals(150000.0));
+    });
+
+    // 39. Fix #1: Editing a schedule preserves nextDueDate unless startDate or frequency changes
+    test(
+        '39. resolveNextDueDateOnEdit keeps existing nextDueDate when startDate & frequency are unchanged and never backdates on change',
+        () {
+      final service = RecurringTransactionService();
+      final existing = RecurringTransactionSchedule(
+        scheduleId: 'sch_edit_keep',
+        userId: 'u_edit',
+        type: 'expense',
+        walletId: 'w_1',
+        categoryId: 'cat_rent',
+        amount: 5000000,
+        note: 'Tiền nhà',
+        frequency: 'monthly',
+        startDate: DateTime(2026, 1, 10, 9, 0),
+        nextDueDate: DateTime(2026, 12, 10, 9, 0),
+        isActive: true,
+        createdAt: DateTime(2026, 1, 1),
+      );
+      final refDate = DateTime(2026, 11, 22, 8, 0);
+
+      // Case A: User only edits amount/note/wallet -> startDate & frequency unchanged -> nextDueDate preserved
+      final preserved = service.resolveNextDueDateOnEdit(
+        existing: existing,
+        newStartDate: DateTime(2026, 1, 10),
+        newFrequency: 'monthly',
+        referenceDate: refDate,
+      );
+      expect(preserved, equals(existing.nextDueDate));
+
+      // Case B: User changes frequency monthly -> weekly while startDate is still in past (Jan 10, Saturday)
+      // Must advance to first valid occurrence >= today (Nov 22, Sunday -> Nov 28, Saturday)
+      final afterFreqChange = service.resolveNextDueDateOnEdit(
+        existing: existing,
+        newStartDate: existing.startDate,
+        newFrequency: 'weekly',
+        referenceDate: refDate,
+      );
+      expect(
+        RecurringTransactionService.dateOnly(afterFreqChange)
+            .isBefore(RecurringTransactionService.dateOnly(refDate)),
+        isFalse,
+      );
+      expect(afterFreqChange.weekday, equals(existing.startDate.weekday));
+      expect(afterFreqChange.year, equals(2026));
+      expect(afterFreqChange.month, equals(11));
+      expect(afterFreqChange.day, equals(28));
+
+      // Case C: User changes startDate to a future date (Dec 20, 2026) -> nextDueDate uses newStartDate directly
+      final futureStart = DateTime(2026, 12, 20);
+      final afterFutureStart = service.resolveNextDueDateOnEdit(
+        existing: existing,
+        newStartDate: futureStart,
+        newFrequency: 'monthly',
+        referenceDate: refDate,
+      );
+      expect(afterFutureStart, equals(futureStart));
+
+      // Case D: User changes startDate to a different past anchor day (Jan 15, 2026) -> advances >= today (Dec 15, 2026)
+      final pastAnchorChange = service.resolveNextDueDateOnEdit(
+        existing: existing,
+        newStartDate: DateTime(2026, 1, 15),
+        newFrequency: 'monthly',
+        referenceDate: refDate,
+      );
+      expect(pastAnchorChange.year, equals(2026));
+      expect(pastAnchorChange.month, equals(12));
+      expect(pastAnchorChange.day, equals(15));
+    });
+
+    // 40. Fix #2: reassignAndDeleteWallet migrates recurringTransactions & checkWalletInUse detects them
+    test(
+        '40. reassignAndDeleteWallet updates recurringTransactions walletId in batch and checkWalletInUse detects recurring references',
+        () async {
+      final firestoreService = FirestoreService(firestore: fakeDb);
+      const userId = 'u_reassign_w';
+
+      await fakeDb.collection('wallets').doc('w_old').set({
+        'userId': userId,
+        'walletName': 'Ví Cũ',
+        'balance': 500000.0,
+        'type': 'cash',
+        'isActive': true,
+        'createdAt': '2026-01-01T00:00:00.000',
+      });
+      await fakeDb.collection('wallets').doc('w_new').set({
+        'userId': userId,
+        'walletName': 'Ví Mới',
+        'balance': 1000000.0,
+        'type': 'bank',
+        'isActive': true,
+        'createdAt': '2026-01-01T00:00:00.000',
+      });
+      await fakeDb.collection('recurringTransactions').doc('sch_w_old').set({
+        'userId': userId,
+        'type': 'expense',
+        'walletId': 'w_old',
+        'categoryId': 'cat_1',
+        'amount': 200000.0,
+        'frequency': 'monthly',
+        'startDate': '2026-10-01T00:00:00.000',
+        'nextDueDate': '2026-12-01T00:00:00.000',
+        'isActive': true,
+        'createdAt': '2026-10-01T00:00:00.000',
+      });
+      await fakeDb.collection('recurringTransactions').doc('sch_other_user').set({
+        'userId': 'u_other',
+        'type': 'expense',
+        'walletId': 'w_old',
+        'categoryId': 'cat_1',
+        'amount': 100000.0,
+        'frequency': 'monthly',
+        'startDate': '2026-10-01T00:00:00.000',
+        'nextDueDate': '2026-12-01T00:00:00.000',
+        'isActive': true,
+        'createdAt': '2026-10-01T00:00:00.000',
+      });
+
+      // Even with 0 transactions, wallet referenced by recurringTransactions is detected as in-use
+      expect(await firestoreService.checkWalletInUse(userId, 'w_old'), isTrue);
+
+      await firestoreService.reassignAndDeleteWallet(userId, 'w_old', 'w_new');
+
+      final oldWalletSnap = await fakeDb.collection('wallets').doc('w_old').get();
+      expect(oldWalletSnap.exists, isFalse);
+
+      final newWalletSnap = await fakeDb.collection('wallets').doc('w_new').get();
+      expect((newWalletSnap.data()!['balance'] as num).toDouble(), equals(1500000.0));
+
+      final migratedSch = await fakeDb
+          .collection('recurringTransactions')
+          .doc('sch_w_old')
+          .get();
+      expect(migratedSch.data()!['walletId'], equals('w_new'));
+
+      // Another user's schedule must NOT be touched
+      final otherUserSch = await fakeDb
+          .collection('recurringTransactions')
+          .doc('sch_other_user')
+          .get();
+      expect(otherUserSch.data()!['walletId'], equals('w_old'));
+    });
+
+    // 41. Fix #2: reassignAndDeleteCategory migrates recurringTransactions & checkCategoryInUse detects them
+    test(
+        '41. reassignAndDeleteCategory updates recurringTransactions categoryId in batch and checkCategoryInUse detects recurring references',
+        () async {
+      final firestoreService = FirestoreService(firestore: fakeDb);
+      const userId = 'u_reassign_c';
+
+      await fakeDb.collection('categories').doc('cat_old').set({
+        'userId': userId,
+        'name': 'Điện cũ',
+        'type': 'expense',
+        'icon': 'bolt',
+        'color': 0xFFE53935,
+      });
+      await fakeDb.collection('categories').doc('cat_new').set({
+        'userId': userId,
+        'name': 'Hóa đơn',
+        'type': 'expense',
+        'icon': 'receipt',
+        'color': 0xFF1E88E5,
+      });
+      await fakeDb.collection('recurringTransactions').doc('sch_c_old').set({
+        'userId': userId,
+        'type': 'expense',
+        'walletId': 'w_1',
+        'categoryId': 'cat_old',
+        'amount': 350000.0,
+        'frequency': 'monthly',
+        'startDate': '2026-10-01T00:00:00.000',
+        'nextDueDate': '2026-12-01T00:00:00.000',
+        'isActive': true,
+        'createdAt': '2026-10-01T00:00:00.000',
+      });
+
+      expect(await firestoreService.checkCategoryInUse(userId, 'cat_old'), isTrue);
+
+      await firestoreService.reassignAndDeleteCategory(userId, 'cat_old', 'cat_new');
+
+      final oldCatSnap = await fakeDb.collection('categories').doc('cat_old').get();
+      expect(oldCatSnap.exists, isFalse);
+
+      final migratedSch = await fakeDb
+          .collection('recurringTransactions')
+          .doc('sch_c_old')
+          .get();
+      expect(migratedSch.data()!['categoryId'], equals('cat_new'));
+    });
+
+    // 42. Fix #4: Defer rejects today / past / <= occurrenceDate and allows max(today, occ) + 1
+    test(
+        '42. deferRecurringOccurrence rejects deferring to today, past, or <= occurrenceDate and accepts future dates',
+        () async {
+      final firestoreService = FirestoreService(firestore: fakeDb);
+      const userId = 'u_defer_guard';
+      const scheduleId = 'sch_defer_guard';
+      final today = DateTime(2026, 11, 22, 10, 0);
+      final dueDate = DateTime(2026, 11, 22, 9, 0);
+
+      final schedule = RecurringTransactionSchedule(
+        scheduleId: scheduleId,
+        userId: userId,
+        type: 'expense',
+        walletId: 'w_1',
+        categoryId: 'cat_1',
+        amount: 250000,
+        frequency: 'monthly',
+        startDate: dueDate,
+        nextDueDate: dueDate,
+        postingMode: RecurringTransactionSchedule.postingModeManual,
+        createdAt: DateTime(2026, 10, 1),
+      );
+      await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .set(schedule.toMap());
+
+      expect(
+        RecurringTransactionService.minValidDeferDate(
+          occurrenceDate: dueDate,
+          referenceDate: today,
+        ),
+        equals(DateTime(2026, 11, 23)),
+      );
+
+      // Reject same day as today / occurrenceDate
+      await expectLater(
+        firestoreService.deferRecurringOccurrence(
+          userId: userId,
+          schedule: schedule,
+          occurrenceDate: dueDate,
+          newDueDate: DateTime(2026, 11, 22),
+          referenceDate: today,
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+
+      // Reject past date
+      await expectLater(
+        firestoreService.deferRecurringOccurrence(
+          userId: userId,
+          schedule: schedule,
+          occurrenceDate: dueDate,
+          newDueDate: DateTime(2026, 11, 20),
+          referenceDate: today,
+        ),
+        throwsA(isA<ArgumentError>()),
+      );
+
+      // Schedule & occurrences must remain untouched after rejected calls
+      final occAfterReject =
+          await fakeDb.collection('recurringTransactionOccurrences').get();
+      expect(occAfterReject.docs, isEmpty);
+
+      // Accept tomorrow (max(today, occurrenceDate) + 1)
+      await firestoreService.deferRecurringOccurrence(
+        userId: userId,
+        schedule: schedule,
+        occurrenceDate: dueDate,
+        newDueDate: DateTime(2026, 11, 23),
+        referenceDate: today,
+      );
+
+      final updatedSch = await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .get();
+      expect(
+        DateTime.parse(updatedSch.data()!['nextDueDate']),
+        equals(DateTime(2026, 11, 23)),
+      );
+    });
+
+    // 43. Fix #6: Both confirmRecurringOccurrence & autoPost notify FinancialContextRevisionTracker and trigger 80% budget warning
+    test(
+        '43. Recurring posting notifies FinancialContextRevisionTracker and creates 80% budget alert for expense',
+        () async {
+      final firestoreService = FirestoreService(firestore: fakeDb);
+      const userId = 'u_budget_rev';
+
+      await fakeDb.collection('wallets').doc('w_1').set({
+        'userId': userId,
+        'walletName': 'Ví Chính',
+        'balance': 10000000.0,
+        'type': 'bank',
+        'isActive': true,
+        'createdAt': '2026-01-01T00:00:00.000',
+      });
+      await fakeDb.collection('budgets').doc('b_rent_112026').set({
+        'userId': userId,
+        'categoryId': 'cat_rent',
+        'limit': 1000000.0,
+        'month': '11/2026',
+      });
+      await fakeDb.collection('budgets').doc('b_food_112026').set({
+        'userId': userId,
+        'categoryId': 'cat_food',
+        'limit': 1000000.0,
+        'month': '11/2026',
+      });
+
+      // Part A: manualConfirmation crossing 80% (850k / 1M)
+      final manualSchedule = RecurringTransactionSchedule(
+        scheduleId: 'sch_manual_bud',
+        userId: userId,
+        type: 'expense',
+        walletId: 'w_1',
+        categoryId: 'cat_rent',
+        amount: 850000.0,
+        note: 'Tiền thuê',
+        frequency: 'monthly',
+        startDate: DateTime(2026, 11, 10),
+        nextDueDate: DateTime(2026, 11, 10),
+        postingMode: RecurringTransactionSchedule.postingModeManual,
+        createdAt: DateTime(2026, 11, 1),
+      );
+      await fakeDb
+          .collection('recurringTransactions')
+          .doc(manualSchedule.scheduleId)
+          .set(manualSchedule.toMap());
+
+      final versionBeforeConfirm =
+          FinancialContextRevisionTracker.localMutationVersion;
+      await firestoreService.confirmRecurringOccurrence(
+        userId: userId,
+        schedule: manualSchedule,
+        occurrenceDate: DateTime(2026, 11, 10),
+      );
+      expect(
+        FinancialContextRevisionTracker.localMutationVersion,
+        greaterThan(versionBeforeConfirm),
+      );
+
+      // Part B: autoPost crossing 80% (900k / 1M)
+      final autoSchedule = RecurringTransactionSchedule(
+        scheduleId: 'sch_auto_bud',
+        userId: userId,
+        type: 'expense',
+        walletId: 'w_1',
+        categoryId: 'cat_food',
+        amount: 900000.0,
+        note: 'Ăn trưa gói tháng',
+        frequency: 'monthly',
+        startDate: DateTime(2026, 11, 12),
+        nextDueDate: DateTime(2026, 11, 12),
+        postingMode: RecurringTransactionSchedule.postingModeAuto,
+        createdAt: DateTime(2026, 11, 1),
+      );
+      await fakeDb
+          .collection('recurringTransactions')
+          .doc(autoSchedule.scheduleId)
+          .set(autoSchedule.toMap());
+
+      final versionBeforeAuto =
+          FinancialContextRevisionTracker.localMutationVersion;
+      final autoRes = await firestoreService.processDueRecurringTransactions(
+        userId,
+        referenceDate: DateTime(2026, 11, 12, 12, 0),
+      );
+      expect(autoRes['processedCount'], equals(1));
+      expect(
+        FinancialContextRevisionTracker.localMutationVersion,
+        greaterThan(versionBeforeAuto),
+      );
+
+      final budgetNotifs = await fakeDb
+          .collection('notifications')
+          .where('userId', isEqualTo: userId)
+          .where('type', isEqualTo: 'budget')
+          .get();
+      expect(budgetNotifs.docs.length, equals(2));
+    });
+
+    // 44. Fix #7: confirmRecurringOccurrence with overrideWalletId is atomic and does NOT alter schedule default walletId
+    test(
+        '44. confirmRecurringOccurrence with overrideWalletId pays current cycle only and preserves schedule default walletId',
+        () async {
+      final firestoreService = FirestoreService(firestore: fakeDb);
+      const userId = 'u_override_w';
+      const scheduleId = 'sch_override_w';
+      final dueDate = DateTime(2026, 11, 15);
+
+      await fakeDb.collection('wallets').doc('w_default_low').set({
+        'userId': userId,
+        'walletName': 'Ví Mặc Định',
+        'balance': 100000.0,
+        'type': 'cash',
+        'isActive': true,
+        'createdAt': '2026-01-01T00:00:00.000',
+      });
+      await fakeDb.collection('wallets').doc('w_alt_rich').set({
+        'userId': userId,
+        'walletName': 'Ví Dự Phòng',
+        'balance': 2000000.0,
+        'type': 'bank',
+        'isActive': true,
+        'createdAt': '2026-01-01T00:00:00.000',
+      });
+      await fakeDb.collection('wallets').doc('w_alt_poor').set({
+        'userId': userId,
+        'walletName': 'Ví Cũng Thiếu',
+        'balance': 50000.0,
+        'type': 'ewallet',
+        'isActive': true,
+        'createdAt': '2026-01-01T00:00:00.000',
+      });
+
+      final schedule = RecurringTransactionSchedule(
+        scheduleId: scheduleId,
+        userId: userId,
+        type: 'expense',
+        walletId: 'w_default_low',
+        categoryId: 'cat_internet',
+        amount: 400000.0,
+        note: 'Internet',
+        frequency: 'monthly',
+        startDate: dueDate,
+        nextDueDate: dueDate,
+        postingMode: RecurringTransactionSchedule.postingModeManual,
+        createdAt: DateTime(2026, 11, 1),
+      );
+      await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .set(schedule.toMap());
+
+      // Atomic failure case: override wallet also lacks balance -> nothing changes
+      await expectLater(
+        firestoreService.confirmRecurringOccurrence(
+          userId: userId,
+          schedule: schedule,
+          occurrenceDate: dueDate,
+          overrideWalletId: 'w_alt_poor',
+        ),
+        throwsA(isA<InsufficientBalanceException>()),
+      );
+      final schAfterFail = await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .get();
+      expect(schAfterFail.data()!['walletId'], equals('w_default_low'));
+      expect((await fakeDb.collection('transactions').get()).docs, isEmpty);
+
+      // Success case: pay this cycle with w_alt_rich
+      await firestoreService.confirmRecurringOccurrence(
+        userId: userId,
+        schedule: schedule,
+        occurrenceDate: dueDate,
+        overrideWalletId: 'w_alt_rich',
+      );
+
+      // 1. Default wallet balance untouched & schedule.walletId STILL w_default_low
+      final defaultW =
+          await fakeDb.collection('wallets').doc('w_default_low').get();
+      expect((defaultW.data()!['balance'] as num).toDouble(), equals(100000.0));
+
+      final schAfterOk = await fakeDb
+          .collection('recurringTransactions')
+          .doc(scheduleId)
+          .get();
+      expect(schAfterOk.data()!['walletId'], equals('w_default_low'));
+      expect(schAfterOk.data()!['lastProcessedKey'], equals('2026-11-15'));
+
+      // 2. Alternative wallet deducted accurately (2M - 400k = 1.6M)
+      final altW = await fakeDb.collection('wallets').doc('w_alt_rich').get();
+      expect((altW.data()!['balance'] as num).toDouble(), equals(1600000.0));
+
+      // 3. Deterministic transaction created with override walletId
+      final txDoc = await fakeDb
+          .collection('transactions')
+          .doc('recurring_${scheduleId}_2026-11-15')
+          .get();
+      expect(txDoc.exists, isTrue);
+      expect(txDoc.data()!['walletId'], equals('w_alt_rich'));
+      expect((txDoc.data()!['amount'] as num).toDouble(), equals(400000.0));
+    });
+
+    // 45. Fix #8: Hero Card monthly normalization converts weekly x4 and keeps monthly x1
+    test(
+        '45. computeMonthlySummary normalizes weekly schedules (x4) and monthly schedules (x1) while ignoring paused ones',
+        () {
+      final schedules = [
+        RecurringTransactionSchedule(
+          scheduleId: 's_monthly_exp',
+          userId: 'u_1',
+          type: 'expense',
+          walletId: 'w_1',
+          categoryId: 'c_1',
+          amount: 5000000,
+          frequency: 'monthly',
+          startDate: DateTime(2026, 11, 1),
+          nextDueDate: DateTime(2026, 12, 1),
+          isActive: true,
+          createdAt: DateTime(2026, 11, 1),
+        ),
+        RecurringTransactionSchedule(
+          scheduleId: 's_weekly_exp',
+          userId: 'u_1',
+          type: 'expense',
+          walletId: 'w_1',
+          categoryId: 'c_2',
+          amount: 200000,
+          frequency: 'weekly',
+          startDate: DateTime(2026, 11, 2),
+          nextDueDate: DateTime(2026, 11, 23),
+          isActive: true,
+          createdAt: DateTime(2026, 11, 1),
+        ),
+        RecurringTransactionSchedule(
+          scheduleId: 's_weekly_inc',
+          userId: 'u_1',
+          type: 'income',
+          walletId: 'w_1',
+          categoryId: 'c_3',
+          amount: 1000000,
+          frequency: 'weekly',
+          startDate: DateTime(2026, 11, 3),
+          nextDueDate: DateTime(2026, 11, 24),
+          isActive: true,
+          createdAt: DateTime(2026, 11, 1),
+        ),
+        RecurringTransactionSchedule(
+          scheduleId: 's_paused_exp',
+          userId: 'u_1',
+          type: 'expense',
+          walletId: 'w_1',
+          categoryId: 'c_1',
+          amount: 9999999,
+          frequency: 'monthly',
+          startDate: DateTime(2026, 11, 1),
+          nextDueDate: DateTime(2026, 12, 1),
+          isActive: false,
+          createdAt: DateTime(2026, 11, 1),
+        ),
+      ];
+
+      final summary =
+          RecurringTransactionService.computeMonthlySummary(schedules);
+      // 5,000,000 + (200,000 * 4) = 5,800,000
+      expect(summary.estimatedMonthlyExpense, equals(5800000.0));
+      // 1,000,000 * 4 = 4,000,000
+      expect(summary.estimatedMonthlyIncome, equals(4000000.0));
+      expect(summary.activeCount, equals(3));
+      expect(summary.activeWeeklyCount, equals(2));
+      expect(summary.activeMonthlyCount, equals(1));
+      expect(summary.hasWeeklySchedules, isTrue);
     });
   });
 }

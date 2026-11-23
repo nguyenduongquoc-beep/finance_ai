@@ -1,12 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../l10n/app_localizations.dart';
 import '../../utils/constants.dart';
 import 'login_screen.dart';
 
 /// Onboarding - 3 trang giới thiệu tiện ích chuẩn Fintech
 class OnboardingScreen extends StatefulWidget {
-  const OnboardingScreen({super.key});
+  static const String hasSeenOnboardingKey = 'has_seen_onboarding';
+
+  final WidgetBuilder? loginRouteBuilder;
+
+  const OnboardingScreen({
+    super.key,
+    this.loginRouteBuilder,
+  });
 
   @override
   State<OnboardingScreen> createState() => _OnboardingScreenState();
@@ -41,9 +49,22 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
     ),
   ];
 
-  void _goToLogin() {
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  Future<void> _goToLogin() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool(OnboardingScreen.hasSeenOnboardingKey, true);
+    } catch (_) {}
+    if (!mounted) return;
     Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const LoginScreen()),
+      MaterialPageRoute(
+        builder: widget.loginRouteBuilder ?? (_) => const LoginScreen(),
+      ),
     );
   }
 

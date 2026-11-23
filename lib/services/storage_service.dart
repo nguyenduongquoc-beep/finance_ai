@@ -4,12 +4,11 @@ import 'package:path_provider/path_provider.dart';
 
 /// ============================================================
 /// STORAGE SERVICE
-/// Upload ảnh hóa đơn giao dịch, avatar người dùng lên Firebase Storage
+/// Lưu và xóa ảnh hóa đơn giao dịch cục bộ trên thiết bị (thuần Spark)
 /// ============================================================
 class StorageService {
-
-  /// Upload ảnh hóa đơn giao dịch
-  /// Đường dẫn: receipts/{userId}/{timestamp}.jpg
+  /// Lưu ảnh hóa đơn giao dịch vào thư mục ứng dụng cục bộ
+  /// Đường dẫn: {appDocumentsDir}/receipts/{userId}_{timestamp}.jpg
   Future<String> uploadReceiptImage(String userId, Uint8List imageBytes) async {
     final docsDir = await getApplicationDocumentsDirectory();
     final receiptsDir = Directory('${docsDir.path}/receipts');
@@ -17,25 +16,12 @@ class StorageService {
       await receiptsDir.create(recursive: true);
     }
     final fileName = '${userId}_${DateTime.now().millisecondsSinceEpoch}.jpg';
-    final file = File('${receiptsDir.path}/${fileName}');
+    final file = File('${receiptsDir.path}/$fileName');
     await file.writeAsBytes(imageBytes);
     return file.path;
   }
 
-  /// Upload avatar người dùng
-  /// Đường dẫn: avatars/{userId}.jpg
-  Future<String> uploadAvatar(String userId, File imageFile) async {
-    final docsDir = await getApplicationDocumentsDirectory();
-    final avatarsDir = Directory('${docsDir.path}/avatars');
-    if (!await avatarsDir.exists()) {
-      await avatarsDir.create(recursive: true);
-    }
-    final destFile = File('${avatarsDir.path}/${userId}.jpg');
-    await imageFile.copy(destFile.path);
-    return destFile.path;
-  }
-
-  /// Xóa ảnh theo URL
+  /// Xóa ảnh hóa đơn cục bộ theo đường dẫn đã lưu
   Future<void> deleteImageByUrl(String path) async {
     try {
       final file = File(path);

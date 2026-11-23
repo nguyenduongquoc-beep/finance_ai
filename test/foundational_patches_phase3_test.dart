@@ -596,7 +596,11 @@ void main() {
           return 'OK';
         },
       );
-      await aiLow.analyzeSpendingHabits(transactions: const [], categories: const []);
+      await aiLow.generateSavingPlan(
+        goalName: 'Quỹ dự phòng',
+        targetAmount: 10000000,
+        months: 6,
+      );
       expect(capturedTemp, AiRuntimeConfig.kMinTemperature);
       expect(capturedTemp, 0.1);
 

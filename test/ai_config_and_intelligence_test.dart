@@ -1,5 +1,7 @@
 import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:google_generative_ai/google_generative_ai.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:finance_ai_app/models/ai_runtime_config_model.dart';
 import 'package:finance_ai_app/models/budget_model.dart';
 import 'package:finance_ai_app/models/category_model.dart';
@@ -7,10 +9,12 @@ import 'package:finance_ai_app/models/financial_forecast_result.dart';
 import 'package:finance_ai_app/models/financial_issue.dart';
 import 'package:finance_ai_app/models/transaction_model.dart';
 import 'package:finance_ai_app/models/user_model.dart';
+import 'package:finance_ai_app/services/ai_prompt_builder.dart';
 import 'package:finance_ai_app/services/ai_service.dart';
 import 'package:finance_ai_app/services/financial_analytics_service.dart';
 import 'package:finance_ai_app/services/financial_chat_context_service.dart';
 import 'package:finance_ai_app/services/financial_forecast_service.dart';
+import 'package:finance_ai_app/services/language_controller.dart';
 import 'package:finance_ai_app/services/transaction_intelligence_service.dart';
 
 void main() {
@@ -761,6 +765,160 @@ void main() {
       expect(aiSvc.effectiveRuntimeConfig.primaryModel, defaultRuntime.primaryModel);
       expect(aiSvc.effectiveRuntimeConfig.temperature, defaultRuntime.temperature);
       expect(aiSvc.effectiveRuntimeConfig.isEnabled, isTrue);
+    });
+
+    test('16. Streaming mất mạng phải rollback _chatHistory để bấm Thử lại không gửi trùng câu hỏi', () async {
+      bool isOffline = true;
+      List<String> capturedUserTurnsOnRetry = [];
+
+      final aiSvc = AiService(
+        allowMissingApiKeyForTest: true,
+        streamGeneratorOverride: (modelName, content, temp) async* {
+          if (isOffline) {
+            throw const SocketException('Failed host lookup');
+          }
+          // Thu thập tất cả user turns (index > 0 và role != 'model')
+          capturedUserTurnsOnRetry = content
+              .skip(1)
+              .where((c) => c.role != 'model')
+              .map((c) => c.parts.whereType<TextPart>().map((p) => p.text).join())
+              .toList();
+          yield 'Bạn đã chi 5000000đ tháng này.';
+        },
+      );
+
+      // Lần 1: Mất mạng -> ném NO_NETWORK và phải xóa câu hỏi vừa thêm khỏi _chatHistory
+      await expectLater(
+        () => aiSvc
+            .chatWithFinancialDataStream(
+              userQuestion: 'Tháng này tôi chi bao nhiêu?',
+              contextData: 'Tổng chi: 5.000.000 đ',
+            )
+            .toList(),
+        throwsA(predicate((Object? e) => e != null && AiService.isNoNetworkException(e))),
+      );
+      expect(aiSvc.chatHistoryLength, 1); // Chỉ còn System Prompt ở index 0
+
+      // Lần 2: Có mạng lại và người dùng bấm Thử lại -> Chỉ gửi đúng 1 câu hỏi đó
+      isOffline = false;
+      final chunks = await aiSvc
+          .chatWithFinancialDataStream(
+            userQuestion: 'Tháng này tôi chi bao nhiêu?',
+            contextData: 'Tổng chi: 5.000.000 đ',
+          )
+          .toList();
+      expect(chunks.join(), contains('5000000đ'));
+      expect(capturedUserTurnsOnRetry, equals(['Tháng này tôi chi bao nhiêu?']));
+      // System prompt + 1 user + 1 model đã chuẩn hóa số tiền
+      expect(aiSvc.chatHistoryLength, 3);
+      final savedModelText = aiSvc.chatHistorySnapshot.last.parts
+          .whereType<TextPart>()
+          .map((p) => p.text)
+          .join();
+      expect(savedModelText, contains('5.000.000đ'));
+    });
+
+    test('17. Stream đứt giữa chừng sang model fallback kích hoạt onStreamReset, chống nối chữ và lưu đúng phản hồi cuối', () async {
+      int resetCount = 0;
+      final uiBuffer = StringBuffer();
+
+      final aiSvc = AiService(
+        allowMissingApiKeyForTest: true,
+        runtimeConfigOverride: AiRuntimeConfig.defaults().copyWith(
+          primaryModel: 'gemini-3.5-flash',
+          fallbackModels: const ['gemini-3.5-flash-lite'],
+        ),
+        streamGeneratorOverride: (modelName, content, temp) async* {
+          if (modelName == 'gemini-3.5-flash') {
+            yield 'Phần bị đứt giữa chừng ';
+            throw Exception('Model 503 stream truncated');
+          }
+          yield 'Phản hồi hoàn chỉnh: tổng chi ';
+          yield '**5000000đ**.';
+        },
+      );
+
+      await for (final chunk in aiSvc.chatWithFinancialDataStream(
+        userQuestion: 'Tóm tắt chi tiêu',
+        contextData: 'Tổng chi: 5.000.000 đ',
+        onStreamReset: () {
+          resetCount++;
+          uiBuffer.clear();
+        },
+      )) {
+        uiBuffer.write(chunk);
+      }
+
+      expect(resetCount, 1);
+      expect(aiSvc.lastModelUsed, 'gemini-3.5-flash-lite');
+      final finalUiText =
+          AiPromptBuilder.formatCurrencyNumbersInText(uiBuffer.toString());
+      expect(finalUiText, isNot(contains('Phần bị đứt giữa chừng')));
+      expect(finalUiText, 'Phản hồi hoàn chỉnh: tổng chi **5.000.000đ**.');
+
+      // Lịch sử trong AiService cũng lưu đúng bản hoàn chỉnh đã chuẩn hóa
+      final savedModelText = aiSvc.chatHistorySnapshot.last.parts
+          .whereType<TextPart>()
+          .map((p) => p.text)
+          .join();
+      expect(savedModelText, 'Phản hồi hoàn chỉnh: tổng chi **5.000.000đ**.');
+    });
+
+    test('18. System Prompt không lặp 4 nguyên tắc cứng và sạch 100% tiếng Anh khi locale == en', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      SharedPreferences.setMockInitialValues({});
+      await LanguageController.loadSavedLanguage();
+      addTearDown(() async {
+        await LanguageController.setLanguage('vi');
+      });
+
+      final aiSvc = AiService(allowMissingApiKeyForTest: true);
+
+      // 18a. Tiếng Việt: Không lặp lại DATA GROUNDING / STRICT DOMAIN SCOPE / MULTI-TIER RESPONSES
+      await LanguageController.setLanguage('vi');
+      final viPrompt = aiSvc.buildSystemCfpPromptForContext(
+        'Dòng tiền ròng: -1.000.000 đ (THÂM HỤT)\n⚠️ VƯỢT NGÂN SÁCH\nThu nhập biến động',
+      );
+      expect('DATA GROUNDING'.allMatches(viPrompt).length, 1);
+      expect('STRICT DOMAIN SCOPE'.allMatches(viPrompt).length, 1);
+      expect('MULTI-TIER RESPONSES'.allMatches(viPrompt).length, 1);
+      expect(
+        'CÁC NGUYÊN TẮC BẮT BUỘC KHI TRẢ LỜI:'.allMatches(viPrompt).length,
+        1,
+      );
+
+      // 18b. Tiếng Anh: Không lặp nguyên tắc và tuyệt đối không lẫn ký tự tiếng Việt có dấu
+      await LanguageController.setLanguage('en');
+      final enPrompt = aiSvc.buildSystemCfpPromptForContext(
+        'Net Cash Flow: -1,000,000 VND (DEFICIT)\nOVER BUDGET\nVariable income detected',
+      );
+      expect('DATA GROUNDING'.allMatches(enPrompt).length, 1);
+      expect('STRICT DOMAIN SCOPE'.allMatches(enPrompt).length, 1);
+      expect('MULTI-TIER RESPONSES'.allMatches(enPrompt).length, 1);
+      expect(enPrompt, contains('STANDARDIZED FINANCIAL KNOWLEDGE BASE'));
+      expect(enPrompt, contains('STYLE & ADVISORY FOCUS DIRECTIVES'));
+
+      // Kiểm tra không có bất kỳ ký tự nguyên âm/chữ cái có dấu tiếng Việt nào trong toàn bộ prompt EN
+      final vietnameseDiacriticRegex = RegExp(
+        r'[àáảãạăằắẳẵặâầấẩẫậèéẻẽẹêềếểễệìíỉĩịòóỏõọôồốổỗộơờớởỡợùúủũụưừứửữựỳýỷỹỵđÀÁẢÃẠĂẰẮẲẴẶÂẦẤẨẪẬÈÉẺẼẸÊỀẾỂỄỆÌÍỈĨỊÒÓỎÕỌÔỒỐỔỖỘƠỜỚỞỠỢÙÚỦŨỤƯỪỨỬỮỰỲÝỶỸỴĐ]',
+      );
+      expect(vietnameseDiacriticRegex.hasMatch(enPrompt), isFalse);
+    });
+
+    test('19. AiPromptBuilder.formatCurrencyNumbersInText chuẩn hóa số tiền thường và trong Markdown bold', () {
+      expect(
+        AiPromptBuilder.formatCurrencyNumbersInText(
+          'Bạn đã chi 5000000đ (khoảng **12000000đ** và *2500000 VND*).',
+        ),
+        'Bạn đã chi 5.000.000đ (khoảng **12.000.000đ** và *2.500.000 VND*).',
+      );
+      // Không làm sai số đã có dấu chấm hay năm/tỷ lệ %
+      expect(
+        AiPromptBuilder.formatCurrencyNumbersInText(
+          'Năm 2026 bạn tiết kiệm 20% và còn 1.500.000đ.',
+        ),
+        'Năm 2026 bạn tiết kiệm 20% và còn 1.500.000đ.',
+      );
     });
   });
 }

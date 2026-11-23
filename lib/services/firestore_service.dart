@@ -89,34 +89,409 @@ class FirestoreService {
 
   FirestoreService({FirebaseFirestore? firestore}) : _customDb = firestore;
 
-  // ---------------- USERS ----------------
-  Future<void> createUserProfile(AppUser user) {
-    return _db.collection('users').doc(user.uid).set(user.toMap());
-  }
-
-  Future<AppUser?> getUserProfile(String uid) async {
-    final doc = await _db.collection('users').doc(uid).get();
-    if (!doc.exists) return null;
-    return AppUser.fromMap(doc.data()!, doc.id);
-  }
-
-  Stream<AppUser?> streamUserProfile(String uid) {
+  // ---------------- USERS & PRIVATE FINANCIAL PROFILE ----------------
+  DocumentReference<Map<String, dynamic>> _privateFinancialProfileRef(
+    String uid,
+  ) {
     return _db
         .collection('users')
         .doc(uid)
-        .snapshots()
-        .map((doc) => doc.exists ? AppUser.fromMap(doc.data()!, doc.id) : null);
+        .collection('private')
+        .doc('financial_profile');
+  }
+
+  DocumentReference<Map<String, dynamic>> _privateMonthlyPlanRef(
+    String uid,
+    String planDocId,
+  ) {
+    return _db
+        .collection('users')
+        .doc(uid)
+        .collection('monthly_plans')
+        .doc(planDocId);
+  }
+
+  Future<void> createUserProfile(AppUser user) async {
+    // Chỉ lưu siêu dữ liệu vận hành phi tài chính lên `users/{uid}` (Zero-Knowledge).
+    await _db.collection('users').doc(user.uid).set(user.toMap());
+    final hasPrivateFinancial = user.monthlyIncome > 0 ||
+        (user.savingGoal != null && user.savingGoal!.trim().isNotEmpty);
+    if (hasPrivateFinancial) {
+      await _privateFinancialProfileRef(user.uid).set({
+        ...user.toPrivateFinancialMap(),
+        'updatedAt': DateTime.now().toUtc().toIso8601String(),
+      }, SetOptions(merge: true));
+    }
+  }
+
+  Future<PrivateFinancialProfile?> getPrivateFinancialProfile(
+    String uid,
+  ) async {
+    if (uid.trim().isEmpty) return null;
+    try {
+      final doc = await _privateFinancialProfileRef(uid).get();
+      if (!doc.exists || doc.data() == null) return null;
+      return PrivateFinancialProfile.fromMap(doc.data()!);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<AppUser?> getUserProfile(
+    String uid, {
+    bool includePrivateFinancial = true,
+  }) async {
+    final doc = await _db.collection('users').doc(uid).get();
+    if (!doc.exists || doc.data() == null) return null;
+
+    Map<String, dynamic>? privateMap;
+    if (includePrivateFinancial) {
+      try {
+        final privateDoc = await _privateFinancialProfileRef(uid).get();
+        if (privateDoc.exists && privateDoc.data() != null) {
+          privateMap = privateDoc.data();
+        }
+      } catch (_) {
+        // Nếu người gọi là Admin (không có quyền đọc /private/) hoặc chưa có doc -> bỏ qua an toàn.
+      }
+    }
+
+    return AppUser.fromMap(
+      doc.data()!,
+      doc.id,
+      privateFinancialMap: privateMap,
+      includeLegacyFinancialFallback: includePrivateFinancial,
+    );
+  }
+
+  Stream<AppUser?> streamUserProfile(String uid) {
+    return _db.collection('users').doc(uid).snapshots().map(
+          (doc) => doc.exists && doc.data() != null
+              ? AppUser.fromMap(doc.data()!, doc.id)
+              : null,
+        );
+  }
+
+  /// Cập nhật hồ sơ tài chính riêng tư tại `users/{uid}/private/financial_profile`
+  /// đồng thời dọn sạch trường cũ (`monthlyIncome`, `savingGoal`) khỏi root `users/{uid}` nếu còn tồn tại.
+  Future<void> updatePrivateFinancialProfile(
+    String uid, {
+    double? monthlyIncome,
+    String? savingGoal,
+  }) async {
+    final privateUpdate = <String, dynamic>{
+      if (monthlyIncome != null) 'monthlyIncome': monthlyIncome,
+      if (savingGoal != null) 'savingGoal': savingGoal,
+      'updatedAt': DateTime.now().toUtc().toIso8601String(),
+    };
+    await _privateFinancialProfileRef(uid)
+        .set(privateUpdate, SetOptions(merge: true));
+
+    // Di trú sạch: xóa trường cũ trên root `users/{uid}` nếu còn tồn tại
+    try {
+      final rootSnap = await _db.collection('users').doc(uid).get();
+      final rootData = rootSnap.data();
+      if (rootData != null &&
+          (rootData.containsKey('monthlyIncome') ||
+              rootData.containsKey('savingGoal'))) {
+        await _db.collection('users').doc(uid).update({
+          if (rootData.containsKey('monthlyIncome'))
+            'monthlyIncome': FieldValue.delete(),
+          if (rootData.containsKey('savingGoal'))
+            'savingGoal': FieldValue.delete(),
+        });
+      }
+    } catch (_) {
+      // Không chặn luồng chính nếu root doc không tồn tại hoặc không có trường cũ
+    }
+
+    FinancialContextRevisionTracker.notifyDataMutated();
   }
 
   Future<void> updateUserProfile(String uid, Map<String, dynamic> data) async {
-    await _db.collection('users').doc(uid).update(data);
+    final publicData = Map<String, dynamic>.from(data);
+    final hasIncome = publicData.containsKey('monthlyIncome');
+    final hasSavingGoal = publicData.containsKey('savingGoal');
+    final dynamic rawIncome = publicData.remove('monthlyIncome');
+    final dynamic rawSavingGoal = publicData.remove('savingGoal');
+    publicData.remove('monthlyPlans');
+
+    if (hasIncome || hasSavingGoal) {
+      final privatePayload = <String, dynamic>{
+        if (hasIncome) 'monthlyIncome': (rawIncome as num?)?.toDouble() ?? 0.0,
+        if (hasSavingGoal) 'savingGoal': rawSavingGoal?.toString(),
+        'updatedAt': DateTime.now().toUtc().toIso8601String(),
+      };
+      await _privateFinancialProfileRef(uid)
+          .set(privatePayload, SetOptions(merge: true));
+
+      // Tự động dọn trường cũ khỏi root `users/{uid}` nếu đang tồn tại
+      final rootSnap = await _db.collection('users').doc(uid).get();
+      final rootData = rootSnap.data();
+      if (rootData != null) {
+        if (rootData.containsKey('monthlyIncome')) {
+          publicData['monthlyIncome'] = FieldValue.delete();
+        }
+        if (rootData.containsKey('savingGoal')) {
+          publicData['savingGoal'] = FieldValue.delete();
+        }
+      }
+    }
+
+    if (publicData.isNotEmpty) {
+      await _db.collection('users').doc(uid).update(publicData);
+    }
+
     FinancialContextRevisionTracker.notifyDataMutated();
+  }
+
+  /// Ghi nhận nhẹ phương thức đăng nhập (`authProvider`) và thời điểm hoạt động gần nhất (`lastActiveAt`)
+  /// theo cơ chế throttle (mặc định >= 6 giờ) để tiết kiệm tối đa lượt ghi trên gói Spark.
+  Future<bool> touchUserPresenceAndProvider({
+    required String uid,
+    required String authProvider,
+    Duration throttle = const Duration(hours: 6),
+    DateTime? nowOverride,
+  }) async {
+    final cleanUid = uid.trim();
+    if (cleanUid.isEmpty) return false;
+
+    try {
+      final docRef = _db.collection('users').doc(cleanUid);
+      final snap = await docRef.get();
+      if (!snap.exists || snap.data() == null) return false;
+
+      final data = snap.data()!;
+      if ((data['status'] ?? 'active').toString() == 'locked') {
+        return false;
+      }
+
+      final now = (nowOverride ?? DateTime.now()).toUtc();
+      final currentProvider = (data['authProvider'] ?? '').toString().trim();
+      final cleanProvider = authProvider.trim();
+      final lastActive = AppUser.fromMap(
+        data,
+        cleanUid,
+        includeLegacyFinancialFallback: false,
+      ).lastActiveAt?.toUtc();
+
+      final providerChanged =
+          cleanProvider.isNotEmpty && currentProvider != cleanProvider;
+      final shouldTouchActive =
+          lastActive == null || now.difference(lastActive) >= throttle;
+
+      if (!providerChanged && !shouldTouchActive) return false;
+
+      await docRef.update({
+        if (cleanProvider.isNotEmpty) 'authProvider': cleanProvider,
+        'lastActiveAt': nowOverride != null
+            ? Timestamp.fromDate(now)
+            : FieldValue.serverTimestamp(),
+        'updatedAt': now.toIso8601String(),
+      });
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Xóa theo lô an toàn (`<= 400` writes/batch) toàn bộ document khớp query
+  Future<int> _deleteQueryInBatches(
+    Query<Map<String, dynamic>> baseQuery, {
+    int batchSize = 400,
+  }) async {
+    int totalDeleted = 0;
+    while (true) {
+      final snap = await baseQuery.limit(batchSize).get();
+      if (snap.docs.isEmpty) break;
+      final batch = _db.batch();
+      for (final doc in snap.docs) {
+        batch.delete(doc.reference);
+      }
+      await batch.commit();
+      totalDeleted += snap.docs.length;
+      if (snap.docs.length < batchSize) break;
+    }
+    return totalDeleted;
+  }
+
+  /// Luồng User tự Xóa tài khoản sạch dữ liệu ngay trên Mobile (100% thuần Firebase Spark).
+  /// - Xóa theo batch (`<= 400` writes/batch) trên 9 top-level collections lọc `userId == uid`,
+  ///   4 subcollections riêng tư dưới `users/{uid}`, và sau cùng xóa document `users/{uid}`.
+  /// - Không xóa `support_tickets` (rules khóa xóa để bảo toàn lịch sử đối soát).
+  Future<int> deleteAllUserDataForSelfDelete(
+    String uid, {
+    int batchSize = 400,
+  }) async {
+    final cleanUid = uid.trim();
+    if (cleanUid.isEmpty) return 0;
+
+    final safeBatchSize = batchSize.clamp(1, 450);
+    int totalDeleted = 0;
+
+    const topLevelCollections = <String>[
+      'wallets',
+      'transactions',
+      'budgets',
+      'categories',
+      'savingGoals',
+      'monthly_plans',
+      'notifications',
+      'recurringTransactions',
+      'recurringTransactionOccurrences',
+    ];
+
+    for (final colName in topLevelCollections) {
+      totalDeleted += await _deleteQueryInBatches(
+        _db.collection(colName).where('userId', isEqualTo: cleanUid),
+        batchSize: safeBatchSize,
+      );
+    }
+
+    const userSubcollections = <String>[
+      'private',
+      'quickTemplates',
+      'chat_sessions',
+      'monthly_plans',
+    ];
+
+    final userDocRef = _db.collection('users').doc(cleanUid);
+    for (final subName in userSubcollections) {
+      totalDeleted += await _deleteQueryInBatches(
+        userDocRef.collection(subName),
+        batchSize: safeBatchSize,
+      );
+    }
+
+    final userSnap = await userDocRef.get();
+    if (userSnap.exists) {
+      await userDocRef.delete();
+      totalDeleted += 1;
+    }
+
+    return totalDeleted;
   }
 
   // ---------------- WALLETS ----------------
   Future<String> createWallet(Wallet wallet) async {
     final ref = await _db.collection('wallets').add(wallet.toMap());
     return ref.id;
+  }
+
+  static String _setupWalletDedupKey(Wallet wallet) {
+    final normName = wallet.walletName.trim().toLowerCase();
+    if (!wallet.isUserNamed &&
+        wallet.type == 'cash' &&
+        WalletLocalizationHelper.isSystemCashName(wallet.walletName)) {
+      return '__system_cash__|cash';
+    }
+    return '$normName|${wallet.type}';
+  }
+
+  static String _setupCategoryDedupKey(Category category) {
+    return '${category.name.trim().toLowerCase()}|${category.type}';
+  }
+
+  /// Hoàn tất khởi tạo tài khoản mới nguyên tử (atomic) bằng WriteBatch:
+  /// - Ghi đồng thời danh sách ví và danh mục ở bước cuối cùng của luồng Setup.
+  /// - Chống trùng lặp (idempotent) với cả dữ liệu đã có trên Firestore lẫn các phần tử trùng trong đầu vào,
+  ///   tránh nhân bản ví/danh mục khi người dùng quay lại giữa các bước hoặc thử lại sau lỗi mạng.
+  Future<void> completeInitialSetup({
+    required String userId,
+    required List<Wallet> wallets,
+    required List<Category> categories,
+  }) async {
+    final trimmedUid = userId.trim();
+    if (trimmedUid.isEmpty || (wallets.isEmpty && categories.isEmpty)) return;
+
+    final existingWalletKeys = <String>{};
+    if (wallets.isNotEmpty) {
+      final walletSnap = await _db
+          .collection('wallets')
+          .where('userId', isEqualTo: trimmedUid)
+          .get();
+      for (final doc in walletSnap.docs) {
+        final existing = Wallet.fromMap(doc.data(), doc.id);
+        existingWalletKeys.add(_setupWalletDedupKey(existing));
+      }
+    }
+
+    final existingCategoryKeys = <String>{};
+    if (categories.isNotEmpty) {
+      final categorySnap = await _db
+          .collection('categories')
+          .where('userId', isEqualTo: trimmedUid)
+          .get();
+      for (final doc in categorySnap.docs) {
+        final existing = Category.fromMap(doc.data(), doc.id);
+        existingCategoryKeys.add(_setupCategoryDedupKey(existing));
+      }
+    }
+
+    final baseTime = DateTime.now();
+    final pendingOps = <({DocumentReference<Map<String, dynamic>> ref, Map<String, dynamic> data})>[];
+
+    int walletOffset = 0;
+    for (final w in wallets) {
+      final normalized = Wallet(
+        walletId: '',
+        userId: trimmedUid,
+        walletName: w.walletName.trim(),
+        balance: w.balance,
+        initialBalance: w.initialBalance,
+        type: w.type,
+        description: w.description,
+        currency: w.currency,
+        isActive: w.isActive,
+        isUserNamed: w.isUserNamed,
+        createdAt: baseTime.add(Duration(milliseconds: walletOffset)),
+      );
+      final key = _setupWalletDedupKey(normalized);
+      if (normalized.walletName.isEmpty || !existingWalletKeys.add(key)) {
+        continue;
+      }
+      walletOffset++;
+      pendingOps.add((
+        ref: _db.collection('wallets').doc(),
+        data: normalized.toMap(),
+      ));
+    }
+
+    for (final c in categories) {
+      final normalized = Category(
+        categoryId: '',
+        userId: trimmedUid,
+        name: c.name.trim(),
+        type: c.type,
+        icon: c.icon,
+        color: c.color,
+        isEssential: c.type == 'expense' ? c.isEssential : false,
+      );
+      final key = _setupCategoryDedupKey(normalized);
+      if (normalized.name.isEmpty || !existingCategoryKeys.add(key)) {
+        continue;
+      }
+      pendingOps.add((
+        ref: _db.collection('categories').doc(),
+        data: normalized.toMap(),
+      ));
+    }
+
+    if (pendingOps.isEmpty) return;
+
+    const maxBatchSize = 450;
+    for (int i = 0; i < pendingOps.length; i += maxBatchSize) {
+      final end = (i + maxBatchSize < pendingOps.length)
+          ? i + maxBatchSize
+          : pendingOps.length;
+      final batch = _db.batch();
+      for (int j = i; j < end; j++) {
+        batch.set(pendingOps[j].ref, pendingOps[j].data);
+      }
+      await batch.commit();
+    }
+
+    FinancialContextRevisionTracker.notifyDataMutated();
   }
 
   Stream<List<Wallet>> streamWallets(String userId) {
@@ -156,7 +531,13 @@ class FirestoreService {
         .where('walletId', isEqualTo: walletId)
         .limit(1)
         .get();
-    return txQuery.docs.isNotEmpty;
+    if (txQuery.docs.isNotEmpty) return true;
+
+    final recurringQuery = await _db
+        .collection('recurringTransactions')
+        .where('userId', isEqualTo: userId)
+        .get();
+    return recurringQuery.docs.any((d) => d.data()['walletId'] == walletId);
   }
 
   Future<void> reassignAndDeleteWallet(
@@ -190,12 +571,28 @@ class FirestoreService {
         .where('userId', isEqualTo: userId)
         .get();
 
+    // Cập nhật tham chiếu ví trong các lịch giao dịch định kỳ (single-field query tránh thiếu index)
+    final recurringQuery = await _db
+        .collection('recurringTransactions')
+        .where('userId', isEqualTo: userId)
+        .get();
+    final recurringDocsToUpdate = recurringQuery.docs
+        .where((d) => d.data()['walletId'] == oldWalletId)
+        .toList();
+
+    final nowIso = DateTime.now().toIso8601String();
     final batch = _db.batch();
     for (var doc in txQuery.docs) {
       batch.update(doc.reference, {'walletId': newWalletId});
     }
     for (var doc in transferToQuery.docs) {
       batch.update(doc.reference, {'toWalletId': newWalletId});
+    }
+    for (final doc in recurringDocsToUpdate) {
+      batch.update(doc.reference, {
+        'walletId': newWalletId,
+        'updatedAt': nowIso,
+      });
     }
     for (final goalDoc in goalsQuery.docs) {
       try {
@@ -253,6 +650,10 @@ class FirestoreService {
 
     batch.delete(_db.collection('wallets').doc(oldWalletId));
     await batch.commit();
+    FinancialContextRevisionTracker.notifyDataMutated();
+    if (recurringDocsToUpdate.isNotEmpty) {
+      await resyncLocalNotifications(userId, force: true);
+    }
   }
 
   /// Cập nhật số dư ví (dùng khi thêm/sửa/xóa giao dịch)
@@ -308,7 +709,13 @@ class FirestoreService {
         .where('categoryId', isEqualTo: categoryId)
         .limit(1)
         .get();
-    return budgetQuery.docs.isNotEmpty;
+    if (budgetQuery.docs.isNotEmpty) return true;
+
+    final recurringQuery = await _db
+        .collection('recurringTransactions')
+        .where('userId', isEqualTo: userId)
+        .get();
+    return recurringQuery.docs.any((d) => d.data()['categoryId'] == categoryId);
   }
 
   Future<void> reassignAndDeleteCategory(
@@ -323,7 +730,15 @@ class FirestoreService {
         .where('userId', isEqualTo: userId)
         .where('categoryId', isEqualTo: oldCategoryId)
         .get();
+    final recurringQuery = await _db
+        .collection('recurringTransactions')
+        .where('userId', isEqualTo: userId)
+        .get();
+    final recurringDocsToUpdate = recurringQuery.docs
+        .where((d) => d.data()['categoryId'] == oldCategoryId)
+        .toList();
 
+    final nowIso = DateTime.now().toIso8601String();
     final batch = _db.batch();
     for (var doc in txQuery.docs) {
       batch.update(doc.reference, {'categoryId': newCategoryId});
@@ -331,8 +746,18 @@ class FirestoreService {
     for (var doc in budgetQuery.docs) {
       batch.update(doc.reference, {'categoryId': newCategoryId});
     }
+    for (final doc in recurringDocsToUpdate) {
+      batch.update(doc.reference, {
+        'categoryId': newCategoryId,
+        'updatedAt': nowIso,
+      });
+    }
     batch.delete(_db.collection('categories').doc(oldCategoryId));
     await batch.commit();
+    FinancialContextRevisionTracker.notifyDataMutated();
+    if (recurringDocsToUpdate.isNotEmpty) {
+      await resyncLocalNotifications(userId, force: true);
+    }
   }
 
   // ---------------- TRANSACTIONS ----------------
@@ -1460,6 +1885,7 @@ class FirestoreService {
 
     final ref =
         await _db.collection('recurringTransactions').add(schedule.toMap());
+    FinancialContextRevisionTracker.notifyDataMutated();
     await resyncLocalNotifications(schedule.userId, force: true);
     return ref.id;
   }
@@ -1484,6 +1910,7 @@ class FirestoreService {
     data.remove('userId'); // Bảo vệ userId không bị thay đổi
     data['updatedAt'] = DateTime.now().toIso8601String();
     await _db.collection('recurringTransactions').doc(scheduleId).update(data);
+    FinancialContextRevisionTracker.notifyDataMutated();
     try {
       final snap =
           await _db.collection('recurringTransactions').doc(scheduleId).get();
@@ -1535,6 +1962,7 @@ class FirestoreService {
     }
 
     await scheduleRef.update(updateData);
+    FinancialContextRevisionTracker.notifyDataMutated();
 
     if (!isActive) {
       await resolvePendingNotificationsForSchedule(
@@ -1562,8 +1990,61 @@ class FirestoreService {
     } catch (_) {}
     // Chỉ xóa schedule, không xóa lịch sử giao dịch đã tạo trước đó
     await _db.collection('recurringTransactions').doc(scheduleId).delete();
+    FinancialContextRevisionTracker.notifyDataMutated();
     if (deletedUserId.isNotEmpty) {
       await resyncLocalNotifications(deletedUserId, force: true);
+    }
+  }
+
+  /// Kiểm tra ngưỡng cảnh báo ngân sách tháng (80%) sau khi một giao dịch chi tiêu được tạo
+  /// (áp dụng đồng nhất cho luồng định kỳ autoPost và manualConfirmation như `createTransaction`).
+  Future<void> _checkAndNotifyBudgetThreshold({
+    required String userId,
+    required String categoryId,
+    required double txAmount,
+    required DateTime txDate,
+  }) async {
+    if (userId.isEmpty || categoryId.isEmpty || txAmount <= 0) return;
+    try {
+      final monthStr = DateFormat('MM/yyyy').format(txDate);
+      final budgetQuery = await _db
+          .collection('budgets')
+          .where('userId', isEqualTo: userId)
+          .where('categoryId', isEqualTo: categoryId)
+          .where('month', isEqualTo: monthStr)
+          .limit(1)
+          .get();
+      if (budgetQuery.docs.isEmpty) return;
+
+      final data = budgetQuery.docs.first.data();
+      final limit = (data['limit'] as num).toDouble();
+      if (limit <= 0) return;
+
+      final newSpent = await getCategorySpentThisMonth(
+        userId,
+        categoryId,
+        month: txDate,
+      );
+      final oldSpent = newSpent - txAmount;
+      if (newSpent >= limit * 0.8 && oldSpent < limit * 0.8) {
+        await createNotification(AppNotification(
+          notificationId: '',
+          userId: userId,
+          title: AppLocalizations.tr('svc_fs_bud_warn_title'),
+          content: AppLocalizations.tr(
+            'svc_fs_bud_warn_add',
+            params: {'month': monthStr},
+          ),
+          status: 'unread',
+          type: 'budget',
+          createdAt: DateTime.now(),
+          titleKey: 'svc_fs_bud_warn_title',
+          contentKey: 'svc_fs_bud_warn_add',
+          contentParams: {'month': monthStr},
+        ));
+      }
+    } catch (e) {
+      debugPrint('[_checkAndNotifyBudgetThreshold] error: $e');
     }
   }
 
@@ -1926,6 +2407,14 @@ class FirestoreService {
           );
         } else {
           processedCount++;
+          if (schedule.type == 'expense') {
+            await _checkAndNotifyBudgetThreshold(
+              userId: userId,
+              categoryId: schedule.categoryId,
+              txAmount: schedule.amount,
+              txDate: occurrenceDate,
+            );
+          }
           await resolveRecurringNotificationsForOccurrence(
             userId: userId,
             scheduleId: schedule.scheduleId,
@@ -1960,6 +2449,7 @@ class FirestoreService {
     }
 
     if (processedCount > 0 || autoSkippedManualCount > 0) {
+      FinancialContextRevisionTracker.notifyDataMutated();
       await resyncLocalNotifications(userId, force: true);
     }
 
@@ -1971,11 +2461,14 @@ class FirestoreService {
     };
   }
 
-  /// Xác nhận giao dịch định kỳ thủ công (manualConfirmation mode)
+  /// Xác nhận giao dịch định kỳ thủ công (manualConfirmation mode) hoặc autoPost bị kẹt.
+  /// Hỗ trợ [overrideWalletId] để thanh toán RIÊNG kỳ hiện tại bằng ví khác trong đúng
+  /// 1 Firestore Transaction duy nhất mà KHÔNG làm thay đổi `walletId` mặc định của lịch.
   Future<void> confirmRecurringOccurrence({
     required String userId,
     required RecurringTransactionSchedule schedule,
     required DateTime occurrenceDate,
+    String? overrideWalletId,
   }) async {
     final recService = RecurringTransactionService();
     final occurrenceKey =
@@ -1983,12 +2476,16 @@ class FirestoreService {
     final deterministicTxId =
         RecurringTransactionService.buildTransactionId(
             schedule.scheduleId, occurrenceDate);
+    final effectiveWalletId =
+        (overrideWalletId != null && overrideWalletId.trim().isNotEmpty)
+            ? overrideWalletId.trim()
+            : schedule.walletId;
 
     final occurrenceDocId = '${schedule.scheduleId}_$occurrenceKey';
     final occurrenceRef =
         _db.collection('recurringTransactionOccurrences').doc(occurrenceDocId);
     final txRef = _db.collection('transactions').doc(deterministicTxId);
-    final walletRef = _db.collection('wallets').doc(schedule.walletId);
+    final walletRef = _db.collection('wallets').doc(effectiveWalletId);
     final scheduleRef =
         _db.collection('recurringTransactions').doc(schedule.scheduleId);
 
@@ -2044,7 +2541,7 @@ class FirestoreService {
         final appTx = AppTransaction(
           transactionId: deterministicTxId,
           userId: userId,
-          walletId: schedule.walletId,
+          walletId: effectiveWalletId,
           categoryId: schedule.categoryId,
           amount: schedule.amount,
           type: schedule.type,
@@ -2070,6 +2567,7 @@ class FirestoreService {
           schedule.startDate,
         );
 
+        // Chỉ cập nhật mốc kỳ hạn, tuyệt đối không ghi đè walletId mặc định của schedule
         txn.update(scheduleRef, {
           'nextDueDate': nextDueDate.toIso8601String(),
           'lastProcessedKey': occurrenceKey,
@@ -2085,6 +2583,7 @@ class FirestoreService {
             'action': 'confirmed',
             'actionAt': DateTime.now().toIso8601String(),
             'transactionId': deterministicTxId,
+            'walletId': effectiveWalletId,
           });
         }
       });
@@ -2099,6 +2598,16 @@ class FirestoreService {
         rethrow;
       }
     }
+
+    if (schedule.type == 'expense') {
+      await _checkAndNotifyBudgetThreshold(
+        userId: userId,
+        categoryId: schedule.categoryId,
+        txAmount: schedule.amount,
+        txDate: occurrenceDate,
+      );
+    }
+    FinancialContextRevisionTracker.notifyDataMutated();
 
     final confirmedAmountStr = AppFormatters.currency(schedule.amount);
     final confirmedTimeStr = DateFormat('HH:mm dd/MM/yyyy').format(DateTime.now());
@@ -2187,6 +2696,7 @@ class FirestoreService {
       }
     }
 
+    FinancialContextRevisionTracker.notifyDataMutated();
     final skippedDateStr = DateFormat('dd/MM/yyyy').format(occurrenceDate);
     await resolveRecurringNotificationsForOccurrence(
       userId: userId,
@@ -2202,13 +2712,23 @@ class FirestoreService {
     await resyncLocalNotifications(userId, force: true);
   }
 
-  /// Dời ngày giao dịch định kỳ thủ công
+  /// Dời ngày giao dịch định kỳ thủ công (chỉ dời riêng kỳ hiện tại;
+  /// bắt buộc `newDueDate` theo ngày lịch phải lớn hơn hẳn cả `today` lẫn `occurrenceDate`).
   Future<void> deferRecurringOccurrence({
     required String userId,
     required RecurringTransactionSchedule schedule,
     required DateTime occurrenceDate,
     required DateTime newDueDate,
+    DateTime? referenceDate,
   }) async {
+    if (!RecurringTransactionService.isValidDeferDate(
+      occurrenceDate: occurrenceDate,
+      newDueDate: newDueDate,
+      referenceDate: referenceDate,
+    )) {
+      throw ArgumentError(AppLocalizations.tr('svc_fs_rec_defer_invalid_date'));
+    }
+
     final occurrenceKey =
         RecurringTransactionService.getOccurrenceKey(occurrenceDate);
     final occurrenceDocId = '${schedule.scheduleId}_$occurrenceKey';
@@ -2264,6 +2784,7 @@ class FirestoreService {
       }
     }
 
+    FinancialContextRevisionTracker.notifyDataMutated();
     final deferredDateStr = DateFormat('dd/MM/yyyy').format(newDueDate);
     await resolveRecurringNotificationsForOccurrence(
       userId: userId,
@@ -2384,7 +2905,7 @@ class FirestoreService {
   }
 
   // ---------------- CHAT SESSIONS & CONVERSATION HISTORY ----------------
-  /// Lưu hoặc cập nhật một phiên trò chuyện AI
+  /// Lưu hoặc cập nhật một phiên trò chuyện AI (chỉ ghi `createdAt` khi tạo mới, không ghi đè khi cập nhật)
   Future<void> saveChatSession({
     required String userId,
     required String sessionId,
@@ -2398,14 +2919,19 @@ class FirestoreService {
           .collection('chat_sessions')
           .doc(sessionId);
 
-      await ref.set({
+      final existing = await ref.get();
+      final payload = <String, dynamic>{
         'sessionId': sessionId,
         'userId': userId,
         'title': title,
         'updatedAt': DateTime.now().toIso8601String(),
-        'createdAt': FieldValue.serverTimestamp(),
         'messages': messages,
-      }, SetOptions(merge: true));
+      };
+      if (!existing.exists || existing.data()?['createdAt'] == null) {
+        payload['createdAt'] = FieldValue.serverTimestamp();
+      }
+
+      await ref.set(payload, SetOptions(merge: true));
     } catch (e) {
       debugPrint('Error saving chat session: $e');
     }
@@ -2581,7 +3107,7 @@ class FirestoreService {
             _topLevelMonthlyPlansBlocked = true;
           }
           debugPrint(
-            '[getMonthlyPlan] Collection monthly_plans chưa mở quyền trên Cloud Rules -> tự động chuyển sang fallback users/{uid}.monthlyPlans.',
+            '[getMonthlyPlan] Collection monthly_plans chưa mở quyền trên Cloud Rules -> tự động chuyển sang fallback users/{uid}/monthly_plans.',
           );
         } else {
           debugPrint('[getMonthlyPlan] Lỗi đọc monthly_plans: $e');
@@ -2591,12 +3117,24 @@ class FirestoreService {
 
     if (plan == null) {
       try {
+        final subDoc = await _privateMonthlyPlanRef(userId, docId).get();
+        if (subDoc.exists && subDoc.data() != null) {
+          plan = MonthlyFinancialPlan.fromMap(subDoc.data()!, subDoc.id);
+        }
+      } catch (e) {
+        debugPrint('[getMonthlyPlan] Lỗi đọc fallback users/{uid}/monthly_plans: $e');
+      }
+    }
+
+    // Tương thích ngược chỉ-đọc với dữ liệu legacy cũ từng nằm trên root `users/{uid}.monthlyPlans`
+    if (plan == null) {
+      try {
         final userDoc = await _db.collection('users').doc(userId).get();
         if (userDoc.exists && userDoc.data() != null) {
           plan = _extractPlanFromUserMap(userDoc.data(), userId, targetMonth);
         }
       } catch (e) {
-        debugPrint('[getMonthlyPlan] Lỗi đọc fallback users/{uid}: $e');
+        debugPrint('[getMonthlyPlan] Lỗi đọc legacy fallback users/{uid}: $e');
       }
     }
 
@@ -2614,9 +3152,11 @@ class FirestoreService {
         _customDb != null || !_topLevelMonthlyPlansBlocked;
 
     if (!shouldTryTopLevel) {
-      return _db.collection('users').doc(userId).snapshots().map((userDoc) {
-        final p = _extractPlanFromUserMap(userDoc.data(), userId, targetMonth);
-        return p != null ? _activatePlanIfCurrentMonth(p) : null;
+      return _privateMonthlyPlanRef(userId, docId).snapshots().map((subDoc) {
+        if (!subDoc.exists || subDoc.data() == null) return null;
+        return _activatePlanIfCurrentMonth(
+          MonthlyFinancialPlan.fromMap(subDoc.data()!, subDoc.id),
+        );
       }).transform(
         StreamTransformer<MonthlyFinancialPlan?,
             MonthlyFinancialPlan?>.fromHandlers(
@@ -2680,9 +3220,9 @@ class FirestoreService {
 
       final planDocId =
           _buildPlanDocId(planToCommit.userId, planToCommit.targetMonth);
-      final monthKey = _buildMonthMapKey(planToCommit.targetMonth);
       final planRef = _db.collection('monthly_plans').doc(planDocId);
-      final userRef = _db.collection('users').doc(planToCommit.userId);
+      final privatePlanRef =
+          _privateMonthlyPlanRef(planToCommit.userId, planDocId);
 
       // Truy vấn danh sách document ngân sách hiện tại của tháng mục tiêu
       final existingBudgetQuery = await _db
@@ -2697,23 +3237,14 @@ class FirestoreService {
         return await _db.runTransaction<MonthlyFinancialPlan>(
           (txn) async {
             MonthlyFinancialPlan? oldPlan;
-            if (useTopLevelPlanCollection) {
-              final existingPlanSnap = await txn.get(planRef);
-              if (existingPlanSnap.exists && existingPlanSnap.data() != null) {
-                oldPlan = MonthlyFinancialPlan.fromMap(
-                  existingPlanSnap.data()!,
-                  existingPlanSnap.id,
-                );
-              }
-            } else {
-              final userSnap = await txn.get(userRef);
-              if (userSnap.exists && userSnap.data() != null) {
-                oldPlan = _extractPlanFromUserMap(
-                  userSnap.data(),
-                  planToCommit.userId,
-                  planToCommit.targetMonth,
-                );
-              }
+            final targetPlanRef =
+                useTopLevelPlanCollection ? planRef : privatePlanRef;
+            final existingPlanSnap = await txn.get(targetPlanRef);
+            if (existingPlanSnap.exists && existingPlanSnap.data() != null) {
+              oldPlan = MonthlyFinancialPlan.fromMap(
+                existingPlanSnap.data()!,
+                existingPlanSnap.id,
+              );
             }
 
             // Đọc lại từng budget doc bên trong Transaction để đảm bảo tính cô lập
@@ -2787,15 +3318,7 @@ class FirestoreService {
             if (useTopLevelPlanCollection) {
               txn.set(planRef, finalizedPlan.toMap());
             } else {
-              txn.set(
-                userRef,
-                {
-                  'monthlyPlans': {
-                    monthKey: finalizedPlan.toMap(),
-                  },
-                },
-                SetOptions(merge: true),
-              );
+              txn.set(privatePlanRef, finalizedPlan.toMap());
             }
 
             // Chỉ tạo mới hoặc cập nhật Budget cho những danh mục người dùng ĐÃ TÍCH CHỌN
@@ -2887,9 +3410,8 @@ class FirestoreService {
     Set<String>? categoryIdsToSyncBudget,
   }) async {
     final planDocId = _buildPlanDocId(userId, targetMonth);
-    final monthKey = _buildMonthMapKey(targetMonth);
     final planRef = _db.collection('monthly_plans').doc(planDocId);
-    final userRef = _db.collection('users').doc(userId);
+    final privatePlanRef = _privateMonthlyPlanRef(userId, planDocId);
 
     final existingBudgetQuery = await _db
         .collection('budgets')
@@ -2903,21 +3425,12 @@ class FirestoreService {
       return await _db.runTransaction<MonthlyFinancialPlan>(
         (txn) async {
           MonthlyFinancialPlan? currentPlan;
-          if (useTopLevelPlanCollection) {
-            final planSnap = await txn.get(planRef);
-            if (planSnap.exists && planSnap.data() != null) {
-              currentPlan =
-                  MonthlyFinancialPlan.fromMap(planSnap.data()!, planSnap.id);
-            }
-          } else {
-            final userSnap = await txn.get(userRef);
-            if (userSnap.exists && userSnap.data() != null) {
-              currentPlan = _extractPlanFromUserMap(
-                userSnap.data(),
-                userId,
-                targetMonth,
-              );
-            }
+          final targetPlanRef =
+              useTopLevelPlanCollection ? planRef : privatePlanRef;
+          final planSnap = await txn.get(targetPlanRef);
+          if (planSnap.exists && planSnap.data() != null) {
+            currentPlan =
+                MonthlyFinancialPlan.fromMap(planSnap.data()!, planSnap.id);
           }
 
           if (currentPlan == null) {
@@ -2968,15 +3481,7 @@ class FirestoreService {
           if (useTopLevelPlanCollection) {
             txn.set(planRef, nextPlan.toMap());
           } else {
-            txn.set(
-              userRef,
-              {
-                'monthlyPlans': {
-                  monthKey: nextPlan.toMap(),
-                },
-              },
-              SetOptions(merge: true),
-            );
+            txn.set(privatePlanRef, nextPlan.toMap());
           }
 
           // Đồng bộ lại các Budget của các danh mục được điều chỉnh
@@ -3082,8 +3587,8 @@ class FirestoreService {
 
     final Map<String, MonthlyFinancialPlan> candidatePlans = {};
     final Set<String> topLevelDocIds = {};
-    final Set<String> userMapPlanIds = {};
-    Map<String, dynamic>? userMonthlyPlansMap;
+    final Set<String> privateSubDocIds = {};
+    final Set<String> legacyUserMapPlanIds = {};
     final userRef = _db.collection('users').doc(userId);
 
     bool isSyncableFuturePlan(MonthlyFinancialPlan p) {
@@ -3119,12 +3624,27 @@ class FirestoreService {
     }
 
     try {
+      final privateSnap = await userRef.collection('monthly_plans').get();
+      for (final doc in privateSnap.docs) {
+        final p = MonthlyFinancialPlan.fromMap(doc.data(), doc.id);
+        if (isSyncableFuturePlan(p)) {
+          candidatePlans.putIfAbsent(p.planId, () => p);
+          privateSubDocIds.add(doc.id);
+        }
+      }
+    } catch (e) {
+      debugPrint(
+        '[_syncFutureMonthlyPlans] Lỗi đọc fallback users/{uid}/monthly_plans: $e',
+      );
+    }
+
+    // Đọc tương thích ngược dữ liệu legacy cũ trên root `users/{uid}.monthlyPlans` (chỉ đọc để di trú/dọn sạch)
+    try {
       final userSnap = await userRef.get();
       final userData = userSnap.data();
       final rawPlans = userData?['monthlyPlans'];
       if (rawPlans is Map) {
-        userMonthlyPlansMap = Map<String, dynamic>.from(rawPlans);
-        for (final entry in userMonthlyPlansMap.entries) {
+        for (final entry in rawPlans.entries) {
           if (entry.value is! Map) continue;
           final rawMap = Map<String, dynamic>.from(entry.value as Map);
           final targetM = (rawMap['targetMonth'] ?? '').toString();
@@ -3134,12 +3654,12 @@ class FirestoreService {
           final p = MonthlyFinancialPlan.fromMap(rawMap, docId);
           if (isSyncableFuturePlan(p)) {
             candidatePlans.putIfAbsent(p.planId, () => p);
-            userMapPlanIds.add(p.planId);
+            legacyUserMapPlanIds.add(p.planId);
           }
         }
       }
     } catch (e) {
-      debugPrint('[_syncFutureMonthlyPlans] Lỗi đọc fallback users/{uid}: $e');
+      debugPrint('[_syncFutureMonthlyPlans] Lỗi đọc legacy users/{uid}: $e');
     }
 
     if (candidatePlans.isEmpty) return;
@@ -3340,19 +3860,15 @@ class FirestoreService {
       final bool shouldDeletePlan = updatedAllocations.isEmpty ||
           (hadExplicitSelection && updatedSelectedIds.isEmpty);
 
-      final monthKey = _buildMonthMapKey(plan.targetMonth);
-
       if (shouldDeletePlan) {
         if (topLevelDocIds.contains(plan.planId)) {
           batch.delete(_db.collection('monthly_plans').doc(plan.planId));
         }
-        if (userMapPlanIds.contains(plan.planId) &&
-            userMonthlyPlansMap != null) {
-          userMonthlyPlansMap.remove(monthKey);
-          userMonthlyPlansMap.remove(plan.targetMonth);
-          batch.update(userRef, {
-            'monthlyPlans': Map<String, dynamic>.from(userMonthlyPlansMap),
-          });
+        if (privateSubDocIds.contains(plan.planId)) {
+          batch.delete(_privateMonthlyPlanRef(userId, plan.planId));
+        }
+        if (legacyUserMapPlanIds.contains(plan.planId)) {
+          batch.update(userRef, {'monthlyPlans': FieldValue.delete()});
         }
       } else {
         final double newEssCap = updatedAllocations
@@ -3416,12 +3932,15 @@ class FirestoreService {
             nextPlan.toMap(),
           );
         }
-        if (userMapPlanIds.contains(plan.planId) &&
-            userMonthlyPlansMap != null) {
-          userMonthlyPlansMap[monthKey] = nextPlan.toMap();
-          batch.update(userRef, {
-            'monthlyPlans': Map<String, dynamic>.from(userMonthlyPlansMap),
-          });
+        if (privateSubDocIds.contains(plan.planId) ||
+            legacyUserMapPlanIds.contains(plan.planId)) {
+          batch.set(
+            _privateMonthlyPlanRef(userId, plan.planId),
+            nextPlan.toMap(),
+          );
+        }
+        if (legacyUserMapPlanIds.contains(plan.planId)) {
+          batch.update(userRef, {'monthlyPlans': FieldValue.delete()});
         }
       }
 
@@ -3430,26 +3949,61 @@ class FirestoreService {
   }
 
   // ---------------- ADMIN OPERATIONS (USERS, SYSTEM CATEGORIES, ANNOUNCEMENTS, AUDIT LOGS) ----------------
+
+  /// Chuẩn hóa document `users/{uid}` sang siêu dữ liệu vận hành PHI TÀI CHÍNH cho Admin Web
+  /// (tuyệt đối không đọc/giữ `monthlyIncome`, `savingGoal`, `monthlyPlans`).
+  AppUser _sanitizeUserDocForAdmin(
+    DocumentSnapshot<Map<String, dynamic>> doc,
+  ) {
+    final d = doc.data() ?? const <String, dynamic>{};
+    return AppUser.fromMap(
+      <String, dynamic>{
+        'name': d['name'] ?? '',
+        'email': d['email'] ?? '',
+        'role': d['role'] ?? 'user',
+        'status': d['status'] ?? 'active',
+        'occupation': d['occupation'],
+        'authProvider': d['authProvider'],
+        'createdAt': d['createdAt'],
+        'lastActiveAt': d['lastActiveAt'],
+        'lockReason': d['lockReason'],
+        'lockedAt': d['lockedAt'],
+        'lockedBy': d['lockedBy'],
+        'updatedAt': d['updatedAt'],
+      },
+      doc.id,
+      includeLegacyFinancialFallback: false,
+    );
+  }
+
+  /// Stream danh sách người dùng có phân trang theo lô (`limit`) dành cho Admin Web (thuần Spark).
+  Stream<List<AppUser>> streamUsersDirectoryForAdmin({int limit = 25}) {
+    return _db
+        .collection('users')
+        .orderBy('createdAt', descending: true)
+        .limit(limit)
+        .snapshots()
+        .map((snap) => snap.docs.map(_sanitizeUserDocForAdmin).toList());
+  }
+
   Stream<List<AppUser>> streamAllUsersForAdmin() {
     return _db.collection('users').snapshots().map((snap) {
-      final list =
-          snap.docs.map((d) => AppUser.fromMap(d.data(), d.id)).toList();
+      final list = snap.docs.map(_sanitizeUserDocForAdmin).toList();
       list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
       return list;
     });
   }
 
-  Future<void> updateUserStatusOrRoleByAdmin({
-    required String targetUid,
-    String? status,
-    String? role,
-  }) async {
-    final Map<String, dynamic> updates = {};
-    if (status != null) updates['status'] = status;
-    if (role != null) updates['role'] = role;
-    if (updates.isEmpty) return;
-
-    await _db.collection('users').doc(targetUid).update(updates);
+  /// Đọc danh sách người dùng đã lọc sạch toàn bộ trường tài chính nhạy cảm cho Admin Web (Spark).
+  Future<List<AppUser>> getUsersDirectorySanitizedForAdmin({int? limit}) async {
+    Query<Map<String, dynamic>> query = _db.collection('users');
+    if (limit != null && limit > 0) {
+      query = query.orderBy('createdAt', descending: true).limit(limit);
+    }
+    final snap = await query.get();
+    final list = snap.docs.map(_sanitizeUserDocForAdmin).toList();
+    list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return list;
   }
 
   Stream<List<SystemCategoryTemplate>> streamSystemCategoryTemplates() {
@@ -3564,76 +4118,51 @@ class FirestoreService {
       }
       list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
       return list;
-    }).transform(
-      StreamTransformer<List<SystemAnnouncement>,
-          List<SystemAnnouncement>>.fromHandlers(
-        handleData: (data, sink) => sink.add(data),
-        handleError: (error, stackTrace, sink) {
-          debugPrint('[streamSystemAnnouncements] fallback empty: $error');
-          sink.add(<SystemAnnouncement>[]);
-        },
-      ),
-    );
-  }
-
-  Future<String> saveSystemAnnouncement(
-    SystemAnnouncement announcement,
-  ) async {
-    String docId = announcement.id;
-    final payload = announcement
-        .copyWith(updatedAt: DateTime.now())
-        .toMap();
-
-    if (docId.isEmpty) {
-      final ref = await _db.collection('system_announcements').add(payload);
-      docId = ref.id;
-    } else {
-      await _db
-          .collection('system_announcements')
-          .doc(docId)
-          .set(payload, SetOptions(merge: true));
-    }
-    return docId;
-  }
-
-  Future<void> setSystemAnnouncementActive(
-    String id,
-    bool isActive,
-  ) async {
-    await _db.collection('system_announcements').doc(id).update({
-      'isActive': isActive,
-      'updatedAt': DateTime.now().toIso8601String(),
     });
   }
 
-  Future<void> deleteSystemAnnouncement(String id) async {
-    await _db.collection('system_announcements').doc(id).delete();
-  }
-
-  // ---------------- ADMIN AUDIT LOGS (READ ONLY TRÊN CLIENT - SERVER GHI) ----------------
+  // ---------------- ADMIN AUDIT LOGS (APPEND-ONLY IMMUTABLE LOGS) ----------------
   Stream<List<AdminAuditLog>> streamAdminAuditLogs({int limit = 100}) {
     return _db
         .collection('admin_logs')
+        .orderBy('createdAt', descending: true)
+        .limit(limit)
         .snapshots()
-        .map((snap) {
-      final list = snap.docs
+        .map((snap) => snap.docs
+            .map((d) => AdminAuditLog.fromMap(d.data(), d.id))
+            .toList());
+  }
+
+  /// Truy vấn lịch sử tác động quản trị của một đối tượng cụ thể (`targetId`, VD: UID người dùng).
+  /// Tận dụng composite index `(targetId ASC, createdAt DESC)` và có fallback an toàn nếu index đang tạo.
+  Future<List<AdminAuditLog>> fetchAuditLogsForTarget(
+    String targetId, {
+    int limit = 10,
+  }) async {
+    final cleanId = targetId.trim();
+    if (cleanId.isEmpty) return const <AdminAuditLog>[];
+    try {
+      final snap = await _db
+          .collection('admin_logs')
+          .where('targetId', isEqualTo: cleanId)
+          .orderBy('createdAt', descending: true)
+          .limit(limit)
+          .get();
+      return snap.docs
           .map((d) => AdminAuditLog.fromMap(d.data(), d.id))
           .toList();
-      list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-      if (list.length > limit) {
-        return list.sublist(0, limit);
-      }
-      return list;
-    }).transform(
-      StreamTransformer<List<AdminAuditLog>,
-          List<AdminAuditLog>>.fromHandlers(
-        handleData: (data, sink) => sink.add(data),
-        handleError: (error, stackTrace, sink) {
-          debugPrint('[streamAdminAuditLogs] fallback empty: $error');
-          sink.add(<AdminAuditLog>[]);
-        },
-      ),
-    );
+    } catch (_) {
+      final snap = await _db
+          .collection('admin_logs')
+          .where('targetId', isEqualTo: cleanId)
+          .limit(limit * 3)
+          .get();
+      final list = snap.docs
+          .map((d) => AdminAuditLog.fromMap(d.data(), d.id))
+          .toList()
+        ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      return list.take(limit).toList();
+    }
   }
 }
 

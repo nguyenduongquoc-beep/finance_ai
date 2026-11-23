@@ -310,5 +310,122 @@ void main() {
       service.handleOrQueuePayloadForTest('bill_reminder_v1:sch_live_tap');
       expect(openedIds, equals(['sch_cold_start', 'sch_live_tap']));
     });
+
+    test(
+        '11. selectFairScheduledNotifications sorts globally by scheduledTime and caps at 50 without starving later schedules',
+        () {
+      final refDate = DateTime(2026, 11, 1, 8, 0);
+      // 2 weekly schedules (each produces ~26 notifications in 90 days -> 52 total)
+      // followed by 2 monthly schedules (previously starved completely by greedy 50 cap!)
+      final schedules = [
+        RecurringTransactionSchedule(
+          scheduleId: 'sch_weekly_1',
+          userId: 'u1',
+          type: 'expense',
+          walletId: 'w1',
+          categoryId: 'c1',
+          note: 'Gym tuần',
+          amount: 150000,
+          frequency: 'weekly',
+          startDate: DateTime(2026, 11, 2),
+          nextDueDate: DateTime(2026, 11, 2),
+          isActive: true,
+          createdAt: DateTime(2026, 10, 1),
+          reminderDaysBefore: 1,
+        ),
+        RecurringTransactionSchedule(
+          scheduleId: 'sch_weekly_2',
+          userId: 'u1',
+          type: 'expense',
+          walletId: 'w1',
+          categoryId: 'c1',
+          note: 'Đi chợ tuần',
+          amount: 500000,
+          frequency: 'weekly',
+          startDate: DateTime(2026, 11, 4),
+          nextDueDate: DateTime(2026, 11, 4),
+          isActive: true,
+          createdAt: DateTime(2026, 10, 1),
+          reminderDaysBefore: 1,
+        ),
+        RecurringTransactionSchedule(
+          scheduleId: 'sch_monthly_1',
+          userId: 'u1',
+          type: 'expense',
+          walletId: 'w1',
+          categoryId: 'c2',
+          note: 'Tiền nhà',
+          amount: 5000000,
+          frequency: 'monthly',
+          startDate: DateTime(2026, 11, 5),
+          nextDueDate: DateTime(2026, 11, 5),
+          isActive: true,
+          createdAt: DateTime(2026, 10, 1),
+          reminderDaysBefore: 3,
+        ),
+        RecurringTransactionSchedule(
+          scheduleId: 'sch_monthly_2',
+          userId: 'u1',
+          type: 'income',
+          walletId: 'w1',
+          categoryId: 'c3',
+          note: 'Lương',
+          amount: 20000000,
+          frequency: 'monthly',
+          startDate: DateTime(2026, 11, 10),
+          nextDueDate: DateTime(2026, 11, 10),
+          isActive: true,
+          createdAt: DateTime(2026, 10, 1),
+          reminderDaysBefore: 1,
+        ),
+        // Inactive schedule must be excluded
+        RecurringTransactionSchedule(
+          scheduleId: 'sch_paused',
+          userId: 'u1',
+          type: 'expense',
+          walletId: 'w1',
+          categoryId: 'c1',
+          amount: 999000,
+          frequency: 'weekly',
+          startDate: DateTime(2026, 11, 2),
+          nextDueDate: DateTime(2026, 11, 2),
+          isActive: false,
+          createdAt: DateTime(2026, 10, 1),
+          reminderDaysBefore: 1,
+        ),
+      ];
+
+      final fairItems = LocalNotificationService.selectFairScheduledNotifications(
+        schedules: schedules,
+        walletNamesMap: const {'w1': 'Ví Chính'},
+        referenceDate: refDate,
+        maxDaysAhead: 90,
+        maxTotal: 50,
+      );
+
+      // Must respect 50-notification cap
+      expect(fairItems.length, equals(50));
+
+      // Must be strictly non-decreasing chronologically
+      for (int i = 1; i < fairItems.length; i++) {
+        expect(
+          fairItems[i].scheduledTime.isBefore(fairItems[i - 1].scheduledTime),
+          isFalse,
+        );
+      }
+
+      // ALL 4 active schedules MUST be represented (no starvation of monthly_1 / monthly_2)
+      final representedIds = fairItems.map((e) => e.scheduleId).toSet();
+      expect(
+        representedIds,
+        containsAll([
+          'sch_weekly_1',
+          'sch_weekly_2',
+          'sch_monthly_1',
+          'sch_monthly_2',
+        ]),
+      );
+      expect(representedIds.contains('sch_paused'), isFalse);
+    });
   });
 }

@@ -86,6 +86,21 @@ void main() {
               'hasFirestoreRole': true,
               'claimsSynced': false,
             };
+          case 'adminListUsers':
+            final snap = await fakeFirestore.collection('users').get();
+            final users = snap.docs.map((doc) {
+              final d = doc.data();
+              return {
+                'uid': doc.id,
+                'name': d['name'] ?? '',
+                'email': d['email'] ?? '',
+                'role': d['role'] ?? 'user',
+                'status': d['status'] ?? 'active',
+                'occupation': d['occupation'],
+                'createdAt': d['createdAt'],
+              };
+            }).toList();
+            return {'success': true, 'users': users};
           case 'adminSetUserRole':
             await fakeFirestore
                 .collection('users')
@@ -146,19 +161,36 @@ void main() {
           findsOneWidget,
         );
 
-        // Điều hướng qua tab Quản lý Người dùng (index 1) -> kiểm tra Cloud Function adminSetUserRole
+        // Điều hướng qua tab Quản lý Người dùng (index 1) -> thuần Spark, gỡ nút Đổi vai trò & Xóa, chỉ còn Chi tiết + Khóa/Mở khóa
         await tester.tap(find.byKey(const ValueKey('admin_nav_tab_1')));
         await tester.pumpAndSettle();
-        await tester.tap(find.byKey(const ValueKey('toggle_role_user_01')));
-        await tester.pumpAndSettle();
-        await tester.tap(find.byKey(const ValueKey('confirm_role_user_01')));
-        await tester.pumpAndSettle();
         expect(
-          cloudCalls.any((c) => c['functionName'] == 'adminSetUserRole'),
-          isTrue,
+          find.byKey(const ValueKey('admin_users_refresh_btn')),
+          findsOneWidget,
         );
+        expect(find.byKey(const ValueKey('toggle_role_user_01')), findsNothing);
+        expect(find.byKey(const ValueKey('delete_user_user_01')), findsNothing);
+        expect(find.byKey(const ValueKey('toggle_lock_admin_01')), findsNothing);
+        expect(
+          find.byKey(const ValueKey('toggle_lock_user_01')),
+          findsOneWidget,
+        );
+
+        // Khóa user_01 bằng hộp thoại nhóm lý do chuẩn hóa (ghi WriteBatch vào users + admin_logs)
+        await tester.tap(find.byKey(const ValueKey('toggle_lock_user_01')));
+        await tester.pumpAndSettle();
+        await tester.tap(
+          find.byKey(const ValueKey('lock_reason_preset_suspicious_access')),
+        );
+        await tester.pumpAndSettle();
+        await tester.tap(find.byKey(const ValueKey('admin_confirm_lock_btn')));
+        await tester.pumpAndSettle();
+
         final updatedUser = await firestoreService.getUserProfile('user_01');
-        expect(updatedUser?.role, 'admin');
+        expect(updatedUser?.isLocked, isTrue);
+        expect(updatedUser?.lockReason, contains('Nghi vấn truy cập bất thường'));
+        expect(updatedUser?.lockedAt, isNotNull);
+        expect(updatedUser?.lockedBy, 'admin@financeai.vn');
 
         // Điều hướng sang Danh mục (2), Thông báo (3), Nhật ký (4)
         await tester.tap(find.byKey(const ValueKey('admin_nav_tab_2')));

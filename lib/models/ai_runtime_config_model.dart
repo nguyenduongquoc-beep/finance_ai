@@ -291,28 +291,15 @@ class AiRuntimeConfig {
   static const double kMaxTemperature = 0.8;
   static const int kMaxInstructionChars = 2500;
 
-  static const String defaultChatSystemInstruction = '''
-CÁC NGUYÊN TẮC BẮT BUỘC KHI TRẢ LỜI:
-1. NGUYÊN TẮC TRUNG THỰC & BÁM SÁT SỐ LIỆU (DATA GROUNDING):
-   - Mọi số liệu (thu nhập, chi tiêu, dòng tiền ròng, tỷ lệ tiết kiệm, ngân sách, mục tiêu, trung bình 3 tháng) PHẢI LẤY CHÍNH XÁC từ dữ liệu hệ thống cung cấp.
-   - TUYỆT ĐỐI KHÔNG tự bịa đặt, tự đoán mò, hoặc sinh ra các con số tài chính mới nằm ngoài dữ liệu được cung cấp.
-   - Nếu trong dữ liệu ghi chú "DỮ LIỆU HẠN CHẾ" hoặc "CHƯA CÓ DỮ LIỆU", hãy trung thực thông báo cho người dùng biết dữ liệu ghi nhận còn ít, cần thêm giao dịch để AI đánh giá chuẩn xác hơn.
+  /// Chỉ dẫn phong cách & trọng tâm tư vấn mặc định (không lặp lại 4 nguyên tắc cứng
+  /// DATA GROUNDING / STRICT DOMAIN SCOPE / MULTI-TIER / TONE trong AiPromptBuilder).
+  static const String defaultChatSystemInstruction =
+      'Ưu tiên tư vấn thực tế theo thói quen chi tiêu hàng ngày tại Việt Nam, '
+      'đi thẳng vào hành động cụ thể kèm con số trích từ dữ liệu thực tế của người dùng.';
 
-2. PHẠM VI NGHIÊM NGẶT (STRICT DOMAIN SCOPE):
-   - CHỈ trả lời các câu hỏi liên quan đến tài chính cá nhân của người dùng (thu chi, ví, dòng tiền, ngân sách, tiết kiệm, mục tiêu tài chính, mẹo chi tiêu thông minh).
-   - TỪ CHỐI LỊCH SỰ đối với các chủ đề ngoài phạm vi: thời sự, chính trị, viết code/lập trình, giải trí, thời tiết, tư vấn đầu tư mạo hiểm/cổ phiếu/tiền mã hóa rủi ro cao, luật pháp hoặc thuế chuyên sâu.
-   - Câu từ chối mẫu: "Xin lỗi bạn, mình là Trợ lý AI Tài chính Cá nhân nên chỉ có thể hỗ trợ các vấn đề liên quan đến quản lý thu chi, ngân sách và kế hoạch tài chính của bạn nhé!"
-
-3. ĐA CẤP ĐỘ PHẢN HỒI (MULTI-TIER RESPONSES):
-   - Câu hỏi số liệu nhanh: Trả lời trực diện, ngắn gọn, chính xác trong 1-2 câu.
-   - Câu hỏi phân tích: Trình bày rõ ràng cấu trúc Thu - Chi - Dòng tiền ròng - Tỷ lệ tiết kiệm, chỉ ra danh mục chi tiêu lớn nhất và so sánh với tháng trước.
-   - Câu hỏi tư vấn cắt giảm: Đưa ra đề xuất cụ thể gắn với danh mục chi nhiều nhất hoặc danh mục đang vượt hạn mức.
-   - Câu hỏi lập kế hoạch/mua sắm: PHẢI ĐỐI CHIẾU với "Mức tiết kiệm trung bình 3 tháng gần nhất" và dòng tiền ròng. Nếu mục tiêu vượt quá khả năng thặng dư thực tế, PHẢI PHẢN BIỆN TÍNH KHẢ THI thẳng thắn và đề xuất phương án điều chỉnh.
-
-4. GIỌNG VĂN & ĐỊNH DẠNG:
-   - Sử dụng tiếng Việt chuẩn mực, xưng hô "mình" và "bạn", thân thiện, tôn trọng, mang tính đồng hành và khích lệ.
-   - Trình bày dạng Markdown với gạch đầu dòng rõ ràng, in đậm các con số quan trọng.
-''';
+  static const String defaultChatSystemInstructionEn =
+      'Prioritize practical, action-oriented guidance tailored to everyday spending habits, '
+      'going straight to concrete next steps backed by the user\'s verified numbers.';
 
   static const String defaultMonthlyPlanAdvisoryRule = '''
 1. TUYỆT ĐỐI KHÔNG TỰ TÍNH TOÁN LẠI SỐ TIỀN. Mọi con số nhắc đến trong lời giải thích PHẢI khớp chính xác với dữ liệu đã được hệ thống tính toán.
@@ -1966,8 +1953,57 @@ class FinancialKnowledgeArticle {
     };
   }
 
-  /// Danh sách bài viết tri thức mặc định sẵn có trong code
-  static List<FinancialKnowledgeArticle> defaultArticles() {
+  /// Danh sách bài viết tri thức mặc định sẵn có trong code (hỗ trợ đầy đủ Vi/En)
+  static List<FinancialKnowledgeArticle> defaultArticles({
+    bool isEnglish = false,
+  }) {
+    if (isEnglish) {
+      return const [
+        FinancialKnowledgeArticle(
+          articleId: 'kb_50_30_20_rule',
+          title: 'Flexible 50/30/20 Income Allocation Principle',
+          topic: 'budget_rule',
+          triggerCondition: KnowledgeTriggerCondition.always,
+          priority: 9,
+          summaryForUser:
+              'Aim to cap essential needs at 50-60% of income, flexible spending at 20-30%, and set aside at least 15-20% for savings or emergency reserves.',
+          aiGroundingSnippet:
+              'Apply an adaptive 50/30/20 baseline: protect essential costs first, keep flexible spending within limits, and pay yourself first into savings right after receiving income.',
+          suggestedPrompts: [
+            'How does my current spending compare to the 50/30/20 rule?',
+          ],
+        ),
+        FinancialKnowledgeArticle(
+          articleId: 'kb_essential_deficit_recovery',
+          title: 'Recovery Playbook When Essential Costs Exceed Income',
+          topic: 'crisis_recovery',
+          triggerCondition: KnowledgeTriggerCondition.essentialDeficit,
+          priority: 10,
+          summaryForUser:
+              'When essential expenses exceed income, check whether flexible items were misclassified as essential and pause non-urgent spending.',
+          aiGroundingSnippet:
+              'User is facing a deficit in essential spending: never mechanically advise cutting rent, utilities, or healthcare; instead guide them to check whether dining out or shopping was misclassified as essential.',
+          suggestedPrompts: [
+            'How should I rebalance when essential costs exceed my income?',
+          ],
+        ),
+        FinancialKnowledgeArticle(
+          articleId: 'kb_variable_income_buffer',
+          title: 'Conservative Baseline Budgeting for Variable Income',
+          topic: 'saving_strategy',
+          triggerCondition: KnowledgeTriggerCondition.variableIncome,
+          priority: 8,
+          summaryForUser:
+              'With fluctuating monthly income, base your budget on lower-income months and route surplus from high-income months into a cash buffer.',
+          aiGroundingSnippet:
+              'User has variable income: recommend anchoring monthly budgets to a conservative low-month baseline and transferring extra earnings in stronger months directly into an emergency buffer instead of inflating lifestyle costs.',
+          suggestedPrompts: [
+            'How should I budget when my monthly income fluctuates?',
+          ],
+        ),
+      ];
+    }
+
     return const [
       FinancialKnowledgeArticle(
         articleId: 'kb_50_30_20_rule',
@@ -2022,9 +2058,10 @@ class FinancialKnowledgeArticle {
     bool isVariableIncome = false,
     bool hasBudgetOverrun = false,
     bool isGoalInfeasible = false,
+    bool isEnglish = false,
     List<FinancialKnowledgeArticle>? overrideArticles,
   }) {
-    final source = overrideArticles ?? defaultArticles();
+    final source = overrideArticles ?? defaultArticles(isEnglish: isEnglish);
     final matched = source.where((article) {
       if (!article.isActive || article.aiGroundingSnippet.trim().isEmpty) {
         return false;
@@ -2057,6 +2094,7 @@ class FinancialKnowledgeArticle {
     bool isVariableIncome = false,
     bool hasBudgetOverrun = false,
     bool isGoalInfeasible = false,
+    bool isEnglish = false,
     List<FinancialKnowledgeArticle>? overrideArticles,
   }) {
     final articles = selectMatchingArticles(
@@ -2065,6 +2103,7 @@ class FinancialKnowledgeArticle {
       isVariableIncome: isVariableIncome,
       hasBudgetOverrun: hasBudgetOverrun,
       isGoalInfeasible: isGoalInfeasible,
+      isEnglish: isEnglish,
       overrideArticles: overrideArticles,
     );
 

@@ -21,14 +21,23 @@ import '../l10n/app_localizations.dart';
 /// 4. Không dùng mã OTP giả lập ở Client-side. Luồng đặt lại mật khẩu tuân theo
 ///    tiêu chuẩn an toàn của Firebase Auth (Action Link / Re-auth).
 class AccountSecurityScreen extends StatefulWidget {
-  const AccountSecurityScreen({super.key});
+  final AuthService? authService;
+  final User? currentUserOverride;
+  final WidgetBuilder? postDeleteRouteBuilder;
+
+  const AccountSecurityScreen({
+    super.key,
+    this.authService,
+    this.currentUserOverride,
+    this.postDeleteRouteBuilder,
+  });
 
   @override
   State<AccountSecurityScreen> createState() => _AccountSecurityScreenState();
 }
 
 class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
-  final _authService = AuthService();
+  late final AuthService _authService;
 
   final _currentPasswordController = TextEditingController();
   final _newPasswordController = TextEditingController();
@@ -38,6 +47,30 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
   bool _obscureNew = true;
   bool _obscureConfirm = true;
   bool _isUpdating = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _authService = widget.authService ?? AuthService();
+  }
+
+  User? get _resolvedCurrentUser =>
+      widget.currentUserOverride ?? _authService.currentUser;
+
+  bool _hasPasswordProvider(User? user) {
+    if (widget.currentUserOverride != null && widget.authService == null) {
+      return user?.providerData.any((p) => p.providerId == 'password') ?? false;
+    }
+    return _authService.isEmailPasswordUser;
+  }
+
+  bool _hasGoogleProvider(User? user) {
+    if (widget.currentUserOverride != null && widget.authService == null) {
+      return user?.providerData.any((p) => p.providerId == 'google.com') ??
+          false;
+    }
+    return _authService.isGoogleUser;
+  }
 
   @override
   void dispose() {
@@ -135,9 +168,9 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final user = FirebaseAuth.instance.currentUser;
-    final isEmailPasswordUser = _authService.isEmailPasswordUser;
-    final isGoogleUser = _authService.isGoogleUser;
+    final user = _resolvedCurrentUser;
+    final isEmailPasswordUser = _hasPasswordProvider(user);
+    final isGoogleUser = _hasGoogleProvider(user);
     final isGoogleOnly = isGoogleUser && !isEmailPasswordUser;
 
     return Scaffold(
@@ -180,6 +213,16 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
   Widget _buildAuthMethodCard(
       User? user, bool isGoogleOnly, bool isEmailPassword) {
     final email = user?.email ?? context.tr('sec_no_email');
+    final isEmailVerified = user?.emailVerified ?? false;
+    final badgeBg =
+        isEmailVerified ? AppColors.incomeBackground : context.appBackground;
+    final badgeTextColor =
+        isEmailVerified ? AppColors.income : context.appTextSecondary;
+    final badgeBorder = isEmailVerified ? null : Border.all(color: context.appBorder);
+    final badgeText = isEmailVerified
+        ? context.tr('sec_verified')
+        : context.tr('sec_unverified');
+
     return AppCard(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -234,23 +277,25 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
               ),
               const SizedBox(width: 8),
               ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 120),
+                constraints: const BoxConstraints(maxWidth: 145),
                 child: Container(
+                  key: const ValueKey('sec_email_verification_badge'),
                   padding:
                       const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                   decoration: BoxDecoration(
-                    color: AppColors.incomeBackground,
+                    color: badgeBg,
                     borderRadius: BorderRadius.circular(6),
+                    border: badgeBorder,
                   ),
                   child: FittedBox(
                     fit: BoxFit.scaleDown,
                     child: Text(
-                      context.tr('sec_verified'),
+                      badgeText,
                       maxLines: 1,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w600,
-                        color: AppColors.income,
+                        color: badgeTextColor,
                       ),
                     ),
                   ),
@@ -461,7 +506,7 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
           Center(
             child: TextButton(
               onPressed: () {
-                final currentEmail = FirebaseAuth.instance.currentUser?.email;
+                final currentEmail = _resolvedCurrentUser?.email;
                 Navigator.of(context).push(
                   MaterialPageRoute(
                     builder: (_) =>
@@ -540,27 +585,29 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Row(
+          Row(
             children: [
-              Icon(
+              const Icon(
                 Icons.delete_forever_rounded,
                 color: AppColors.expense,
                 size: 20,
               ),
-              SizedBox(width: 8),
-              Text(
-                'Xóa tài khoản',
-                style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w700,
-                  color: AppColors.expense,
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  context.tr('sec_del_title'),
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: AppColors.expense,
+                  ),
                 ),
               ),
             ],
           ),
           const SizedBox(height: 8),
           Text(
-            'Sau khi xóa, tài khoản và toàn bộ dữ liệu tài chính của bạn (ví, giao dịch, ngân sách, mục tiêu) sẽ bị xóa vĩnh viễn và không thể khôi phục.',
+            context.tr('sec_del_desc'),
             style: TextStyle(
               fontSize: 12,
               height: 1.4,
@@ -571,6 +618,7 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
           SizedBox(
             width: double.infinity,
             child: OutlinedButton.icon(
+              key: const ValueKey('sec_delete_account_btn'),
               style: OutlinedButton.styleFrom(
                 foregroundColor: AppColors.expense,
                 side: const BorderSide(color: AppColors.expense),
@@ -583,9 +631,9 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
                   ? null
                   : () => _handleDeleteAccount(isEmailPasswordUser),
               icon: const Icon(Icons.delete_outline_rounded, size: 18),
-              label: const Text(
-                'Xóa vĩnh viễn tài khoản',
-                style: TextStyle(fontWeight: FontWeight.w600),
+              label: Text(
+                context.tr('sec_del_btn'),
+                style: const TextStyle(fontWeight: FontWeight.w600),
               ),
             ),
           ),
@@ -595,131 +643,190 @@ class _AccountSecurityScreenState extends State<AccountSecurityScreen> {
   }
 
   Future<void> _handleDeleteAccount(bool isEmailPasswordUser) async {
-    final passwordCtrl = TextEditingController();
-    bool obscureConfirmPass = true;
-
-    final confirmed = await showDialog<bool>(
+    final result = await showDialog<_DeleteAccountDialogResult>(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setDialogState) => AlertDialog(
-          title: const Row(
-            children: [
-              Icon(
-                Icons.warning_amber_rounded,
-                color: AppColors.expense,
-                size: 24,
-              ),
-              SizedBox(width: 8),
-              Expanded(child: Text('Xác nhận Xóa tài khoản')),
-            ],
-          ),
-          content: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const Text(
-                  'CẢNH BÁO NGUY HIỂM:\n\n'
-                  '• Tài khoản của bạn sẽ bị xóa vĩnh viễn khỏi hệ thống.\n'
-                  '• Toàn bộ dữ liệu hồ sơ, ví, giao dịch, ngân sách, mục tiêu sẽ được dọn dẹp sạch sẽ.\n'
-                  '• Thao tác này KHÔNG THỂ HOÀN TÁC.',
-                  style: TextStyle(
-                    fontSize: 13,
-                    height: 1.45,
-                    color: AppColors.expense,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                if (isEmailPasswordUser) ...[
-                  const SizedBox(height: 16),
-                  const Text(
-                    'Vui lòng nhập mật khẩu hiện tại để xác thực:',
-                    style: TextStyle(
-                      fontSize: 12.5,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: passwordCtrl,
-                    obscureText: obscureConfirmPass,
-                    decoration: InputDecoration(
-                      labelText: 'Mật khẩu hiện tại',
-                      prefixIcon:
-                          const Icon(Icons.lock_outline_rounded, size: 20),
-                      suffixIcon: IconButton(
-                        icon: Icon(
-                          obscureConfirmPass
-                              ? Icons.visibility_off_outlined
-                              : Icons.visibility_outlined,
-                          size: 20,
-                        ),
-                        onPressed: () => setDialogState(
-                            () => obscureConfirmPass = !obscureConfirmPass),
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(ctx).pop(false),
-              child: const Text('Hủy'),
-            ),
-            FilledButton.icon(
-              style: FilledButton.styleFrom(
-                backgroundColor: AppColors.expense,
-              ),
-              onPressed: () {
-                if (isEmailPasswordUser && passwordCtrl.text.isEmpty) {
-                  return;
-                }
-                Navigator.of(ctx).pop(true);
-              },
-              icon: const Icon(Icons.delete_forever_rounded, size: 16),
-              label: const Text('Xóa Vĩnh Viễn'),
-            ),
-          ],
-        ),
+      builder: (_) => _DeleteAccountConfirmDialog(
+        isEmailPasswordUser: isEmailPasswordUser,
       ),
     );
 
-    if (confirmed != true || !mounted) return;
+    if (result == null || !result.confirmed || !mounted) return;
 
     setState(() => _isUpdating = true);
     try {
       await _authService.deleteCurrentUser(
-        currentPassword: isEmailPasswordUser ? passwordCtrl.text : null,
+        currentPassword: isEmailPasswordUser ? result.password : null,
       );
 
       if (!mounted) return;
-      AppSnackbar.show(context, 'Tài khoản của bạn đã được xóa thành công.');
+      AppSnackbar.show(context, context.tr('sec_del_success'));
       Navigator.of(context).pushAndRemoveUntil(
-        MaterialPageRoute(builder: (_) => const LoginScreen()),
+        MaterialPageRoute(
+          builder: widget.postDeleteRouteBuilder ?? (_) => const LoginScreen(),
+        ),
         (route) => false,
+      );
+    } on ReauthCancelledException {
+      if (!mounted) return;
+      AppSnackbar.show(
+        context,
+        context.tr('sec_del_cancelled'),
+        isInfo: true,
       );
     } on FirebaseAuthException catch (e) {
       if (!mounted) return;
-      String message = 'Không thể xóa tài khoản.';
+      String message = context.tr('sec_del_err_failed');
       if (e.code == 'wrong-password' || e.code == 'invalid-credential') {
-        message = 'Mật khẩu hiện tại không chính xác.';
+        message = context.tr('sec_del_err_wrong_pwd');
+      } else if (e.code == 'missing-password') {
+        message = context.tr('sec_del_err_pwd_required');
       } else if (e.code == 'requires-recent-login') {
-        message =
-            'Yêu cầu bảo mật: Vui lòng đăng nhập lại trước khi thực hiện xóa tài khoản.';
+        message = context.tr('sec_del_err_recent_login');
       }
       AppSnackbar.show(context, message, isError: true);
     } catch (e) {
       if (!mounted) return;
       AppSnackbar.show(
         context,
-        'Không thể xóa tài khoản. Vui lòng thử lại sau.',
+        context.tr('sec_del_err_retry'),
         isError: true,
       );
     } finally {
       if (mounted) setState(() => _isUpdating = false);
     }
+  }
+}
+
+class _DeleteAccountDialogResult {
+  final bool confirmed;
+  final String? password;
+
+  const _DeleteAccountDialogResult({
+    required this.confirmed,
+    this.password,
+  });
+}
+
+/// Dialog xác nhận xóa tài khoản tách riêng StatefulWidget để tự động dispose()
+/// `TextEditingController` an toàn sau khi hiệu ứng đóng hộp thoại kết thúc.
+class _DeleteAccountConfirmDialog extends StatefulWidget {
+  final bool isEmailPasswordUser;
+
+  const _DeleteAccountConfirmDialog({
+    required this.isEmailPasswordUser,
+  });
+
+  @override
+  State<_DeleteAccountConfirmDialog> createState() =>
+      _DeleteAccountConfirmDialogState();
+}
+
+class _DeleteAccountConfirmDialogState
+    extends State<_DeleteAccountConfirmDialog> {
+  final _passwordController = TextEditingController();
+  bool _obscureConfirmPass = true;
+
+  @override
+  void dispose() {
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Row(
+        children: [
+          const Icon(
+            Icons.warning_amber_rounded,
+            color: AppColors.expense,
+            size: 24,
+          ),
+          const SizedBox(width: 8),
+          Expanded(child: Text(context.tr('sec_del_dlg_title'))),
+        ],
+      ),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              context.tr('sec_del_dlg_warning'),
+              style: const TextStyle(
+                fontSize: 13,
+                height: 1.45,
+                color: AppColors.expense,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+            if (widget.isEmailPasswordUser) ...[
+              const SizedBox(height: 16),
+              Text(
+                context.tr('sec_del_dlg_pwd_prompt'),
+                style: const TextStyle(
+                  fontSize: 12.5,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                key: const ValueKey('sec_delete_pwd_input'),
+                controller: _passwordController,
+                obscureText: _obscureConfirmPass,
+                decoration: InputDecoration(
+                  labelText: context.tr('sec_cur_pwd_label'),
+                  prefixIcon:
+                      const Icon(Icons.lock_outline_rounded, size: 20),
+                  suffixIcon: IconButton(
+                    icon: Icon(
+                      _obscureConfirmPass
+                          ? Icons.visibility_off_outlined
+                          : Icons.visibility_outlined,
+                      size: 20,
+                    ),
+                    onPressed: () => setState(
+                      () => _obscureConfirmPass = !_obscureConfirmPass,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          key: const ValueKey('sec_delete_dlg_cancel'),
+          onPressed: () => Navigator.of(context).pop(
+            const _DeleteAccountDialogResult(confirmed: false),
+          ),
+          child: Text(context.tr('common_cancel')),
+        ),
+        FilledButton.icon(
+          key: const ValueKey('sec_delete_dlg_confirm'),
+          style: FilledButton.styleFrom(
+            backgroundColor: AppColors.expense,
+          ),
+          onPressed: () {
+            if (widget.isEmailPasswordUser &&
+                _passwordController.text.isEmpty) {
+              return;
+            }
+            Navigator.of(context).pop(
+              _DeleteAccountDialogResult(
+                confirmed: true,
+                password: widget.isEmailPasswordUser
+                    ? _passwordController.text
+                    : null,
+              ),
+            );
+          },
+          icon: const Icon(Icons.delete_forever_rounded, size: 16),
+          label: Text(context.tr('sec_del_dlg_confirm')),
+        ),
+      ],
+    );
   }
 }

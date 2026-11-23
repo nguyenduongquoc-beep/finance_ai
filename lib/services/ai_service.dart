@@ -1,5 +1,6 @@
 import 'dart:io';
-import 'package:flutter/foundation.dart' show debugPrint, kIsWeb;
+import 'package:flutter/foundation.dart'
+    show debugPrint, kIsWeb, visibleForTesting;
 import 'package:google_generative_ai/google_generative_ai.dart';
 import 'package:google_mlkit_text_recognition/google_mlkit_text_recognition.dart';
 import 'package:path_provider/path_provider.dart' show getTemporaryDirectory;
@@ -7,10 +8,6 @@ import 'dart:typed_data';
 import 'dart:convert';
 import '../models/ai_runtime_config_model.dart';
 import '../models/receipt_info.dart';
-import '../models/financial_issue.dart';
-import '../models/trend_result.dart';
-import '../models/transaction_model.dart';
-import '../models/category_model.dart';
 import '../models/financial_forecast_result.dart';
 import '../models/monthly_financial_plan.dart';
 import '../config/api_keys.dart';
@@ -46,6 +43,11 @@ class AiService {
     List<Content> content,
     double temperature,
   )? _contentGeneratorOverride;
+  final Stream<String> Function(
+    String modelName,
+    List<Content> content,
+    double temperature,
+  )? _streamGeneratorOverride;
 
   final List<Content> _chatHistory = [];
   String _lastModelUsed = '';
@@ -59,12 +61,19 @@ class AiService {
       List<Content> content,
       double temperature,
     )? contentGeneratorOverride,
+    Stream<String> Function(
+      String modelName,
+      List<Content> content,
+      double temperature,
+    )? streamGeneratorOverride,
   })  : _runtimeConfigOverride = runtimeConfigOverride,
         _knowledgeArticlesOverride = knowledgeArticlesOverride,
-        _contentGeneratorOverride = contentGeneratorOverride {
+        _contentGeneratorOverride = contentGeneratorOverride,
+        _streamGeneratorOverride = streamGeneratorOverride {
     debugPrint('🔧 Model fallback chain: $effectiveModelChain');
     if (!allowMissingApiKeyForTest &&
         _contentGeneratorOverride == null &&
+        _streamGeneratorOverride == null &&
         (geminiApiKey.isEmpty || geminiApiKey == 'YOUR_GEMINI_API_KEY_HERE')) {
       throw Exception(
           AppLocalizations.tr('svc_ai_no_api_key'));
@@ -87,6 +96,23 @@ class AiService {
 
   /// Số lượng phần tử hiện tại trong bộ nhớ lịch sử hội thoại (bao gồm System Prompt ở index 0)
   int get chatHistoryLength => _chatHistory.length;
+
+  /// Ảnh chụp lịch sử hội thoại hiện tại phục vụ kiểm thử (không cho phép sửa trực tiếp)
+  @visibleForTesting
+  List<Content> get chatHistorySnapshot => List<Content>.unmodifiable(_chatHistory);
+
+  /// Xóa câu hỏi user vừa đẩy vào ở lượt hiện tại nếu gọi API thất bại (tránh trùng lặp khi bấm Thử lại)
+  void _rollbackLastUserTurn(String userQuestion) {
+    if (_chatHistory.length <= 1) return;
+    final last = _chatHistory.last;
+    final isCurrentUserTurn = last.role != 'model' &&
+        last.parts.length == 1 &&
+        last.parts.first is TextPart &&
+        (last.parts.first as TextPart).text == userQuestion;
+    if (isCurrentUserTurn) {
+      _chatHistory.removeLast();
+    }
+  }
 
   /// Nhận diện lỗi do MẤT MẠNG (khác với lỗi riêng của 1 model AI).
   /// Khi gặp lỗi loại này, thử tiếp các model dự phòng khác là vô nghĩa
@@ -184,41 +210,6 @@ class AiService {
     throw lastError ?? Exception(AppLocalizations.tr('svc_ai_all_failed'));
   }
 
-  /// AI 1: Phân tích thói quen chi tiêu (30 ngày gần đây)
-  Future<String> analyzeSpendingHabits({
-    required List<AppTransaction> transactions,
-    required List<Category> categories,
-  }) async {
-    final prompt = AiPromptBuilder.buildSpendingHabitsPrompt(
-      transactions: transactions,
-      categories: categories,
-    );
-    final response = await _generateWithFallback([Content.text(prompt)]);
-    return response.text != null
-        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
-        : AppLocalizations.tr('svc_ai_cant_analyze');
-  }
-
-  /// AI 3: Dự đoán số tiền chi tiêu cuối tháng
-  Future<String> predictMonthEnd({
-    required double spentSoFar,
-    required int dayOfMonth,
-    required int totalDaysInMonth,
-  }) async {
-    final dailyAvg = spentSoFar / (dayOfMonth <= 0 ? 1 : dayOfMonth);
-    final predicted = dailyAvg * totalDaysInMonth;
-    final prompt = AiPromptBuilder.buildMonthEndPrompt(
-      spentSoFar: spentSoFar,
-      dayOfMonth: dayOfMonth,
-      totalDaysInMonth: totalDaysInMonth,
-    );
-    final response = await _generateWithFallback([Content.text(prompt)]);
-    return response.text != null
-        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
-        : AppLocalizations.tr('svc_ai_month_end_fb',
-            params: {'amount': AppFormatters.number(predicted)});
-  }
-
   /// AI 4: Lập kế hoạch tiết kiệm có gắn ngữ cảnh thu nhập & chi tiêu thực tế
   Future<String> generateSavingPlan({
     required String goalName,
@@ -259,23 +250,27 @@ class AiService {
     _syncSystemPromptAndHistory(contextData, userQuestion);
     try {
       final response = await _generateWithFallback(_chatHistory);
-      if (response.text != null) {
-        _chatHistory.add(Content.model([TextPart(response.text!)]));
+      final formatted = response.text != null
+          ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
+          : null;
+      if (formatted != null) {
+        _chatHistory.add(Content.model([TextPart(formatted)]));
       }
-      return response.text ?? AppLocalizations.tr('svc_ai_cant_answer');
+      return formatted ?? AppLocalizations.tr('svc_ai_cant_answer');
     } catch (e) {
-      // Remove last user question to allow retrying
-      if (_chatHistory.isNotEmpty) {
-        _chatHistory.removeLast();
-      }
+      // Xóa câu hỏi user vừa thêm để người dùng bấm Thử lại không bị gửi trùng 2 lần
+      _rollbackLastUserTurn(userQuestion);
       rethrow;
     }
   }
 
-  /// AI 5 (Stream): Trợ lý AI tài chính cá nhân phản hồi dạng dòng (Stream) giảm độ trễ hiển thị
+  /// AI 5 (Stream): Trợ lý AI tài chính cá nhân phản hồi dạng dòng (Stream) giảm độ trễ hiển thị.
+  /// - [onStreamReset] được gọi khi model trước đã phát một phần nội dung nhưng bị đứt giữa chừng
+  ///   và chuyển sang model dự phòng / fallback non-streaming, giúp UI reset sạch buffer tránh nối chữ.
   Stream<String> chatWithFinancialDataStream({
     required String userQuestion,
     required String contextData,
+    void Function()? onStreamReset,
   }) async* {
     final cfg = effectiveRuntimeConfig;
     if (!cfg.isEnabled) {
@@ -293,75 +288,113 @@ class AiService {
       AiRuntimeConfig.kMaxTemperature,
     );
     final customGen = _contentGeneratorOverride;
+    final customStreamGen = _streamGeneratorOverride;
 
-    for (final modelName in chain) {
-      try {
-        debugPrint(
-            '🚀 Đang gọi Gemini Stream với model: $modelName (temp: $effectiveTemp)');
-        if (customGen != null) {
-          final text = await customGen(
-            modelName,
-            _chatHistory,
-            effectiveTemp,
-          );
-          _lastModelUsed = modelName;
-          if (text != null && text.isNotEmpty) {
-            accumulatedText.write(text);
-            yield text;
+    try {
+      for (final modelName in chain) {
+        bool emittedInCurrentAttempt = false;
+        try {
+          debugPrint(
+              '🚀 Đang gọi Gemini Stream với model: $modelName (temp: $effectiveTemp)');
+          if (customStreamGen != null) {
+            await for (final text in customStreamGen(
+              modelName,
+              _chatHistory,
+              effectiveTemp,
+            )) {
+              if (text.isNotEmpty) {
+                emittedInCurrentAttempt = true;
+                accumulatedText.write(text);
+                yield text;
+              }
+            }
+            _lastModelUsed = modelName;
+            streamSucceeded = true;
+            break;
           }
+
+          if (customGen != null) {
+            final text = await customGen(
+              modelName,
+              _chatHistory,
+              effectiveTemp,
+            );
+            _lastModelUsed = modelName;
+            if (text != null && text.isNotEmpty) {
+              emittedInCurrentAttempt = true;
+              accumulatedText.write(text);
+              yield text;
+            }
+            streamSucceeded = true;
+            break;
+          }
+
+          final model = GenerativeModel(
+            model: modelName,
+            apiKey: geminiApiKey,
+            generationConfig: GenerationConfig(temperature: effectiveTemp),
+          );
+          final stream = model
+              .generateContentStream(_chatHistory)
+              .timeout(const Duration(seconds: 25));
+
+          await for (final chunk in stream) {
+            final text = chunk.text;
+            if (text != null && text.isNotEmpty) {
+              emittedInCurrentAttempt = true;
+              accumulatedText.write(text);
+              yield text;
+            }
+          }
+          _lastModelUsed = modelName;
           streamSucceeded = true;
           break;
-        }
-
-        final model = GenerativeModel(
-          model: modelName,
-          apiKey: geminiApiKey,
-          generationConfig: GenerationConfig(temperature: effectiveTemp),
-        );
-        final stream = model
-            .generateContentStream(_chatHistory)
-            .timeout(const Duration(seconds: 25));
-
-        await for (final chunk in stream) {
-          final text = chunk.text;
-          if (text != null && text.isNotEmpty) {
-            accumulatedText.write(text);
-            yield text;
+        } catch (e) {
+          if (_isNetworkError(e)) {
+            debugPrint(
+                '⚠️ Phát hiện lỗi mất mạng khi gọi stream model "$modelName": $e');
+            _rollbackLastUserTurn(userQuestion);
+            throw Exception('NO_NETWORK');
+          }
+          lastError = e is Exception ? e : Exception(e.toString());
+          debugPrint(
+              '⚠️ Model Stream "$modelName" thất bại: $e — thử fallback tiếp theo...');
+          accumulatedText.clear();
+          if (emittedInCurrentAttempt) {
+            // Báo UI reset sạch buffer trước khi model dự phòng bắt đầu phát lại từ đầu
+            onStreamReset?.call();
           }
         }
-        _lastModelUsed = modelName;
-        streamSucceeded = true;
-        break;
-      } catch (e) {
-        if (_isNetworkError(e)) {
-          debugPrint('⚠️ Phát hiện lỗi mất mạng khi gọi stream model "$modelName": $e');
-          throw Exception('NO_NETWORK');
-        }
-        lastError = e is Exception ? e : Exception(e.toString());
-        debugPrint('⚠️ Model Stream "$modelName" thất bại: $e — thử fallback tiếp theo...');
-        accumulatedText.clear();
       }
-    }
 
-    // Nếu toàn bộ stream fallback thất bại, thử gọi fallback chuẩn (non-streaming)
-    if (!streamSucceeded) {
-      try {
-        debugPrint('⚠️ Chuyển sang fallback non-streaming cho câu trả lời');
-        final response = await _generateWithFallback(_chatHistory);
-        final fullText = response.text ?? AppLocalizations.tr('svc_ai_cant_answer');
-        accumulatedText.write(fullText);
-        yield fullText;
-        streamSucceeded = true;
-      } catch (fallbackError) {
-        if (_chatHistory.isNotEmpty) {
-          _chatHistory.removeLast();
+      // Nếu toàn bộ stream fallback thất bại, thử gọi fallback chuẩn (non-streaming)
+      if (!streamSucceeded) {
+        try {
+          debugPrint('⚠️ Chuyển sang fallback non-streaming cho câu trả lời');
+          final response = await _generateWithFallback(_chatHistory);
+          final rawFullText =
+              response.text ?? AppLocalizations.tr('svc_ai_cant_answer');
+          final fullText =
+              AiPromptBuilder.formatCurrencyNumbersInText(rawFullText);
+          accumulatedText.write(fullText);
+          yield fullText;
+          streamSucceeded = true;
+        } catch (fallbackError) {
+          _rollbackLastUserTurn(userQuestion);
+          throw lastError ?? fallbackError;
         }
-        throw lastError ?? fallbackError;
       }
-    }
 
-    if (streamSucceeded && accumulatedText.isNotEmpty) {
-      _chatHistory.add(Content.model([TextPart(accumulatedText.toString())]));
+      if (streamSucceeded && accumulatedText.isNotEmpty) {
+        final formattedFinal = AiPromptBuilder.formatCurrencyNumbersInText(
+          accumulatedText.toString(),
+        );
+        _chatHistory.add(Content.model([TextPart(formattedFinal)]));
+      }
+    } finally {
+      if (!streamSucceeded) {
+        _rollbackLastUserTurn(userQuestion);
+      }
     }
   }
 
@@ -381,50 +414,6 @@ class AiService {
     if (_chatHistory.length > maxMessages + 1) {
       _chatHistory.removeRange(1, _chatHistory.length - maxMessages);
     }
-  }
-
-  /// AI 2: Phân tích xu hướng tài chính (6 tháng gần nhất)
-  Future<TrendResult> analyzeTrend({
-    required List<double> monthlySpending, // oldest -> newest (6 months)
-  }) async {
-    // Ensure we have exactly 6 values, pad with zeros if needed
-    final List<double> amounts = List<double>.from(monthlySpending);
-    while (amounts.length < 6) {
-      amounts.insert(0, 0);
-    }
-    // Compute overall percent change
-    double? percentChange;
-    if (amounts.first != 0) {
-      percentChange = ((amounts.last - amounts.first) / amounts.first) * 100;
-    }
-    // Build prompt for Gemini
-    final prompt = AiPromptBuilder.buildTrendPrompt(amounts: amounts);
-    final response = await _generateWithFallback([Content.text(prompt)]);
-    final insight = response.text != null
-        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
-        : AppLocalizations.tr('svc_ai_cant_trend');
-    return TrendResult(
-      monthlyAmounts: amounts,
-      insight: insight,
-      percentChange: percentChange,
-    );
-  }
-
-  /// AI 6: Gợi ý cắt giảm chi tiêu cho 1 danh mục cụ thể
-  Future<String> suggestSpendingCuts({
-    required String categoryName,
-    required double currentDailyAvg,
-    required double targetDailyAvg,
-  }) async {
-    final prompt = AiPromptBuilder.buildSpendingCutsPrompt(
-      categoryName: categoryName,
-      currentDailyAvg: currentDailyAvg,
-      targetDailyAvg: targetDailyAvg,
-    );
-    final response = await _generateWithFallback([Content.text(prompt)]);
-    return response.text != null
-        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
-        : AppLocalizations.tr('svc_ai_cuts_fb', params: {'cat': categoryName});
   }
 
   /// AI 7: OCR trích xuất thông tin hoá đơn
@@ -521,30 +510,6 @@ class AiService {
       // Luôn close để giải phóng tài nguyên native
       textRecognizer.close();
     }
-  }
-
-  /// AI Insight nâng cao: nhận danh sách vấn đề ĐÃ PHÁT HIỆN SẴN (bằng
-  /// FinancialAnalyticsService), yêu cầu Gemini giải thích nguyên nhân và
-  /// đề xuất phương án — KHÔNG đưa dữ liệu thô, không để Gemini tự tính %.
-  Future<String> explainAndSuggestForIssues(List<FinancialIssue> issues) async {
-    if (issues.isEmpty) {
-      return AppLocalizations.tr('svc_ai_no_issues');
-    }
-    final prompt = AiPromptBuilder.buildIssuesPrompt(issues);
-    final response = await _generateWithFallback([Content.text(prompt)]);
-    return response.text != null
-        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
-        : AppLocalizations.tr('svc_ai_cant_suggest');
-  }
-
-  /// Giải thích + đề xuất cho ĐÚNG 1 vấn đề, gọi khi người dùng bấm xem chi
-  /// tiết trên 1 thẻ cụ thể — ngắn gọn, không viết đoạn văn dài.
-  Future<String> explainSingleIssue(FinancialIssue issue) async {
-    final prompt = AiPromptBuilder.buildSingleIssuePrompt(issue);
-    final response = await _generateWithFallback([Content.text(prompt)]);
-    return response.text != null
-        ? AiPromptBuilder.formatCurrencyNumbersInText(response.text!)
-        : AppLocalizations.tr('svc_ai_cant_suggest');
   }
 
   /// AI Cố vấn tài chính diễn giải tổng hợp FinancialInsightSummary đã được Dart tính sẵn.

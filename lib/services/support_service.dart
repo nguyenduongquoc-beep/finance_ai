@@ -598,6 +598,35 @@ class SupportService {
         .map((snap) => snap.docs.length);
   }
 
+  /// Truy vấn tối đa [limit] yêu cầu hỗ trợ gần nhất của một User cụ thể (phục vụ Hồ sơ chi tiết trên Admin Web)
+  Future<List<SupportTicket>> fetchUserTicketsForAdmin(
+    String userId, {
+    int limit = 10,
+  }) async {
+    final cleanUid = userId.trim();
+    if (cleanUid.isEmpty) return const <SupportTicket>[];
+    try {
+      final snap = await _ticketsCol
+          .where('userId', isEqualTo: cleanUid)
+          .orderBy('updatedAt', descending: true)
+          .limit(limit)
+          .get();
+      return snap.docs
+          .map((d) => SupportTicket.fromMap(d.data(), d.id))
+          .toList();
+    } catch (_) {
+      final snap = await _ticketsCol
+          .where('userId', isEqualTo: cleanUid)
+          .limit(limit * 3)
+          .get();
+      final list = snap.docs
+          .map((d) => SupportTicket.fromMap(d.data(), d.id))
+          .toList()
+        ..sort((a, b) => b.updatedAt.compareTo(a.updatedAt));
+      return list.take(limit).toList();
+    }
+  }
+
   /// Admin đánh dấu đã đọc tin nhắn mới của User (CHỈ đổi `unreadByAdmin`, KHÔNG đổi trạng thái)
   Future<void> markTicketReadByAdmin(String ticketId) async {
     if (ticketId.trim().isEmpty) return;
@@ -816,6 +845,74 @@ class SupportService {
     await batch.commit();
   }
 
+  /// Admin mở lại xử lý cho yêu cầu đang ở trạng thái Đã giải quyết (`resolved` -> `in_progress`)
+  /// khi cần trao đổi thêm với người dùng.
+  /// - Xóa `resolvedAt` & `resolvedByRole`, giữ nguyên đánh giá lịch sử (nếu có).
+  /// - Tuyệt đối không cho mở lại yêu cầu đã `closed`.
+  Future<void> reopenResolvedTicketByAdmin({
+    required SupportTicket ticket,
+    required String adminUid,
+    required String adminName,
+    String? note,
+  }) async {
+    if (adminUid.trim().isEmpty) {
+      throw const SupportServiceException('Thiếu thông tin Quản trị viên.');
+    }
+    if (ticket.status != SupportTicketStatus.resolved) {
+      throw const SupportServiceException(
+        'Chỉ có thể mở lại xử lý cho yêu cầu đang ở trạng thái Đã giải quyết (chưa đóng).',
+      );
+    }
+
+    final nowUtc = DateTime.now().toUtc();
+    final nowIso = nowUtc.toIso8601String();
+    final cleanAdminName =
+        _sanitizeDisplayName(adminName, fallback: 'Quản trị viên');
+    final cleanNote = note?.trim();
+
+    var eventBody =
+        '$cleanAdminName đã mở lại xử lý yêu cầu để tiếp tục hỗ trợ.';
+    if (cleanNote != null && cleanNote.isNotEmpty) {
+      eventBody = '$eventBody Ghi chú: $cleanNote';
+    }
+    if (eventBody.length > SupportTicket.kMaxMessageLength) {
+      eventBody = eventBody.substring(0, SupportTicket.kMaxMessageLength);
+    }
+
+    final ticketRef = _ticketsCol.doc(ticket.ticketId);
+    final msgRef = _messagesCol(ticket.ticketId).doc();
+    final sysMsg = SupportMessage(
+      messageId: msgRef.id,
+      senderId: adminUid.trim(),
+      senderRole: SupportSenderRole.system,
+      senderDisplayName: cleanAdminName,
+      body: eventBody,
+      messageType: SupportMessageType.statusChange,
+      createdAt: nowUtc,
+    );
+
+    final batch = _db.batch();
+    batch.set(msgRef, sysMsg.toMap());
+    batch.update(ticketRef, {
+      'status': SupportTicketStatus.inProgress.code,
+      'assignedAdminId': ticket.assignedAdminId ?? adminUid.trim(),
+      'assignedAdminName': ticket.assignedAdminName ?? cleanAdminName,
+      if (ticket.claimedAt == null) 'claimedAt': nowIso,
+      'resolvedAt': null,
+      'resolvedByRole': null,
+      'closedAt': null,
+      'closeReason': null,
+      'lastMessageId': msgRef.id,
+      'lastMessagePreview': SupportTicket.buildPreview(eventBody),
+      'lastMessageSenderRole': SupportSenderRole.system.code,
+      'lastMessageAt': nowIso,
+      'unreadByAdmin': false,
+      'unreadByUser': true,
+      'updatedAt': nowIso,
+    });
+    await batch.commit();
+  }
+
   /// Quy trình chuẩn: Admin đóng yêu cầu đã giải quyết (`resolved` -> `closed`).
   /// Giữ nguyên `resolvedAt` và `resolvedByRole` đã ghi nhận trước đó.
   Future<void> closeResolvedTicketByAdmin({
@@ -966,6 +1063,15 @@ class SupportService {
     SupportCloseReason? unresolvedReason,
     String? note,
   }) async {
+    if (targetStatus == SupportTicketStatus.inProgress &&
+        ticket.status == SupportTicketStatus.resolved) {
+      return reopenResolvedTicketByAdmin(
+        ticket: ticket,
+        adminUid: adminUid,
+        adminName: adminName,
+        note: note,
+      );
+    }
     if (targetStatus == SupportTicketStatus.resolved) {
       return markResolvedByAdmin(
         ticket: ticket,

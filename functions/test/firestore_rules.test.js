@@ -194,6 +194,10 @@ const TOKEN_LOCKED_ADMIN = makeToken("locked_adm", {
   email: "locked_adm@staging.test",
   admin: true,
 });
+const TOKEN_DEMOTED_ADMIN = makeToken("demoted_adm", {
+  email: "demoted_adm@staging.test",
+  admin: true,
+});
 
 test.before(async () => {
   await seedDoc("users/user_a", {
@@ -243,6 +247,13 @@ test.before(async () => {
     name: "Locked Admin",
     role: "admin",
     status: "locked",
+  });
+  await seedDoc("users/demoted_adm", {
+    uid: "demoted_adm",
+    email: "demoted_adm@staging.test",
+    name: "Demoted Admin",
+    role: "user",
+    status: "active",
   });
   // Tạo rồi xóa `users/admin_deleted_doc` để mô phỏng admin từng tồn tại nhưng đã bị xóa hồ sơ
   await seedDoc("users/admin_deleted_doc", {
@@ -344,8 +355,23 @@ test.before(async () => {
   await seedDoc("users/user_a/monthly_plans/ump_a", { month: "2026-11" });
 });
 
-test("Giai đoạn 4A Case 1: Admin có claim và users/{uid} active được phép truy cập đúng phạm vi Admin cốt lõi, vẫn bị chặn dữ liệu cá nhân & AI Governance đã khóa", async () => {
-  expectAllowed(await getDoc("users/user_a", TOKEN_ADMIN), "active admin read users/user_a");
+test("Giai đoạn 4A Case 1: Admin có role=='admin' & status=='active' truy cập đúng phạm vi cốt lõi trên Spark, bị chặn tuyệt đối dữ liệu tài chính riêng tư & chặn ngay Admin vừa bị hạ quyền dù JWT cũ còn admin=true", async () => {
+  // Admin đang hoạt động (kể cả không có custom claim trên Spark) đọc được hồ sơ chính mình & danh sách users phục vụ vận hành
+  expectAllowed(await getDoc("users/admin_1", TOKEN_ADMIN), "active admin read own users/admin_1");
+  expectAllowed(await getDoc("users/user_a", TOKEN_ADMIN), "active admin read users/user_a for Spark directory");
+  expectAllowed(
+    await runQuery({ from: [{ collectionId: "users" }] }, TOKEN_ADMIN),
+    "active admin list users collection for Spark directory"
+  );
+  expectAllowed(
+    await getDoc("users/user_a", TOKEN_ADMIN_NO_CLAIM),
+    "active Spark db-role admin read users/user_a without custom claim"
+  );
+
+  // Admin vừa bị hạ quyền (role='user') nhưng JWT cũ vẫn còn claim admin=true -> bị TỪ CHỐI tức thì
+  expectDenied(await getDoc("admin_logs/log_1", TOKEN_DEMOTED_ADMIN), "demoted admin with stale claim denied admin_logs");
+  expectDenied(await getDoc("users/user_a", TOKEN_DEMOTED_ADMIN), "demoted admin with stale claim denied users/user_a");
+
   expectAllowed(await getDoc("admin_logs/log_1", TOKEN_ADMIN), "active admin read admin_logs");
   expectAllowed(await getDoc("system_categories/cat_1", TOKEN_ADMIN), "active admin read system_categories");
   expectAllowed(await getDoc("system_announcements/ann_1", TOKEN_ADMIN), "active admin read system_announcements");
@@ -366,8 +392,10 @@ test("Giai đoạn 4A Case 1: Admin có claim và users/{uid} active được ph
     expectDenied(await getDoc(path, TOKEN_ADMIN), `active admin denied locked collection ${path}`);
   }
 
-  // Vẫn bị chặn dữ liệu tài chính cá nhân
+  // Vẫn bị chặn TUYỆT ĐỐI dữ liệu tài chính cá nhân của người dùng
   expectDenied(await getDoc("transactions/tx_a", TOKEN_ADMIN), "active admin read user tx");
+  expectDenied(await getDoc("wallets/w_a", TOKEN_ADMIN), "active admin read user wallet");
+  expectDenied(await getDoc("users/user_a/chat_sessions/cs_a", TOKEN_ADMIN), "active admin read user AI chat");
 });
 
 test("Giai đoạn 4A Case 2: Admin có claim admin=true nhưng users/{uid} bị xóa hoặc thiếu status=='active' phải bị TỪ CHỐI quyền Admin", async () => {
@@ -492,7 +520,7 @@ test("Giai đoạn 4A Case 5: User mới chưa có document users/{uid} giữ t�
     "unseeded user denied draft_configs"
   );
 
-  // Không thể tự nâng role/status khi tạo hoặc cập nhật users/{uid}
+  // Không thể tự nâng role/status hoặc ghi trường tài chính lên root users/{uid}
   expectDenied(
     await createDoc(
       "users",
@@ -511,6 +539,21 @@ test("Giai đoạn 4A Case 5: User mới chưa có document users/{uid} giữ t�
     ),
     "create user_new status=locked"
   );
+  expectDenied(
+    await createDoc(
+      "users",
+      "user_new",
+      {
+        uid: "user_new",
+        name: "New",
+        role: "user",
+        status: "active",
+        monthlyIncome: 25000000,
+      },
+      TOKEN_USER_NEW
+    ),
+    "create user_new denied financial field monthlyIncome on root users/{uid}"
+  );
   expectAllowed(
     await createDoc(
       "users",
@@ -519,6 +562,37 @@ test("Giai đoạn 4A Case 5: User mới chưa có document users/{uid} giữ t�
       TOKEN_USER_NEW
     ),
     "create valid user_new"
+  );
+  // Chính chủ được phép tạo/đọc/xóa hồ sơ tài chính riêng tư users/{uid}/private/financial_profile; Admin bị chặn 100%
+  expectAllowed(
+    await createDoc(
+      "users/user_new/private",
+      "financial_profile",
+      { monthlyIncome: 25000000, savingGoal: "Mua nhà" },
+      TOKEN_USER_NEW
+    ),
+    "owner create private/financial_profile"
+  );
+  expectDenied(
+    await getDoc("users/user_new/private/financial_profile", TOKEN_ADMIN),
+    "admin denied reading user private/financial_profile"
+  );
+  expectDenied(
+    await updateDoc(
+      "users/user_new/private/financial_profile",
+      { monthlyIncome: 0 },
+      TOKEN_ADMIN,
+      ["monthlyIncome"]
+    ),
+    "admin denied writing user private/financial_profile"
+  );
+  expectAllowed(
+    await deleteDoc("users/user_new/private/financial_profile", TOKEN_USER_NEW),
+    "owner delete own private/financial_profile for self-delete"
+  );
+  expectAllowed(
+    await deleteDoc("users/user_new", TOKEN_USER_NEW),
+    "owner delete own users/{uid} for Spark self-delete"
   );
 });
 
@@ -565,16 +639,334 @@ test("Client không thể tự sửa role/status và khóa tuyệt đối các c
     ),
     "user self-change status=locked"
   );
-  expectDenied(await deleteDoc("users/user_a", TOKEN_USER_A), "delete own user");
+  expectDenied(
+    await updateDoc(
+      "users/user_a",
+      { lockReason: "Tampered" },
+      TOKEN_USER_A,
+      ["lockReason"]
+    ),
+    "user denied modifying own lockReason"
+  );
 
-  // Admin Client không thể trực tiếp sửa role/status hoặc profile user khác
-  expectDenied(await updateDoc("users/user_a", { role: "admin" }, TOKEN_ADMIN, ["role"]), "admin patch user_a role");
-  expectDenied(await updateDoc("users/user_a", { status: "locked" }, TOKEN_ADMIN, ["status"]), "admin patch user_a status");
-  expectDenied(await updateDoc("users/admin_1", { role: "user" }, TOKEN_ADMIN, ["role"]), "admin patch own role");
-  expectDenied(await updateDoc("users/admin_1", { status: "locked" }, TOKEN_ADMIN, ["status"]), "admin patch own status");
+  // Admin đang hoạt động (thuần Spark) CHỈ được khóa/mở khóa tài khoản User thường (`role != 'admin'`)
+  // với đầy đủ `status`, `lockReason`, `lockedAt == request.time`, `lockedBy`, `updatedAt`.
+  // TUYỆT ĐỐI cấm đổi `role`, cấm khóa chính mình, cấm khóa Admin khác và cấm xóa user.
+  expectAllowed(
+    await commitWrites(
+      [
+        {
+          update: {
+            name: docName("users/user_b"),
+            fields: toFirestoreDoc({
+              status: "locked",
+              lockReason: "Vi phạm điều khoản sử dụng",
+              lockedBy: "admin@staging.test",
+              updatedAt: "2026-11-22T05:00:00Z",
+            }).fields,
+          },
+          updateMask: {
+            fieldPaths: ["status", "lockReason", "lockedBy", "updatedAt"],
+          },
+          updateTransforms: [
+            { fieldPath: "lockedAt", setToServerValue: "REQUEST_TIME" },
+          ],
+        },
+      ],
+      TOKEN_ADMIN
+    ),
+    "active admin lock user_b with standardized reason + serverTimestamp"
+  );
+  expectAllowed(
+    await updateDoc(
+      "users/user_b",
+      {
+        status: "active",
+        lockReason: null,
+        lockedAt: null,
+        lockedBy: null,
+        updatedAt: "2026-11-22T05:01:00Z",
+      },
+      TOKEN_ADMIN_NO_CLAIM,
+      ["status", "lockReason", "lockedAt", "lockedBy", "updatedAt"]
+    ),
+    "active Spark db-role admin unlock user_b clearing lock metadata"
+  );
+  // Cấm đổi vai trò từ Web Admin (gỡ bỏ hoàn toàn luồng Cấp/Hạ quyền Admin)
+  expectDenied(
+    await updateDoc(
+      "users/user_b",
+      { role: "admin", updatedAt: "2026-11-22T05:02:00Z" },
+      TOKEN_ADMIN,
+      ["role", "updatedAt"]
+    ),
+    "admin denied changing user role from Web Admin"
+  );
+  // Cấm khóa tài khoản Admin khác (`admin_db`)
+  expectDenied(
+    await commitWrites(
+      [
+        {
+          update: {
+            name: docName("users/admin_db"),
+            fields: toFirestoreDoc({
+              status: "locked",
+              lockReason: "Thử khóa admin khác",
+              lockedBy: "admin@staging.test",
+              updatedAt: "2026-11-22T05:03:00Z",
+            }).fields,
+          },
+          updateMask: {
+            fieldPaths: ["status", "lockReason", "lockedBy", "updatedAt"],
+          },
+          updateTransforms: [
+            { fieldPath: "lockedAt", setToServerValue: "REQUEST_TIME" },
+          ],
+        },
+      ],
+      TOKEN_ADMIN
+    ),
+    "admin denied locking another admin account"
+  );
 
-  // Client không thể ghi admin_logs hay bất kỳ collection AI Governance nào đã khóa
-  expectDenied(await createDoc("admin_logs", "fake_a", { action: "FAKE" }, TOKEN_ADMIN), "admin create admin_logs");
+  // Chặn admin sửa trường cá nhân, giá trị không hợp lệ, tự sửa bản thân hoặc xóa user
+  expectDenied(
+    await updateDoc("users/user_b", { name: "Hacked Name", updatedAt: "2026-11-22T05:04:00Z" }, TOKEN_ADMIN, ["name", "updatedAt"]),
+    "admin denied patching other user's personal name"
+  );
+  expectDenied(
+    await updateDoc("users/user_b", { status: "banned", updatedAt: "2026-11-22T05:04:00Z" }, TOKEN_ADMIN, ["status", "updatedAt"]),
+    "admin denied invalid status value"
+  );
+  expectDenied(
+    await updateDoc("users/admin_1", { role: "user", updatedAt: "2026-11-22T05:04:00Z" }, TOKEN_ADMIN, ["role", "updatedAt"]),
+    "admin denied patching own role"
+  );
+  expectDenied(
+    await updateDoc("users/admin_1", { status: "locked", updatedAt: "2026-11-22T05:04:00Z" }, TOKEN_ADMIN, ["status", "updatedAt"]),
+    "admin denied patching own status"
+  );
+  expectDenied(await deleteDoc("users/user_b", TOKEN_ADMIN), "admin denied deleting user doc directly");
+
+  // Demoted / locked admin bị chặn đổi status của user khác
+  expectDenied(
+    await updateDoc("users/user_b", { status: "locked", updatedAt: "2026-11-22T05:05:00Z" }, TOKEN_DEMOTED_ADMIN, ["status", "updatedAt"]),
+    "demoted admin denied locking user_b"
+  );
+  expectDenied(
+    await updateDoc("users/user_b", { status: "locked", updatedAt: "2026-11-22T05:05:00Z" }, TOKEN_LOCKED_ADMIN, ["status", "updatedAt"]),
+    "locked admin denied locking user_b"
+  );
+
+  // Danh mục Hệ thống (system_categories): Admin tạo/cập nhật/ẩn-hiện hợp lệ, cấm xóa cứng, cấm user thường ghi
+  expectAllowed(
+    await createDoc(
+      "system_categories",
+      "cat_spark_1",
+      {
+        id: "cat_spark_1",
+        name: "Tiền thuê nhà",
+        type: "expense",
+        icon: "home",
+        color: 4293848814,
+        isEssential: true,
+        isActive: true,
+        createdAt: "2026-11-22T05:10:00Z",
+        updatedAt: "2026-11-22T05:10:00Z",
+      },
+      TOKEN_ADMIN
+    ),
+    "active admin create valid system_category"
+  );
+  expectAllowed(
+    await updateDoc(
+      "system_categories/cat_spark_1",
+      { isActive: false, updatedAt: "2026-11-22T05:11:00Z" },
+      TOKEN_ADMIN_NO_CLAIM,
+      ["isActive", "updatedAt"]
+    ),
+    "active Spark admin toggle system_category isActive"
+  );
+  expectDenied(
+    await createDoc(
+      "system_categories",
+      "cat_bad",
+      {
+        id: "cat_bad",
+        name: "",
+        type: "expense",
+        icon: "home",
+        color: 4293848814,
+        isEssential: false,
+        isActive: true,
+        createdAt: "2026-11-22T05:10:00Z",
+        updatedAt: "2026-11-22T05:10:00Z",
+      },
+      TOKEN_ADMIN
+    ),
+    "admin denied creating system_category with empty name"
+  );
+  expectDenied(
+    await deleteDoc("system_categories/cat_spark_1", TOKEN_ADMIN),
+    "admin denied hard-deleting system_category"
+  );
+  expectDenied(
+    await createDoc(
+      "system_categories",
+      "cat_by_user",
+      {
+        id: "cat_by_user",
+        name: "Fake",
+        type: "expense",
+        icon: "home",
+        color: 123,
+        isEssential: false,
+        isActive: true,
+        createdAt: "2026-11-22T05:10:00Z",
+        updatedAt: "2026-11-22T05:10:00Z",
+      },
+      TOKEN_USER_A
+    ),
+    "regular user denied creating system_category"
+  );
+
+  // Thông báo Hệ thống (system_announcements): Admin tạo/sửa (giữ nguyên createdBy)/bật-tắt/xóa, cấm sửa giả createdBy
+  expectAllowed(
+    await createDoc(
+      "system_announcements",
+      "ann_spark_1",
+      {
+        id: "ann_spark_1",
+        title: "Bảo trì hệ thống",
+        content: "Hệ thống bảo trì từ 02:00 - 03:00.",
+        isActive: true,
+        createdBy: "admin@staging.test",
+        updatedBy: "admin@staging.test",
+        createdAt: "2026-11-22T05:12:00Z",
+        updatedAt: "2026-11-22T05:12:00Z",
+      },
+      TOKEN_ADMIN
+    ),
+    "active admin create valid system_announcement"
+  );
+  expectDenied(
+    await updateDoc(
+      "system_announcements/ann_spark_1",
+      {
+        id: "ann_spark_1",
+        title: "Sửa tiêu đề",
+        content: "Sửa nội dung",
+        isActive: true,
+        createdBy: "spoofed@staging.test",
+        updatedBy: "admin_db@staging.test",
+        createdAt: "2026-11-22T05:12:00Z",
+        updatedAt: "2026-11-22T05:13:00Z",
+      },
+      TOKEN_ADMIN_NO_CLAIM
+    ),
+    "admin denied overwriting original createdBy on system_announcement"
+  );
+  expectAllowed(
+    await updateDoc(
+      "system_announcements/ann_spark_1",
+      {
+        id: "ann_spark_1",
+        title: "Sửa tiêu đề hợp lệ",
+        content: "Sửa nội dung hợp lệ",
+        isActive: true,
+        createdBy: "admin@staging.test",
+        updatedBy: "admin_db@staging.test",
+        createdAt: "2026-11-22T05:12:00Z",
+        updatedAt: "2026-11-22T05:13:00Z",
+      },
+      TOKEN_ADMIN_NO_CLAIM
+    ),
+    "admin allowed editing system_announcement while preserving createdBy"
+  );
+  expectAllowed(
+    await deleteDoc("system_announcements/ann_spark_1", TOKEN_ADMIN),
+    "active admin delete system_announcement"
+  );
+  expectDenied(
+    await deleteDoc("system_announcements/ann_1", TOKEN_USER_A),
+    "regular user denied deleting system_announcement"
+  );
+
+  // Nhật ký quản trị (admin_logs): Append-only chuẩn schema (adminId == auth.uid, allowlist action), CẤM giả mạo, CẤM sửa/xóa
+  expectDenied(
+    await createDoc("admin_logs", "fake_a", { action: "FAKE" }, TOKEN_ADMIN),
+    "admin denied invalid admin_logs schema / unallowlisted action"
+  );
+  expectDenied(
+    await createDoc(
+      "admin_logs",
+      "spoof_admin_log",
+      {
+        adminId: "admin_db",
+        adminEmail: "admin@staging.test",
+        action: "LOCK_USER",
+        targetType: "user",
+        targetId: "user_b",
+        targetLabel: "user_b@staging.test",
+        result: "success",
+        details: "Spoofed adminId",
+        source: "admin_web",
+        createdAt: "2026-11-22T05:14:00Z",
+      },
+      TOKEN_ADMIN
+    ),
+    "admin denied spoofing another adminId in admin_logs"
+  );
+  expectAllowed(
+    await createDoc(
+      "admin_logs",
+      "valid_spark_log_1",
+      {
+        adminId: "admin_1",
+        adminEmail: "admin@staging.test",
+        action: "CREATE_SYSTEM_CATEGORY",
+        targetType: "system_category",
+        targetId: "cat_spark_1",
+        targetLabel: "Tiền thuê nhà",
+        result: "success",
+        details: "Tạo danh mục mặc định hệ thống.",
+        source: "admin_web",
+        createdAt: "2026-11-22T05:15:00Z",
+      },
+      TOKEN_ADMIN
+    ),
+    "active admin append valid audit log"
+  );
+  expectDenied(
+    await updateDoc("admin_logs/valid_spark_log_1", { details: "Tampered" }, TOKEN_ADMIN, ["details"]),
+    "admin denied tampering with existing admin_logs (append-only)"
+  );
+  expectDenied(
+    await deleteDoc("admin_logs/valid_spark_log_1", TOKEN_ADMIN),
+    "admin denied deleting existing admin_logs (append-only)"
+  );
+  expectDenied(
+    await createDoc(
+      "admin_logs",
+      "user_log",
+      {
+        adminId: "user_a",
+        adminEmail: "user_a@staging.test",
+        action: "LOCK_USER",
+        targetType: "user",
+        targetId: "user_b",
+        targetLabel: "user_b",
+        result: "success",
+        details: "User trying to write audit log",
+        source: "admin_web",
+        createdAt: "2026-11-22T05:15:00Z",
+      },
+      TOKEN_USER_A
+    ),
+    "regular user denied creating admin_logs"
+  );
+
+  // Các collection AI Governance đã khóa tuyệt đối
   expectDenied(
     await updateDoc("_sandbox_verifications/ai_runtime", { verifiedDraftHash: "fake" }, TOKEN_ADMIN),
     "admin write _sandbox_verifications"

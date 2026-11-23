@@ -380,90 +380,17 @@ const adminHandlers = createAdminEndpointHandlers({
 });
 
 /**
- * 4. Endpoint Khóa / Mở khóa tài khoản người dùng (Firebase Auth + Firestore + Audit Log)
+ * 4. Endpoint Khóa / Mở khóa tài khoản người dùng (Firebase Auth + Firestore + Rollback + Audit Log)
  * POST /adminSetUserStatus
  * Body: { targetUid: string, status: 'active' | 'locked', reason?: string }
  */
 exports.adminSetUserStatus = functions.https.onRequest(async (req, res) => {
   if (applyAdminCors(req, res)) return;
-  if (req.method !== "POST") {
-    res.status(405).json({ error: "Method Not Allowed" });
-    return;
-  }
-
-  try {
-    const caller = await verifyAdminCaller(req);
-    const { targetUid, status, reason } = req.body || {};
-
-    if (!targetUid || (status !== "active" && status !== "locked")) {
-      res.status(400).json({ error: "Tham số targetUid hoặc status không hợp lệ." });
-      return;
-    }
-
-    if (targetUid === caller.uid) {
-      res.status(400).json({ error: "Quản trị viên không thể tự khóa tài khoản của chính mình." });
-      return;
-    }
-
-    const isLocked = status === "locked";
-    const targetDocRef = db.collection("users").doc(targetUid);
-    const targetSnap = await targetDocRef.get();
-    const targetEmail = targetSnap.exists ? (targetSnap.data().email || targetUid) : targetUid;
-
-    // 1. Vô hiệu hóa hoặc khôi phục tài khoản trên Firebase Authentication
-    await admin.auth().updateUser(targetUid, { disabled: isLocked });
-    if (isLocked) {
-      await admin.auth().revokeRefreshTokens(targetUid);
-    }
-
-    // 2. Cập nhật trạng thái trên Firestore để đồng bộ realtime với ứng dụng User
-    const nowIso = new Date().toISOString();
-    await targetDocRef.set(
-      {
-        status: status,
-        updatedAt: nowIso,
-      },
-      { merge: true }
-    );
-
-    // 3. Ghi nhật ký quản trị sau khi thao tác thực tế thành công
-    const actionCode = isLocked ? "LOCK_USER" : "UNLOCK_USER";
-    const logRef = await db.collection("admin_logs").add({
-      adminId: caller.uid,
-      adminEmail: caller.email,
-      action: actionCode,
-      targetType: "user",
-      targetId: targetUid,
-      targetLabel: targetEmail,
-      result: "success",
-      details: reason
-        ? `${isLocked ? "Khóa" : "Mở khóa"} tài khoản ${targetEmail}. Lý do: ${reason}`
-        : `${isLocked ? "Khóa" : "Mở khóa"} tài khoản ${targetEmail} (Đồng bộ Firebase Auth & Firestore).`,
-      source: "cloud_function",
-      createdAt: nowIso,
-    });
-
-    res.status(200).json({
-      success: true,
-      targetUid: targetUid,
-      status: status,
-      authDisabled: isLocked,
-      logId: logRef.id,
-      message: isLocked
-        ? `Đã khóa tài khoản ${targetEmail} trên Firebase Auth và Firestore.`
-        : `Đã mở khóa tài khoản ${targetEmail}.`,
-    });
-  } catch (error) {
-    functions.logger.error("Lỗi adminSetUserStatus:", error);
-    const code = error.statusCode || 500;
-    res.status(code).json({
-      error: error.message || "Không thể cập nhật trạng thái tài khoản.",
-    });
-  }
+  return adminHandlers.adminSetUserStatus(req, res);
 });
 
 /**
- * 5. Endpoint Cấp / Thu hồi quyền Admin (Custom Claims + Firestore + Audit Log)
+ * 5. Endpoint Cấp / Thu hồi quyền Admin (Custom Claims + Firestore + Revoke Token + Audit Log)
  * POST /adminSetUserRole
  * Body: { targetUid: string, role: 'user' | 'admin' }
  */
@@ -473,39 +400,12 @@ exports.adminSetUserRole = functions.https.onRequest(async (req, res) => {
 });
 
 /**
- * 6. Endpoint lấy danh sách người dùng dành cho Admin
+ * 6. Endpoint lấy danh sách người dùng dành cho Admin (Zero-Knowledge: chỉ trả 7 trường phi tài chính)
  * GET/POST /adminListUsers
  */
 exports.adminListUsers = functions.https.onRequest(async (req, res) => {
   if (applyAdminCors(req, res)) return;
-
-  try {
-    await verifyAdminCaller(req);
-    const snap = await db.collection("users").get();
-    const users = snap.docs.map((doc) => {
-      const d = doc.data();
-      return {
-        uid: doc.id,
-        name: d.name || "",
-        email: d.email || "",
-        role: d.role || "user",
-        status: d.status || "active",
-        occupation: d.occupation || null,
-        createdAt: d.createdAt || null,
-      };
-    });
-
-    res.status(200).json({
-      success: true,
-      users: users,
-    });
-  } catch (error) {
-    functions.logger.error("Lỗi adminListUsers:", error);
-    const code = error.statusCode || 500;
-    res.status(code).json({
-      error: error.message || "Không thể lấy danh sách tài khoản.",
-    });
-  }
+  return adminHandlers.adminListUsers(req, res);
 });
 
 /**

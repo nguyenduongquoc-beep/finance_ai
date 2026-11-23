@@ -1,10 +1,13 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
 import '../../models/admin_audit_log_model.dart';
 import '../../models/monthly_financial_plan.dart';
+import '../../models/support_ticket_model.dart';
 import '../../models/user_model.dart';
 import '../../services/firestore_service.dart';
+import '../../services/support_service.dart';
 import '../../utils/constants.dart';
 import 'admin_http_helper.dart';
 
@@ -126,10 +129,14 @@ class AdminWebService {
               ? 'http://$_firebaseEmulatorHost:$_functionsEmulatorPort/$_firebaseProjectId/us-central1'
               : 'https://us-central1-finance-ai-app-6df28.cloudfunctions.net');
 
+  static const bool defaultUseCloudFunctions =
+      _useFirebaseEmulator || _envCloudFunctionsBaseUrl != '';
+
   final FirestoreService _firestoreService;
   final FirebaseAuth? _firebaseAuth;
   final http.Client? _httpClient;
   final AdminCloudFunctionCaller? _customCloudCaller;
+  final bool useCloudFunctions;
   final String cloudFunctionsBaseUrl;
 
   AdminWebService({
@@ -137,28 +144,61 @@ class AdminWebService {
     FirebaseAuth? firebaseAuth,
     http.Client? httpClient,
     AdminCloudFunctionCaller? cloudCaller,
+    bool? useCloudFunctions,
     this.cloudFunctionsBaseUrl = defaultCloudFunctionsBaseUrl,
   })  : _firestoreService = firestoreService ?? FirestoreService(),
         _firebaseAuth = firebaseAuth,
         _httpClient = httpClient,
-        _customCloudCaller = cloudCaller;
+        _customCloudCaller = cloudCaller,
+        useCloudFunctions = useCloudFunctions ??
+            (cloudCaller != null || defaultUseCloudFunctions);
 
   FirestoreService get firestoreService => _firestoreService;
 
+  FirebaseFirestore get _db => _firestoreService.firestoreInstance;
+
   FirebaseAuth get _auth => _firebaseAuth ?? FirebaseAuth.instance;
 
+  /// Ghi bản ghi Nhật ký Quản trị bất biến (append-only) cùng WriteBatch với thao tác chính (Firebase Spark).
+  void _appendAuditLogToBatch(
+    WriteBatch batch, {
+    required String adminUid,
+    required String adminEmail,
+    required String action,
+    required String targetType,
+    required String targetId,
+    required String targetLabel,
+    required String details,
+    required String createdAtIso,
+  }) {
+    final safeDetails =
+        details.length > 500 ? details.substring(0, 500) : details;
+    final logRef = _db.collection('admin_logs').doc();
+    batch.set(logRef, <String, dynamic>{
+      'adminId': adminUid,
+      'adminEmail': adminEmail,
+      'action': action,
+      'targetType': targetType,
+      'targetId': targetId,
+      'targetLabel': targetLabel,
+      'result': 'success',
+      'details': safeDetails,
+      'source': 'admin_web',
+      'createdAt': createdAtIso,
+    });
+  }
+
   /// Xác minh quyền Admin của người dùng hiện tại.
-  /// - Trong luồng thực tế (`tokenClaimsOverride == null`): LUÔN gọi `adminVerifySession`
-  ///   trên Backend Cloud Function để kiểm tra Firebase ID Token + trạng thái `users/{uid}`
-  ///   + tự động đồng bộ Custom Claim `{ admin: true }` nếu cần, sau đó làm mới Token tại Client.
-  ///   Nếu Backend trả về 401/403 hoặc không thể xác minh -> từ chối truy cập ngay lập tức.
+  /// - Trên chế độ Cloud Functions (Blaze / Emulator): gọi `adminVerifySession` và đồng bộ Custom Claim.
+  /// - Trên chế độ Firebase Spark (mặc định): đọc trực tiếp `users/{uid}` qua Firestore + Security Rules
+  ///   và bắt buộc `role == 'admin' && status == 'active'` (không gọi URL Cloud Functions 404).
   Future<AdminAuthCheckResult> verifyAdminAccess({
     String? uidOverride,
     Map<String, dynamic>? tokenClaimsOverride,
     bool verifyWithBackend = false,
   }) async {
     final bool shouldVerifyWithBackend =
-        verifyWithBackend || tokenClaimsOverride == null;
+        verifyWithBackend || (useCloudFunctions && tokenClaimsOverride == null);
 
     if (!shouldVerifyWithBackend) {
       final String? uid = uidOverride ?? _auth.currentUser?.uid;
@@ -169,9 +209,21 @@ class AdminWebService {
         );
       }
 
-      final hasCustomClaim = tokenClaimsOverride['admin'] == true;
-      final profile = await _firestoreService.getUserProfile(uid);
-      if (profile != null && profile.isLocked) {
+      final hasCustomClaim = tokenClaimsOverride?['admin'] == true;
+      final profile = await _firestoreService.getUserProfile(
+        uid,
+        includePrivateFinancial: false,
+      );
+      if (profile == null) {
+        return AdminAuthCheckResult(
+          isAuthorized: false,
+          hasAdminCustomClaim: hasCustomClaim,
+          hasAdminFirestoreRole: false,
+          errorMessage:
+              'Truy cập bị từ chối: Không tìm thấy hồ sơ quản trị viên hợp lệ.',
+        );
+      }
+      if (profile.isLocked) {
         return AdminAuthCheckResult(
           isAuthorized: false,
           isLocked: true,
@@ -183,13 +235,13 @@ class AdminWebService {
         );
       }
 
-      final hasFirestoreRole = profile?.isAdmin == true;
-      final isAuthorized = hasCustomClaim || hasFirestoreRole;
-      if (!isAuthorized) {
+      // Bắt buộc `users/{uid}.role == 'admin'` cùng `status == 'active'` (không cho claim cũ vượt qua khi đã hạ quyền)
+      final hasFirestoreRole = profile.isAdmin;
+      if (!hasFirestoreRole) {
         return AdminAuthCheckResult(
           isAuthorized: false,
           hasAdminCustomClaim: hasCustomClaim,
-          hasAdminFirestoreRole: hasFirestoreRole,
+          hasAdminFirestoreRole: false,
           userProfile: profile,
           errorMessage:
               'Truy cập bị từ chối: Tài khoản này là tài khoản Người dùng (User), không có quyền Quản trị viên (Admin).',
@@ -199,7 +251,7 @@ class AdminWebService {
       return AdminAuthCheckResult(
         isAuthorized: true,
         hasAdminCustomClaim: hasCustomClaim,
-        hasAdminFirestoreRole: hasFirestoreRole,
+        hasAdminFirestoreRole: true,
         userProfile: profile,
       );
     }
@@ -256,7 +308,9 @@ class AdminWebService {
         userProfile: profile,
       );
     } on AdminCloudCallException catch (e) {
-      if (e.kind == AdminCloudErrorKind.network && !verifyWithBackend) {
+      if ((e.kind == AdminCloudErrorKind.network ||
+              e.kind == AdminCloudErrorKind.notFound) &&
+          !verifyWithBackend) {
         final String? uid = uidOverride ?? currentUser?.uid;
         if (uid != null && uid.isNotEmpty) {
           final profile = await _firestoreService.getUserProfile(uid);
@@ -393,10 +447,13 @@ class AdminWebService {
     return response.requireSuccessData();
   }
 
-  /// Lấy danh sách người dùng qua Backend `adminListUsers`
+  /// Lấy danh sách người dùng (chỉ giữ 7 trường phi tài chính).
+  /// - Trên chế độ Cloud Functions (Blaze / Emulator): gọi `adminListUsers` (Zero-Knowledge ở tầng mạng).
+  /// - Trên chế độ Firebase Spark (mặc định): đọc trực tiếp Firestore qua `getUsersDirectorySanitizedForAdmin`.
   Future<List<AppUser>> listUsersViaBackend({
     String? adminUid,
     Map<String, dynamic>? tokenClaimsOverride,
+    bool allowFirestoreFallback = true,
   }) async {
     if (adminUid != null && adminUid.isNotEmpty) {
       await _requireActiveAdmin(
@@ -404,20 +461,43 @@ class AdminWebService {
         tokenClaimsOverride: tokenClaimsOverride,
       );
     }
-    final data = await _invokeAdminCloudFunction(
-      'adminListUsers',
-      const <String, dynamic>{},
-      method: 'GET',
-    );
-    final rawUsers = data['users'] as List<dynamic>? ?? const [];
-    return rawUsers
-        .whereType<Map>()
-        .map((m) {
-          final map = Map<String, dynamic>.from(m);
-          final uid = (map['uid'] ?? '').toString();
-          return AppUser.fromMap(map, uid);
-        })
-        .toList();
+    if (!useCloudFunctions) {
+      return _firestoreService.getUsersDirectorySanitizedForAdmin();
+    }
+    try {
+      final data = await _invokeAdminCloudFunction(
+        'adminListUsers',
+        const <String, dynamic>{},
+        method: 'GET',
+      );
+      final rawUsers = data['users'] as List<dynamic>? ?? const [];
+      final users = rawUsers
+          .whereType<Map>()
+          .map((m) {
+            final map = Map<String, dynamic>.from(m);
+            final uid = (map['uid'] ?? '').toString();
+            return AppUser.fromMap(map, uid);
+          })
+          .toList();
+      users.sort((a, b) => b.createdAt.compareTo(a.createdAt));
+      return users;
+    } on AdminCloudCallException catch (e) {
+      final isUnavailableEndpoint = e.kind == AdminCloudErrorKind.network ||
+          e.kind == AdminCloudErrorKind.notFound;
+      if (allowFirestoreFallback && isUnavailableEndpoint) {
+        try {
+          return await _firestoreService.getUsersDirectorySanitizedForAdmin();
+        } catch (_) {
+          throw AdminCloudCallException(
+            statusCode: e.statusCode,
+            kind: e.kind,
+            message:
+                'Không thể gọi Cloud Function adminListUsers (chưa deploy trên Firebase hoặc chưa bật Functions Emulator) và Firestore Rules đang khóa đọc trực tiếp collection users.',
+          );
+        }
+      }
+      rethrow;
+    }
   }
 
   /// Lấy thống kê Dashboard qua Backend `adminGetDashboardStats`
@@ -441,8 +521,32 @@ class AdminWebService {
         : data;
   }
 
-  /// Khóa hoặc mở khóa tài khoản người dùng qua Cloud Function `adminSetUserStatus`
-  /// (Backend tự cập nhật Auth, Firestore và ghi Audit Log nguyên tử; Client không tự ghi `admin_logs`).
+  /// Stream danh sách người dùng có phân trang theo lô (`limit`), thuần Firebase Spark & Zero-Knowledge.
+  Stream<List<AppUser>> streamUsersDirectoryForAdmin({int limit = 25}) {
+    return _firestoreService.streamUsersDirectoryForAdmin(limit: limit);
+  }
+
+  /// Lấy tối đa [limit] yêu cầu hỗ trợ gần nhất của một User cụ thể (Khối 2 - Hồ sơ vận hành).
+  Future<List<SupportTicket>> fetchUserSupportTickets(
+    String targetUid, {
+    int limit = 10,
+  }) {
+    return SupportService(firestore: _db)
+        .fetchUserTicketsForAdmin(targetUid, limit: limit);
+  }
+
+  /// Lấy tối đa [limit] bản ghi lịch sử tác động quản trị của một User cụ thể (Khối 3 - Hồ sơ vận hành).
+  Future<List<AdminAuditLog>> fetchUserAdminLogs(
+    String targetUid, {
+    int limit = 10,
+  }) {
+    return _firestoreService.fetchAuditLogsForTarget(targetUid, limit: limit);
+  }
+
+  /// Khóa hoặc mở khóa tài khoản User thường 100% thuần Firebase Spark qua 1 `WriteBatch` nguyên tử:
+  /// - Chặn tuyệt đối tự khóa chính mình và chặn khóa/mở khóa mọi tài khoản có `role == 'admin'`.
+  /// - Cập nhật `users/{targetUid}` (`status`, `lockReason`, `lockedAt`, `lockedBy`, `updatedAt`).
+  /// - Ghi đồng thời 1 bản ghi bất biến (`LOCK_USER` / `UNLOCK_USER`) vào `admin_logs`.
   Future<void> setUserAccountStatus({
     required String adminUid,
     required String adminEmail,
@@ -456,84 +560,57 @@ class AdminWebService {
         'Quản trị viên không thể tự khóa hoặc thay đổi trạng thái của chính mình.',
       );
     }
+    if (targetUser.isAdmin) {
+      throw const AdminPermissionException(
+        'Không thể khóa hoặc mở khóa tài khoản Quản trị viên khác từ cổng Web Admin.',
+      );
+    }
 
     await _requireActiveAdmin(
       adminUid,
       tokenClaimsOverride: tokenClaimsOverride,
     );
+
     final nextStatus = lockAccount ? 'locked' : 'active';
-
-    await _invokeAdminCloudFunction(
-      'adminSetUserStatus',
-      {
-        'targetUid': targetUser.uid,
-        'status': nextStatus,
-        if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
-      },
-    );
-  }
-
-  /// Cấp hoặc thu hồi quyền Admin cho tài khoản qua Cloud Function `adminSetUserRole`
-  Future<void> setUserAccountRole({
-    required String adminUid,
-    required String adminEmail,
-    required AppUser targetUser,
-    required String nextRole,
-    Map<String, dynamic>? tokenClaimsOverride,
-  }) async {
-    if (adminUid == targetUser.uid && nextRole != 'admin') {
+    final rawReason = (reason ?? '').trim();
+    if (lockAccount && rawReason.isEmpty) {
       throw const AdminPermissionException(
-        'Quản trị viên không thể tự thu hồi quyền Admin của chính mình.',
+        'Vui lòng chọn hoặc nhập lý do khóa tài khoản.',
       );
     }
-    if (nextRole != 'user' && nextRole != 'admin') {
-      throw const AdminPermissionException('Vai trò không hợp lệ.');
-    }
+    final safeReason =
+        rawReason.length > 350 ? rawReason.substring(0, 350) : rawReason;
+    final actorLabel =
+        adminEmail.trim().isNotEmpty ? adminEmail.trim() : adminUid;
+    final nowIso = DateTime.now().toUtc().toIso8601String();
+    final targetLabel =
+        targetUser.email.isNotEmpty ? targetUser.email : targetUser.uid;
 
-    await _requireActiveAdmin(
-      adminUid,
-      tokenClaimsOverride: tokenClaimsOverride,
+    final batch = _db.batch();
+    batch.update(_db.collection('users').doc(targetUser.uid), <String, dynamic>{
+      'status': nextStatus,
+      'lockReason': lockAccount ? safeReason : null,
+      'lockedAt': lockAccount ? FieldValue.serverTimestamp() : null,
+      'lockedBy': lockAccount ? actorLabel : null,
+      'updatedAt': nowIso,
+    });
+    _appendAuditLogToBatch(
+      batch,
+      adminUid: adminUid,
+      adminEmail: actorLabel,
+      action: lockAccount ? 'LOCK_USER' : 'UNLOCK_USER',
+      targetType: 'user',
+      targetId: targetUser.uid,
+      targetLabel: targetLabel,
+      details: safeReason.isNotEmpty
+          ? '${lockAccount ? 'Khóa' : 'Mở khóa'} tài khoản $targetLabel. Lý do: $safeReason'
+          : '${lockAccount ? 'Khóa' : 'Mở khóa'} tài khoản $targetLabel.',
+      createdAtIso: nowIso,
     );
-
-    await _invokeAdminCloudFunction(
-      'adminSetUserRole',
-      {
-        'targetUid': targetUser.uid,
-        'role': nextRole,
-      },
-    );
+    await batch.commit();
   }
 
-  /// Xóa vĩnh viễn tài khoản người dùng qua Cloud Function `adminDeleteUser`
-  /// (Xóa đồng thời trên Firebase Authentication và dọn dẹp sạch sẽ hồ sơ Firestore + dữ liệu liên quan + Audit Log)
-  Future<void> deleteUserAccount({
-    required String adminUid,
-    required String adminEmail,
-    required AppUser targetUser,
-    String? reason,
-    Map<String, dynamic>? tokenClaimsOverride,
-  }) async {
-    if (adminUid == targetUser.uid) {
-      throw const AdminPermissionException(
-        'Quản trị viên không thể tự xóa tài khoản của chính mình.',
-      );
-    }
-
-    await _requireActiveAdmin(
-      adminUid,
-      tokenClaimsOverride: tokenClaimsOverride,
-    );
-
-    await _invokeAdminCloudFunction(
-      'adminDeleteUser',
-      {
-        'targetUid': targetUser.uid,
-        if (reason != null && reason.trim().isNotEmpty) 'reason': reason.trim(),
-      },
-    );
-  }
-
-  /// Thêm mới hoặc chỉnh sửa danh mục mặc định hệ thống qua Cloud Function `adminManageSystemCategory`
+  /// Thêm mới hoặc chỉnh sửa danh mục mặc định hệ thống (hỗ trợ cả Spark Firestore WriteBatch và Cloud Function).
   Future<String> saveSystemCategory({
     required String adminUid,
     required String adminEmail,
@@ -545,6 +622,66 @@ class AdminWebService {
       adminUid,
       tokenClaimsOverride: tokenClaimsOverride,
     );
+
+    if (!useCloudFunctions) {
+      final cleanName = template.name.trim();
+      if (cleanName.isEmpty || cleanName.length > 80) {
+        throw const AdminPermissionException(
+          'Tên danh mục hệ thống phải từ 1 đến 80 ký tự.',
+        );
+      }
+      final type = template.type == 'income' ? 'income' : 'expense';
+      final icon = template.icon.trim().isNotEmpty
+          ? template.icon.trim()
+          : 'category';
+      final isEssential = type == 'expense' ? template.isEssential : false;
+      final nowUtc = DateTime.now().toUtc();
+      final nowIso = nowUtc.toIso8601String();
+
+      final col = _db.collection('system_categories');
+      final docRef = template.id.trim().isNotEmpty
+          ? col.doc(template.id.trim())
+          : col.doc();
+
+      String createdAtIso = (template.createdAt ?? nowUtc).toUtc().toIso8601String();
+      if (!isNew) {
+        final existingSnap = await docRef.get();
+        if (existingSnap.exists && existingSnap.data()?['createdAt'] is String) {
+          final existingCreated =
+              (existingSnap.data()!['createdAt'] as String).trim();
+          if (existingCreated.isNotEmpty) {
+            createdAtIso = existingCreated;
+          }
+        }
+      }
+
+      final batch = _db.batch();
+      batch.set(docRef, <String, dynamic>{
+        'id': docRef.id,
+        'name': cleanName,
+        'type': type,
+        'icon': icon,
+        'color': template.color,
+        'isEssential': isEssential,
+        'isActive': template.isActive,
+        'createdAt': createdAtIso,
+        'updatedAt': nowIso,
+      });
+      _appendAuditLogToBatch(
+        batch,
+        adminUid: adminUid,
+        adminEmail: adminEmail,
+        action: isNew ? 'CREATE_SYSTEM_CATEGORY' : 'UPDATE_SYSTEM_CATEGORY',
+        targetType: 'system_category',
+        targetId: docRef.id,
+        targetLabel: cleanName,
+        details:
+            '${isNew ? 'Tạo mới' : 'Cập nhật'} danh mục hệ thống "$cleanName" ($type, ${isEssential ? 'Thiết yếu' : 'Linh hoạt'}).',
+        createdAtIso: nowIso,
+      );
+      await batch.commit();
+      return docRef.id;
+    }
 
     final res = await _invokeAdminCloudFunction(
       'adminManageSystemCategory',
@@ -567,7 +704,7 @@ class AdminWebService {
     return (res['categoryId'] ?? template.id).toString();
   }
 
-  /// Ẩn hoặc hiện danh mục hệ thống qua Cloud Function `adminManageSystemCategory`
+  /// Ẩn hoặc hiện danh mục hệ thống (hỗ trợ cả Spark Firestore WriteBatch và Cloud Function).
   Future<void> toggleSystemCategoryActive({
     required String adminUid,
     required String adminEmail,
@@ -580,6 +717,46 @@ class AdminWebService {
       tokenClaimsOverride: tokenClaimsOverride,
     );
 
+    if (!useCloudFunctions) {
+      final id = template.id.trim();
+      if (id.isEmpty) {
+        throw const AdminPermissionException('Thiếu mã danh mục hệ thống.');
+      }
+      final docRef = _db.collection('system_categories').doc(id);
+      final existingSnap = await docRef.get();
+      if (!existingSnap.exists) {
+        throw const AdminPermissionException(
+          'Không tìm thấy danh mục hệ thống cần cập nhật.',
+        );
+      }
+      final nowIso = DateTime.now().toUtc().toIso8601String();
+      final label =
+          (existingSnap.data()?['name']?.toString().trim().isNotEmpty == true)
+              ? existingSnap.data()!['name'].toString().trim()
+              : template.name;
+
+      final batch = _db.batch();
+      batch.update(docRef, {
+        'isActive': isActive,
+        'updatedAt': nowIso,
+      });
+      _appendAuditLogToBatch(
+        batch,
+        adminUid: adminUid,
+        adminEmail: adminEmail,
+        action: isActive ? 'SHOW_SYSTEM_CATEGORY' : 'HIDE_SYSTEM_CATEGORY',
+        targetType: 'system_category',
+        targetId: id,
+        targetLabel: label,
+        details: isActive
+            ? 'Hiển thị lại danh mục mẫu "$label".'
+            : 'Ẩn danh mục mẫu "$label" khỏi gợi ý tạo mới.',
+        createdAtIso: nowIso,
+      );
+      await batch.commit();
+      return;
+    }
+
     await _invokeAdminCloudFunction(
       'adminManageSystemCategory',
       {
@@ -591,7 +768,7 @@ class AdminWebService {
     );
   }
 
-  /// Khởi tạo bộ danh mục mẫu chuẩn ban đầu qua Cloud Function `adminManageSystemCategory`
+  /// Khởi tạo bộ danh mục mẫu chuẩn ban đầu (hỗ trợ cả Spark Firestore WriteBatch và Cloud Function).
   Future<void> seedInitialSystemCategories({
     required String adminUid,
     required String adminEmail,
@@ -625,6 +802,42 @@ class AdminWebService {
         },
     ];
 
+    if (!useCloudFunctions) {
+      final nowIso = DateTime.now().toUtc().toIso8601String();
+      final col = _db.collection('system_categories');
+      final batch = _db.batch();
+      for (final item in seedItems) {
+        final itemId = (item['id'] ?? '').toString().trim();
+        final itemName = (item['name'] ?? '').toString().trim();
+        if (itemId.isEmpty || itemName.isEmpty) continue;
+        batch.set(col.doc(itemId), <String, dynamic>{
+          'id': itemId,
+          'name': itemName,
+          'type': item['type'] == 'income' ? 'income' : 'expense',
+          'icon': (item['icon'] ?? 'category').toString(),
+          'color': (item['color'] as num?)?.toInt() ?? 0xFF607D8B,
+          'isEssential': item['isEssential'] == true,
+          'isActive': true,
+          'createdAt': nowIso,
+          'updatedAt': nowIso,
+        });
+      }
+      _appendAuditLogToBatch(
+        batch,
+        adminUid: adminUid,
+        adminEmail: adminEmail,
+        action: 'SEED_SYSTEM_CATEGORIES',
+        targetType: 'system_category',
+        targetId: 'system_categories',
+        targetLabel: 'Bộ danh mục chuẩn (${seedItems.length} danh mục)',
+        details:
+            'Khởi tạo ${seedItems.length} danh mục mẫu mặc định cho hệ thống.',
+        createdAtIso: nowIso,
+      );
+      await batch.commit();
+      return;
+    }
+
     await _invokeAdminCloudFunction(
       'adminManageSystemCategory',
       {
@@ -634,7 +847,7 @@ class AdminWebService {
     );
   }
 
-  /// Tạo mới hoặc chỉnh sửa thông báo hệ thống qua Cloud Function `adminManageAnnouncement`
+  /// Tạo mới hoặc chỉnh sửa thông báo hệ thống (hỗ trợ cả Spark Firestore WriteBatch và Cloud Function).
   Future<String> saveAnnouncement({
     required String adminUid,
     required String adminEmail,
@@ -646,6 +859,70 @@ class AdminWebService {
       adminUid,
       tokenClaimsOverride: tokenClaimsOverride,
     );
+
+    if (!useCloudFunctions) {
+      final cleanTitle = announcement.title.trim();
+      final cleanContent = announcement.content.trim();
+      if (cleanTitle.isEmpty ||
+          cleanTitle.length > 150 ||
+          cleanContent.isEmpty ||
+          cleanContent.length > 1000) {
+        throw const AdminPermissionException(
+          'Tiêu đề (1-150 ký tự) hoặc nội dung (1-1000 ký tự) thông báo không hợp lệ.',
+        );
+      }
+
+      final nowUtc = DateTime.now().toUtc();
+      final nowIso = nowUtc.toIso8601String();
+      final actorLabel = adminEmail.trim().isNotEmpty ? adminEmail.trim() : adminUid;
+      final col = _db.collection('system_announcements');
+      final docRef = announcement.id.trim().isNotEmpty
+          ? col.doc(announcement.id.trim())
+          : col.doc();
+
+      String preservedCreatedBy = actorLabel;
+      String preservedCreatedAt = announcement.createdAt.toUtc().toIso8601String();
+      if (!isNew || announcement.id.trim().isNotEmpty) {
+        final existingSnap = await docRef.get();
+        if (existingSnap.exists) {
+          final existingData = existingSnap.data() ?? const <String, dynamic>{};
+          final rawCreatedBy = existingData['createdBy'];
+          final rawCreatedAt = existingData['createdAt'];
+          if (rawCreatedBy is String && rawCreatedBy.isNotEmpty) {
+            preservedCreatedBy = rawCreatedBy;
+          }
+          if (rawCreatedAt is String && rawCreatedAt.isNotEmpty) {
+            preservedCreatedAt = rawCreatedAt;
+          }
+        }
+      }
+
+      final batch = _db.batch();
+      batch.set(docRef, <String, dynamic>{
+        'id': docRef.id,
+        'title': cleanTitle,
+        'content': cleanContent,
+        'isActive': announcement.isActive,
+        'createdBy': preservedCreatedBy,
+        'updatedBy': actorLabel,
+        'createdAt': preservedCreatedAt,
+        'updatedAt': nowIso,
+      });
+      _appendAuditLogToBatch(
+        batch,
+        adminUid: adminUid,
+        adminEmail: adminEmail,
+        action: isNew ? 'CREATE_ANNOUNCEMENT' : 'UPDATE_ANNOUNCEMENT',
+        targetType: 'system_announcement',
+        targetId: docRef.id,
+        targetLabel: cleanTitle,
+        details:
+            '${isNew ? 'Tạo thông báo hệ thống mới' : 'Cập nhật thông báo hệ thống'} "$cleanTitle".',
+        createdAtIso: nowIso,
+      );
+      await batch.commit();
+      return docRef.id;
+    }
 
     final res = await _invokeAdminCloudFunction(
       'adminManageAnnouncement',
@@ -667,7 +944,7 @@ class AdminWebService {
     return (res['announcementId'] ?? announcement.id).toString();
   }
 
-  /// Kích hoạt hoặc ngừng hiển thị thông báo hệ thống qua Cloud Function `adminManageAnnouncement`
+  /// Kích hoạt hoặc ngừng hiển thị thông báo hệ thống (hỗ trợ cả Spark Firestore WriteBatch và Cloud Function).
   Future<void> toggleAnnouncementActive({
     required String adminUid,
     required String adminEmail,
@@ -680,6 +957,48 @@ class AdminWebService {
       tokenClaimsOverride: tokenClaimsOverride,
     );
 
+    if (!useCloudFunctions) {
+      final id = announcement.id.trim();
+      if (id.isEmpty) {
+        throw const AdminPermissionException('Thiếu mã thông báo hệ thống.');
+      }
+      final docRef = _db.collection('system_announcements').doc(id);
+      final existingSnap = await docRef.get();
+      if (!existingSnap.exists) {
+        throw const AdminPermissionException(
+          'Không tìm thấy thông báo hệ thống cần cập nhật.',
+        );
+      }
+      final nowIso = DateTime.now().toUtc().toIso8601String();
+      final actorLabel = adminEmail.trim().isNotEmpty ? adminEmail.trim() : adminUid;
+      final label =
+          (existingSnap.data()?['title']?.toString().trim().isNotEmpty == true)
+              ? existingSnap.data()!['title'].toString().trim()
+              : announcement.title;
+
+      final batch = _db.batch();
+      batch.update(docRef, {
+        'isActive': isActive,
+        'updatedBy': actorLabel,
+        'updatedAt': nowIso,
+      });
+      _appendAuditLogToBatch(
+        batch,
+        adminUid: adminUid,
+        adminEmail: adminEmail,
+        action: isActive ? 'ACTIVATE_ANNOUNCEMENT' : 'DEACTIVATE_ANNOUNCEMENT',
+        targetType: 'system_announcement',
+        targetId: id,
+        targetLabel: label,
+        details: isActive
+            ? 'Kích hoạt hiển thị thông báo "$label".'
+            : 'Ngừng hiển thị thông báo "$label".',
+        createdAtIso: nowIso,
+      );
+      await batch.commit();
+      return;
+    }
+
     await _invokeAdminCloudFunction(
       'adminManageAnnouncement',
       {
@@ -691,7 +1010,7 @@ class AdminWebService {
     );
   }
 
-  /// Xóa thông báo hệ thống qua Cloud Function `adminManageAnnouncement`
+  /// Xóa thông báo hệ thống (hỗ trợ cả Spark Firestore WriteBatch và Cloud Function).
   Future<void> deleteAnnouncement({
     required String adminUid,
     required String adminEmail,
@@ -702,6 +1021,41 @@ class AdminWebService {
       adminUid,
       tokenClaimsOverride: tokenClaimsOverride,
     );
+
+    if (!useCloudFunctions) {
+      final id = announcement.id.trim();
+      if (id.isEmpty) {
+        throw const AdminPermissionException('Thiếu mã thông báo hệ thống.');
+      }
+      final docRef = _db.collection('system_announcements').doc(id);
+      final existingSnap = await docRef.get();
+      if (!existingSnap.exists) {
+        throw const AdminPermissionException(
+          'Không tìm thấy thông báo hệ thống cần xóa.',
+        );
+      }
+      final nowIso = DateTime.now().toUtc().toIso8601String();
+      final label =
+          (existingSnap.data()?['title']?.toString().trim().isNotEmpty == true)
+              ? existingSnap.data()!['title'].toString().trim()
+              : announcement.title;
+
+      final batch = _db.batch();
+      batch.delete(docRef);
+      _appendAuditLogToBatch(
+        batch,
+        adminUid: adminUid,
+        adminEmail: adminEmail,
+        action: 'DELETE_ANNOUNCEMENT',
+        targetType: 'system_announcement',
+        targetId: id,
+        targetLabel: label,
+        details: 'Đã xóa thông báo hệ thống "$label".',
+        createdAtIso: nowIso,
+      );
+      await batch.commit();
+      return;
+    }
 
     await _invokeAdminCloudFunction(
       'adminManageAnnouncement',
